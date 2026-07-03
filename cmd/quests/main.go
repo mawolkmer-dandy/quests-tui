@@ -16,7 +16,12 @@ import (
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
 
+// version is stamped at build time via -ldflags "-X main.version=…" (see the
+// Makefile and the Homebrew formula). It stays "dev" for a plain `go build`.
+var version = "dev"
+
 func main() {
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	initConfig := flag.Bool("init-config", false, "write a fresh ~/.config/quests/config.toml with every setting at its default (commented), then exit")
 	force := flag.Bool("force", false, "with --init-config, overwrite an existing config file")
 	importThings := flag.Bool("import-things", false, "import a local Things 3 database into Quests, then exit")
@@ -24,10 +29,15 @@ func main() {
 	dryRun := flag.Bool("dry-run", false, "with --import-things, preview the import without writing anything")
 	replace := flag.Bool("replace", false, "with --import-things, replace existing quests instead of appending (previous data is backed up first)")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "quests — a keyboard-and-mouse quest journal TUI\n\nUsage:\n  quests                 launch the app\n  quests --init-config   write the default config file\n  quests --import-things import a local Things 3 database\n\nFlags:")
+		fmt.Fprintln(os.Stderr, "quests — a keyboard-and-mouse quest journal TUI\n\nUsage:\n  quests                 launch the app\n  quests --version       print the version\n  quests --init-config   write the default config file\n  quests --import-things import a local Things 3 database\n\nFlags:")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("quests", version)
+		return
+	}
 
 	dir, err := store.DefaultDir()
 	if err != nil {
