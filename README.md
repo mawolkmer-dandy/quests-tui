@@ -117,6 +117,39 @@ make install       # installs `quests` into your GOBIN
 make build && ./quests
 ```
 
+## Quick entry — capture from anywhere
+
+`quests add` files a new quest without opening the UI, so a global hotkey
+(macOS Shortcuts, Raycast, Alfred…) can capture a thought in a second:
+
+```sh
+quests add "Buy milk"                          # → the Questboard (inbox)
+quests add --to Homestead "Fix the roof"       # → a campaign (name match:
+                                               #   exact, else unique substring)
+quests add --to home --main --important "…"    # main quest, flagged priority
+echo "piped title" | quests add                # title can come from stdin
+quests campaigns                               # list campaign names (one per
+                                               #   line) to drive a picker
+```
+
+Captures never write `data.json` directly — they're spooled into
+`~/.config/quests/quick-add/`, so they can't race a running app. The running
+app ingests them live; if it's closed, the next launch picks them up. Nothing
+is lost either way.
+
+To wire a **macOS Shortcut** ("Quick Quest"):
+
+1. *Ask for Input* (Text) → the quest title.
+2. *(optional, to route to a campaign)* *Run Shell Script*
+   `~/go/bin/quests campaigns` → *Split Text* by New Lines → *Choose from List*.
+3. *Run Shell Script*:
+   `~/go/bin/quests add --to "$(Chosen Item)" "$(Provided Input)"`
+   (drop `--to …` to always file on the Questboard).
+4. Assign a keyboard shortcut to the Shortcut. Use the binary's full path
+   (`which quests`) since Shortcuts doesn't inherit your shell `PATH`.
+
+The same `quests add` backs a Raycast script command just as well.
+
 ## Configuration
 
 `~/.config/quests/config.toml` — a fully commented sample with every default

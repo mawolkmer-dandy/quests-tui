@@ -1,0 +1,52 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "quests",
+  "title": "Quests",
+  "description": "Quick-capture quests into the Quests TUI",
+  "icon": "icon.png",
+  "author": "mawolkmer",
+  "categories": [
+    "Productivity"
+  ],
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "quick-add-quest",
+      "title": "Quick Add Quest",
+      "subtitle": "Quests",
+      "description": "Instantly capture a quest to the Questboard, no form",
+      "mode": "no-view",
+      "arguments": [
+        {
+          "name": "title",
+          "placeholder": "Quest title",
+          "type": "text",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "add-quest",
+      "title": "Add Quest",
+      "subtitle": "Quests",
+      "description": "Capture a new quest to the Questboard or a campaign",
+      "mode": "view"
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^1.80.0"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^1.0.11",
+    "@types/node": "20.8.10",
+    "@types/react": "^19.0.10",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.4.5"
+  },
+  "scripts": {
+    "build": "ray build -e dist",
+    "dev": "ray develop",
+    "lint": "ray lint"
+  }
+}
