@@ -72,6 +72,16 @@ Install line users get: `brew install mawolkmer-dandy/tap/quests`
    ```
    Keep a running `CHANGELOG.md` in the repo in sync if one exists.
 
+   **Always review the published release notes and fix if needed.** Immediately
+   after creating the release, read back what actually rendered and correct
+   anything wrong — never assume the submit was clean:
+   ```sh
+   gh release view vX.Y.Z --repo mawolkmer-dandy/quests-tui --json body -q '.body'
+   ```
+   Check for: a stray PGP signature block, truncated/garbled bullets, wrong
+   version, or empty notes. Fix in place with
+   `gh release edit vX.Y.Z --repo mawolkmer-dandy/quests-tui --notes-file -`.
+
    > **Write the changelog *before* the first push of the tag.** Never
    > re-annotate and force-push an already-published tag — that's a
    > destructive rewrite and is blocked. If notes are missing or wrong on a
