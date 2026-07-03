@@ -61,10 +61,14 @@ Install line users get: `brew install mawolkmer-dandy/tap/quests`
    git push origin vX.Y.Z
    ```
    Then publish it as a GitHub Release so the notes show up on the repo's
-   Releases page (reuse the exact tag message):
+   Releases page (reuse the tag message). **Use `contents:subject` +
+   `contents:body`, NOT `%(contents)`** — this repo signs tags, and
+   `%(contents)` appends the PGP signature block into the release notes (ugly,
+   though harmless — a signature is public, not a secret):
    ```sh
-   git tag -l --format='%(contents)' vX.Y.Z | gh release create vX.Y.Z \
-     --repo mawolkmer-dandy/quests-tui --title "vX.Y.Z" --notes-file -
+   git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' vX.Y.Z \
+     | gh release create vX.Y.Z --repo mawolkmer-dandy/quests-tui \
+       --title "vX.Y.Z" --notes-file -
    ```
    Keep a running `CHANGELOG.md` in the repo in sync if one exists.
 
