@@ -38,11 +38,42 @@ Install line users get: `brew install mawolkmer-dandy/tap/quests`
    cd ~/Repos/questlog && git add -A && git commit -m "…" && git push origin master
    ```
 
-2. **Tag — must be annotated.** This repo's git config rejects lightweight
-   tags (`git tag vX.Y.Z` fails with "no tag message?"). Always:
+2. **Write the changelog, then tag with it.** Users read these notes to know
+   what changed, so the tag message must be a real summary — never just
+   "Quests vX.Y.Z". First review what shipped since the previous tag:
    ```sh
-   git tag -a vX.Y.Z -m "Quests vX.Y.Z" && git push origin vX.Y.Z
+   PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null)   # previous release tag
+   git log --oneline "$PREV"..HEAD
    ```
+   Turn that into a short, user-facing changelog — 2–6 bullets in plain
+   language (what changed for *users*, not commit-by-commit), grouped as
+   Added / Changed / Fixed when it helps. Don't just paste commit subjects;
+   summarize. Then create an **annotated** tag whose message is the changelog
+   (this repo's git config rejects lightweight tags — bare `git tag vX.Y.Z`
+   fails with "no tag message?"):
+   ```sh
+   git tag -a vX.Y.Z -F - <<'EOF'
+   Quests vX.Y.Z
+
+   - <what changed, in user terms>
+   - <another change>
+   EOF
+   git push origin vX.Y.Z
+   ```
+   Then publish it as a GitHub Release so the notes show up on the repo's
+   Releases page (reuse the exact tag message):
+   ```sh
+   git tag -l --format='%(contents)' vX.Y.Z | gh release create vX.Y.Z \
+     --repo mawolkmer-dandy/quests-tui --title "vX.Y.Z" --notes-file -
+   ```
+   Keep a running `CHANGELOG.md` in the repo in sync if one exists.
+
+   > **Write the changelog *before* the first push of the tag.** Never
+   > re-annotate and force-push an already-published tag — that's a
+   > destructive rewrite and is blocked. If notes are missing or wrong on a
+   > tag that's already pushed, fix the **Release**, not the tag:
+   > `gh release edit vX.Y.Z --notes "…"` (or `gh release create` if no
+   > release exists yet).
 
 3. **Hash the tarball — only after the tag is pushed.** GitHub generates the
    tarball lazily; a `curl` before it exists hashes the 404 page (the giveaway
