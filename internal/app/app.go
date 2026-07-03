@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -10,8 +11,10 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/fsnotify/fsnotify"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
+	"github.com/mawolkmer-dandy/quests-tui/internal/quickadd"
 	"github.com/mawolkmer-dandy/quests-tui/internal/store"
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
@@ -109,9 +112,10 @@ func findRowIndex(rows []ui.Row, target cursorTarget) int {
 }
 
 type Model struct {
-	store  *store.Store
-	path   string
-	darkBg bool
+	store   *store.Store
+	path    string
+	darkBg  bool
+	watcher *fsnotify.Watcher // watches the quick-add spool for live ingestion (see quickadd_watch.go)
 
 	width, height int
 	scrollOffset  int
@@ -260,7 +264,9 @@ func (m *Model) SetDebug(on bool) {
 func (m *Model) Init() tea.Cmd {
 	// The splash ticker starts from the first WindowSizeMsg instead (see
 	// Update) so it doesn't burn frames before there's a size to render into.
-	return nil
+	// Start watching the quick-add spool so captures made elsewhere (CLI,
+	// Raycast) show up live without a relaunch.
+	return m.watchQuickAdd()
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -272,6 +278,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case quickAddMsg:
+		// A capture landed in the spool while we're running — ingest it and
+		// keep listening. Cursor is tracked by identity, so appending quests
+		// doesn't disturb it; the new row appears on the next render.
+		if m.watcher != nil {
+			if n := quickadd.Drain(filepath.Dir(m.path), m.store); n > 0 {
+				m.save()
+			}
+			return m, waitForQuickAdd(m.watcher)
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		// The splash's frame ticker only starts once we know the terminal
 		// size — starting it from Init() ticks in the dark until the first
