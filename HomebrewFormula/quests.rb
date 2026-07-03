@@ -20,8 +20,8 @@
 class Quests < Formula
   desc "Quest journal TUI — track personal work as quests inside campaigns"
   homepage "https://github.com/mawolkmer-dandy/quests-tui"
-  url "https://github.com/mawolkmer-dandy/quests-tui/archive/refs/tags/v1.0.1.tar.gz"
-  sha256 "633249a1691a60a5c9afdb37b1aa925a153e40bbceaa86843985acad7a7f3dc4"
+  url "https://github.com/mawolkmer-dandy/quests-tui/archive/refs/tags/v1.0.2.tar.gz"
+  sha256 "2dff7b0e2efcafc75a53134e12a9b8abe64619137f9196044c8b7c592e4eb07d"
   license "MIT"
   head "https://github.com/mawolkmer-dandy/quests-tui.git", branch: "master"
 
