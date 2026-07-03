@@ -1114,15 +1114,15 @@ func (m *Model) renderFocusContent() string {
 			confirming := isCursor && m.confirmDeleteID != "" && rowMatchesConfirmDelete(row, m.confirmDeleteID)
 			warning := m.warningText != "" && m.warningTarget.matches(row)
 			titleView := ""
-			if confirming {
-				titleView = ui.StyleMuted.Render(m.confirmDeleteHint(row))
-			} else if warning {
+			if warning {
 				titleView = ui.StyleMuted.Render(m.warningText)
 			} else if isCursor && m.editor != nil {
 				titleView = m.renderEditableStyled(m.editor, m.cursorTitleStyle(row))
 			}
 			hint := ""
-			if !confirming && !warning {
+			if confirming {
+				hint = "  " + ui.StyleImportant.Render(m.confirmDeleteHint(row))
+			} else if !warning {
 				hint = m.actionHint(row, isCursor)
 			}
 			line, _ := ui.RenderRow(row, m.store, titleView, isCursor, 80, hint)
@@ -1146,15 +1146,15 @@ func (m *Model) renderFocusContent() string {
 			confirming := isCursor && m.confirmDeleteID != "" && rowMatchesConfirmDelete(row, m.confirmDeleteID)
 			warning := m.warningText != "" && m.warningTarget.matches(row)
 			titleView := ""
-			if confirming {
-				titleView = ui.StyleMuted.Render(m.confirmDeleteHint(row))
-			} else if warning {
+			if warning {
 				titleView = ui.StyleMuted.Render(m.warningText)
 			} else if isCursor && m.editor != nil {
 				titleView = m.renderEditableStyled(m.editor, m.cursorTitleStyle(row))
 			}
 			hint := ""
-			if !confirming && !warning {
+			if confirming {
+				hint = "  " + ui.StyleImportant.Render(m.confirmDeleteHint(row))
+			} else if !warning {
 				hint = m.actionHint(row, isCursor)
 			}
 			line, _ := ui.RenderRow(row, m.store, titleView, isCursor, 80, hint)

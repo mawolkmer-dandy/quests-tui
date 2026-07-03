@@ -768,16 +768,19 @@ func (m *Model) View() string {
 		confirming := isCursor && m.confirmDeleteID != "" && rowMatchesConfirmDelete(row, m.confirmDeleteID)
 		warning := m.warningText != "" && m.warningTarget.matches(row)
 		titleView := ""
-		if confirming {
-			titleView = ui.StyleMuted.Render(m.confirmDeleteHint(row))
-		} else if warning {
+		if warning {
 			titleView = ui.StyleMuted.Render(m.warningText)
 		} else if isCursor && m.editor != nil {
 			titleView = m.renderEditableStyled(m.editor, m.cursorTitleStyle(row))
 		}
 		hint := ""
 		var hintParts []hintPart
-		if !confirming && !warning {
+		if confirming {
+			// Keep the name visible; the prompt takes over the right-hand
+			// hint slot (where open/collapse tips would be) so you can see
+			// exactly what you're about to delete.
+			hint = "  " + ui.StyleImportant.Render(m.confirmDeleteHint(row))
+		} else if !warning {
 			if !m.hideHoverTips && (isCursor || hoverIdx == i) {
 				hintParts = actionHintParts(row)
 			}
