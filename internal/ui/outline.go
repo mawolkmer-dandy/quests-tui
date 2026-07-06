@@ -101,22 +101,23 @@ func QuestGlyph(q *model.Quest) (string, lipgloss.Style) {
 // questPriority is a quest's sort tier within its list (lower sorts higher
 // up). With no toggles on, every quest is tier 2, so the list keeps the
 // manual order you arrange it in. The config toggles carve out tiers:
-// medium/high priority quests to the top, then main quests, then everyone
-// else, then low-priority quests, with done quests sunk below all of them.
-// It's a flat tier scheme on purpose — "priority" is one group regardless of
-// main/side, so within a tier ordering stays manual (see SortBucket, moveQuest).
+// high then medium priority quests to the top, then main quests, then
+// everyone else, then low-priority quests, with done quests sunk below all of
+// them. Within a tier ordering stays manual (see SortBucket, moveQuest).
 func questPriority(q model.Quest) int {
 	switch {
 	case DoneToBottom && q.Status == model.StatusDone:
-		return 4
+		return 5
 	case LowPriorityToBottom && q.Priority == model.PriorityLow:
-		return 3
-	case MovePriorityToTop && q.Priority.FloatsToTop():
+		return 4
+	case MovePriorityToTop && q.Priority == model.PriorityHigh:
 		return 0
-	case MoveMainToTop && q.Type == model.QuestTypeMain:
+	case MovePriorityToTop && q.Priority == model.PriorityMedium:
 		return 1
-	default:
+	case MoveMainToTop && q.Type == model.QuestTypeMain:
 		return 2
+	default:
+		return 3
 	}
 }
 

@@ -39,11 +39,6 @@ const (
 	PriorityLow    Priority = "low"
 )
 
-// FloatsToTop reports whether this priority should sort above normal quests.
-func (p Priority) FloatsToTop() bool {
-	return p == PriorityMedium || p == PriorityHigh
-}
-
 type BodyLineKind string
 
 const (
