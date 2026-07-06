@@ -26,6 +26,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, Keys.ToggleHints):
 		m.hideHoverTips = !m.hideHoverTips
 		return nil
+	case key.Matches(msg, Keys.Undo):
+		m.undo()
+		return nil
 	case key.Matches(msg, Keys.Up):
 		m.moveCursor(-1)
 		return nil
@@ -87,7 +90,7 @@ func (m *Model) handleRowKey(msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, Keys.ToggleDone):
 		return m.toggleDone()
 	case key.Matches(msg, Keys.ToggleImportant):
-		return m.toggleImportant()
+		return m.cyclePriority()
 	case key.Matches(msg, Keys.ToggleVault):
 		m.toggleVault()
 		return nil
@@ -586,10 +589,25 @@ func (m *Model) toggleType() {
 	m.save()
 }
 
+// nextPriority is the cycle the priority key steps through:
+// none → medium → high → low → none.
+func nextPriority(p model.Priority) model.Priority {
+	switch p {
+	case model.PriorityNone:
+		return model.PriorityMedium
+	case model.PriorityMedium:
+		return model.PriorityHigh
+	case model.PriorityHigh:
+		return model.PriorityLow
+	default:
+		return model.PriorityNone
+	}
+}
+
 // toggleImportant flags/unflags a quest as priority work (an orthogonal
 // axis from type/status, so it applies on the Questboard too). Blocked in
 // the read-only Vault, matching the other toggles.
-func (m *Model) toggleImportant() tea.Cmd {
+func (m *Model) cyclePriority() tea.Cmd {
 	if m.cursor.kind != ui.RowQuest {
 		return nil
 	}
@@ -601,7 +619,7 @@ func (m *Model) toggleImportant() tea.Cmd {
 		return m.showWarning(m.cursor, "vault is read-only")
 	}
 	before := ui.SortBucket(*q)
-	q.Important = !q.Important
+	q.Priority = nextPriority(q.Priority)
 	q.UpdatedAt = time.Now()
 	m.reslotIfTierChanged(q.ID, before)
 	m.save()
@@ -617,7 +635,10 @@ func (m *Model) openProjectPicker() {
 		return
 	}
 	m.commitEdit()
-	m.pushModal(projectPickerModal(m.store, q.ID, q.ProjectID))
+	srcIdx := findRowIndex(m.currentRowScope(), m.cursor)
+	mod := projectPickerModal(m.store, q.ID, q.ProjectID)
+	mod.SourceRowIdx = srcIdx
+	m.pushModal(mod)
 }
 
 // openConfirmDelete arms the same lightweight inline y/n prompt for whatever

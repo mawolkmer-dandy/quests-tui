@@ -64,6 +64,14 @@ func Load(path string) (*Store, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
+	// Migrate the old boolean `important` flag to the Priority scale (High).
+	// The vestigial field is cleared so it drops out on the next save.
+	for i := range s.Quests {
+		if s.Quests[i].Important && s.Quests[i].Priority == model.PriorityNone {
+			s.Quests[i].Priority = model.PriorityHigh
+		}
+		s.Quests[i].Important = false
+	}
 	return &s, nil
 }
 
@@ -134,6 +142,25 @@ func Save(path string, s *Store) error {
 	}
 
 	return os.Rename(tmpPath, path)
+}
+
+// Snapshot serializes the store to JSON bytes for the undo stack. Errors are
+// swallowed (a store that won't marshal can't have been loaded), returning nil.
+func (s *Store) Snapshot() []byte {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// RestoreSnapshot rebuilds a store from Snapshot bytes.
+func RestoreSnapshot(b []byte) (*Store, error) {
+	var s Store
+	if err := json.Unmarshal(b, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
 }
 
 func seed() *Store {

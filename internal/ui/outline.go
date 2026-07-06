@@ -109,12 +109,27 @@ func questPriority(q model.Quest) int {
 	switch {
 	case DoneToBottom && q.Status == model.StatusDone:
 		return 3
-	case MovePriorityToTop && q.Important:
+	case MovePriorityToTop && q.Priority.FloatsToTop():
 		return 0
 	case MoveMainToTop && q.Type == model.QuestTypeMain:
 		return 1
 	default:
 		return 2
+	}
+}
+
+// priorityIndicator renders the 4-col slot left of a quest's glyph for its
+// priority level, blank when none — kept a fixed width so glyphs stay aligned.
+func priorityIndicator(p model.Priority) string {
+	switch p {
+	case model.PriorityMedium:
+		return "  " + StylePriorityMedium.Render(GlyphImportant) + " "
+	case model.PriorityHigh:
+		return "  " + StyleImportant.Render(GlyphImportant) + " "
+	case model.PriorityLow:
+		return "  " + StyleMuted.Render(GlyphPriorityLow) + " "
+	default:
+		return "    "
 	}
 }
 
@@ -391,14 +406,10 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor bool, width i
 		if done, total := q.ObjectiveProgress(); total > 0 {
 			progress = StyleMuted.Render(fmt.Sprintf(" %d/%d", done, total))
 		}
-		// The 4-col slot before the glyph holds the priority arrow when the
-		// quest is flagged important, else stays blank — either way 4 wide,
-		// so glyphs stay column-aligned across the list.
-		importIndicator := "    "
-		if q.Important {
-			importIndicator = "  " + StyleImportant.Render(GlyphImportant) + " "
-		}
-		return withHint(fmt.Sprintf("%s%s%s%s %s%s%s", cursorMark, nestIndent, importIndicator, iconView, title, tag, progress)), hintX
+		// The 4-col slot before the glyph holds the priority arrow (up for
+		// medium/high, a muted down-arrow for low), else stays blank — either
+		// way 4 wide, so glyphs stay column-aligned across the list.
+		return withHint(fmt.Sprintf("%s%s%s%s %s%s%s", cursorMark, nestIndent, priorityIndicator(q.Priority), iconView, title, tag, progress)), hintX
 
 	case RowSection:
 		label, count := sectionInfo(s, row.Section)

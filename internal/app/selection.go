@@ -243,10 +243,20 @@ func (m *Model) applyBodySelectionKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	}
 
 	if m.multilineSelActive() {
-		// Copy-only: any other key just drops the cross-line selection and
-		// then behaves normally — no delete-across-lines.
-		m.clearSelection()
-		return false, nil
+		switch {
+		case msg.Type == tea.KeyBackspace, msg.Type == tea.KeyDelete:
+			// Delete the whole cross-line selection, not a single char.
+			m.deleteBodySelection()
+			return true, nil
+		case isTypingKey(msg):
+			// Replace the selection: collapse it, then let the key insert.
+			m.deleteBodySelection()
+			return false, nil
+		default:
+			// Any other key (navigation etc.) just drops the selection.
+			m.clearSelection()
+			return false, nil
+		}
 	}
 	return m.applySelectionKey(&mod.BodyEditor, msg)
 }
@@ -326,6 +336,36 @@ func (m *Model) bodyLineSelRange(i, lineLen int) (lo, hi int, ok bool) {
 		hi = clampInt(eC, 0, lineLen)
 	}
 	return lo, hi, true
+}
+
+// deleteBodySelection removes the active cross-line selection: line sL keeps
+// its text up to sC, line eL's text from eC is appended onto it, the lines
+// between collapse away, and the caret lands at the join on line sL.
+func (m *Model) deleteBodySelection() {
+	mod := m.modal
+	body := m.currentBody()
+	if body == nil || !m.multilineSelActive() {
+		return
+	}
+	sL, sC, eL, eC := m.bodySelEndpoints()
+	sL = clampInt(sL, 0, len(*body)-1)
+	eL = clampInt(eL, 0, len(*body)-1)
+
+	startText, endText := (*body)[sL].Text, (*body)[eL].Text
+	if sL == mod.BodyCursor {
+		startText = mod.BodyEditor.Value()
+	}
+	if eL == mod.BodyCursor {
+		endText = mod.BodyEditor.Value()
+	}
+	sr, er := []rune(startText), []rune(endText)
+	sC = clampInt(sC, 0, len(sr))
+	eC = clampInt(eC, 0, len(er))
+
+	(*body)[sL].Text = string(sr[:sC]) + string(er[eC:])
+	*body = append((*body)[:sL+1], (*body)[eL+1:]...)
+	m.seedBodyEditor(sL, sC) // also clears the selection (newBodyEditor)
+	m.touchBodyOwner()
 }
 
 // copyBodySelection copies the current focus-view selection — single-line

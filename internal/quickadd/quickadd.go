@@ -133,13 +133,17 @@ func (e Entry) toQuest() model.Quest {
 			body = append(body, model.BodyLine{ID: store.NewID(), Text: line})
 		}
 	}
+	priority := model.PriorityNone
+	if e.Important {
+		priority = model.PriorityHigh
+	}
 	return model.Quest{
 		ID:        store.NewID(),
 		Title:     e.Title,
 		Type:      t,
 		Status:    model.StatusOpen,
 		ProjectID: e.ProjectID,
-		Important: e.Important,
+		Priority:  priority,
 		Body:      body,
 		CreatedAt: created,
 		UpdatedAt: created,

@@ -26,6 +26,24 @@ const (
 	StatusDone   QuestStatus = "done"
 )
 
+// Priority is an optional emphasis on a quest, orthogonal to type/status.
+// Medium and High float to the top (when priority_to_top is on); Low is a
+// deprioritization marker (a muted down-arrow) and doesn't float. Cycled with
+// the priority key: none → medium → high → low → none.
+type Priority string
+
+const (
+	PriorityNone   Priority = ""
+	PriorityMedium Priority = "medium"
+	PriorityHigh   Priority = "high"
+	PriorityLow    Priority = "low"
+)
+
+// FloatsToTop reports whether this priority should sort above normal quests.
+func (p Priority) FloatsToTop() bool {
+	return p == PriorityMedium || p == PriorityHigh
+}
+
 type BodyLineKind string
 
 const (
@@ -65,7 +83,8 @@ type Quest struct {
 	Type        QuestType   `json:"type"`
 	Status      QuestStatus `json:"status"`
 	Vaulted     bool        `json:"vaulted"`
-	Important   bool        `json:"important"` // flagged as priority work; shown with a left arrow, orthogonal to type/status
+	Priority    Priority    `json:"priority,omitempty"`  // optional emphasis, shown with a left arrow; orthogonal to type/status
+	Important   bool        `json:"important,omitempty"` // deprecated: migrated to Priority=High on load
 	ProjectID   string      `json:"projectId"`
 	Body        []BodyLine  `json:"body"`
 	CreatedAt   time.Time   `json:"createdAt"`

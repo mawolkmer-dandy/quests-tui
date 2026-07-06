@@ -25,7 +25,8 @@ var (
 	GlyphNoticeMain = "!" // Questboard notice — main quest available
 	GlyphNoticeSide = "?" // Questboard notice — side quest available
 
-	GlyphImportant = "↑" // priority marker, shown left of a flagged quest
+	GlyphImportant   = "↑" // medium/high priority marker, shown left of a quest
+	GlyphPriorityLow = "↓" // low-priority (deprioritized) marker
 
 	GlyphExpanded  = "▾"
 	GlyphCollapsed = "▸"
@@ -67,19 +68,21 @@ func setIf(dst *string, v string) {
 // color to convey meaning) use an AdaptiveColor pair (Catppuccin Mocha for
 // dark terminals, Latte for light).
 var (
-	ColorAccent    = lipgloss.AdaptiveColor{Light: "#DF8E1D", Dark: "#E2B714"}
-	ColorSide      = lipgloss.AdaptiveColor{Light: "#1E66F5", Dark: "#89B4FA"}
-	ColorHeading   = lipgloss.AdaptiveColor{Light: "#40A02B", Dark: "#A6E3A1"}
-	ColorImportant = lipgloss.AdaptiveColor{Light: "#D20F39", Dark: "#F38BA8"}
-	ColorSelected  = lipgloss.AdaptiveColor{Light: "#CCD0DA", Dark: "#313244"}
+	ColorAccent         = lipgloss.AdaptiveColor{Light: "#DF8E1D", Dark: "#E2B714"}
+	ColorSide           = lipgloss.AdaptiveColor{Light: "#1E66F5", Dark: "#89B4FA"}
+	ColorHeading        = lipgloss.AdaptiveColor{Light: "#40A02B", Dark: "#A6E3A1"}
+	ColorImportant      = lipgloss.AdaptiveColor{Light: "#D20F39", Dark: "#F38BA8"} // high priority (red)
+	ColorPriorityMedium = lipgloss.AdaptiveColor{Light: "#DF8E1D", Dark: "#F9E2AF"} // medium priority (yellow)
+	ColorSelected       = lipgloss.AdaptiveColor{Light: "#CCD0DA", Dark: "#313244"}
 
-	StyleTitle     = lipgloss.NewStyle().Bold(true)
-	StyleMuted     = lipgloss.NewStyle().Faint(true)
-	StyleDone      = lipgloss.NewStyle().Faint(true)
-	StyleMain      = lipgloss.NewStyle().Foreground(ColorAccent)
-	StyleSide      = lipgloss.NewStyle().Foreground(ColorSide)
-	StyleCursor    = lipgloss.NewStyle().Foreground(ColorAccent)
-	StyleImportant = lipgloss.NewStyle().Bold(true).Foreground(ColorImportant)
+	StyleTitle          = lipgloss.NewStyle().Bold(true)
+	StyleMuted          = lipgloss.NewStyle().Faint(true)
+	StyleDone           = lipgloss.NewStyle().Faint(true)
+	StyleMain           = lipgloss.NewStyle().Foreground(ColorAccent)
+	StyleSide           = lipgloss.NewStyle().Foreground(ColorSide)
+	StyleCursor         = lipgloss.NewStyle().Foreground(ColorAccent)
+	StyleImportant      = lipgloss.NewStyle().Bold(true).Foreground(ColorImportant)      // high priority
+	StylePriorityMedium = lipgloss.NewStyle().Bold(true).Foreground(ColorPriorityMedium) // medium priority
 
 	// Selected rows (used by the project-picker modal's list) set both fg
 	// and bg explicitly as a self-consistent pair, so contrast holds

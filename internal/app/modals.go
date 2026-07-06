@@ -59,6 +59,8 @@ type Modal struct {
 	TargetQuestID string
 	PickerItems   []pickerItem
 	PickerIndex   int
+	PickerFilter  string // fuzzy-search query typed into the picker
+	SourceRowIdx  int    // the moved quest's row index in the source list, to relocate the cursor after the move
 
 	// ModalSectionDetail: which section ("inbox" | "someday") this page shows.
 	Section string
@@ -103,6 +105,39 @@ func sectionRows(s *store.Store, section string) []ui.Row {
 		}
 	}
 	return rows
+}
+
+// filteredPickerItems is the project-picker list narrowed to the fuzzy filter
+// typed so far (case-insensitive subsequence match); the full list when empty.
+func (mod *Modal) filteredPickerItems() []pickerItem {
+	if mod.PickerFilter == "" {
+		return mod.PickerItems
+	}
+	var out []pickerItem
+	for _, it := range mod.PickerItems {
+		if fuzzySubsequence(mod.PickerFilter, it.Label) {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// fuzzySubsequence reports whether every rune of query appears in target in
+// order (case-insensitive) — the classic fuzzy-finder match.
+func fuzzySubsequence(query, target string) bool {
+	q := []rune(strings.ToLower(query))
+	if len(q) == 0 {
+		return true
+	}
+	qi := 0
+	for _, tc := range strings.ToLower(target) {
+		if tc == q[qi] {
+			if qi++; qi == len(q) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func sectionDetailModal(section string) *Modal {
@@ -553,24 +588,44 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 		return nil
 
 	case ModalProjectPicker:
+		items := mod.filteredPickerItems()
 		switch msg.String() {
 		case "up":
 			if mod.PickerIndex > 0 {
 				mod.PickerIndex--
 			}
 		case "down":
-			if mod.PickerIndex < len(mod.PickerItems)-1 {
+			if mod.PickerIndex < len(items)-1 {
 				mod.PickerIndex++
 			}
 		case "enter":
-			if target := m.findQuest(mod.TargetQuestID); target != nil {
-				target.ProjectID = mod.PickerItems[mod.PickerIndex].ID
-				target.UpdatedAt = time.Now()
-				m.save()
+			if len(items) > 0 {
+				if target := m.findQuest(mod.TargetQuestID); target != nil {
+					target.ProjectID = items[mod.PickerIndex].ID
+					target.UpdatedAt = time.Now()
+					m.save()
+				}
 			}
+			// Relocate the cursor to the source list's next item (or previous
+			// if it was last) rather than following the quest into its new
+			// home — see SourceRowIdx.
+			srcIdx := mod.SourceRowIdx
 			m.closeModal()
+			if row, ok := nearestSelectableRow(m.currentRowScope(), srcIdx); ok {
+				m.setCursor(row)
+			}
 		case "esc":
 			m.closeModal()
+		case "backspace":
+			if r := []rune(mod.PickerFilter); len(r) > 0 {
+				mod.PickerFilter = string(r[:len(r)-1])
+				mod.PickerIndex = 0
+			}
+		default:
+			if msg.Type == tea.KeyRunes {
+				mod.PickerFilter += string(msg.Runes)
+				mod.PickerIndex = 0
+			}
 		}
 		return nil
 
@@ -776,15 +831,24 @@ func (m *Model) renderModal() string {
 	case ModalProjectPicker:
 		var b strings.Builder
 		b.WriteString(ui.StyleTitle.Render("Move to campaign"))
-		b.WriteString("\n\n")
-		for i, item := range mod.PickerItems {
+		b.WriteString("\n")
+		query := mod.PickerFilter
+		if query == "" {
+			query = ui.StyleMuted.Render("type to filter…")
+		}
+		b.WriteString(ui.StyleMuted.Render("› ") + query + "\n\n")
+		items := mod.filteredPickerItems()
+		if len(items) == 0 {
+			b.WriteString(ui.StyleMuted.Render("  (no matching campaigns)") + "\n")
+		}
+		for i, item := range items {
 			line := "  " + item.Label
 			if i == mod.PickerIndex {
 				line = ui.StyleSelectedRow.Render("> " + item.Label)
 			}
 			b.WriteString(line + "\n")
 		}
-		b.WriteString("\n" + ui.StyleMuted.Render("↑↓ choose · enter confirm · esc cancel"))
+		b.WriteString("\n" + ui.StyleMuted.Render("type to filter · ↑↓ choose · enter confirm · esc cancel"))
 		content = b.String()
 
 	case ModalSearch:

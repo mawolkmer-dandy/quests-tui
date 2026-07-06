@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -116,6 +117,13 @@ type Model struct {
 	path    string
 	darkBg  bool
 	watcher *fsnotify.Watcher // watches the quick-add spool for live ingestion (see quickadd_watch.go)
+
+	// Undo stack of prior store states (JSON snapshots). recordUndo pushes the
+	// pre-change state on each save; undo (Ctrl+Z) pops and restores. Bounded
+	// to undoLimit. applyingUndo suppresses recording while restoring.
+	undoStack    [][]byte
+	lastSnapshot []byte
+	applyingUndo bool
 
 	width, height int
 	scrollOffset  int
@@ -249,6 +257,7 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 		selAnchorLine:     noSelection,
 		hideHoverTips:     !opts.ShowHints,
 		introDone:         !opts.Intro,
+		lastSnapshot:      s.Snapshot(),
 	}
 	if rows := m.visibleRows(); len(rows) > 0 {
 		m.setCursor(rows[0])
@@ -389,8 +398,59 @@ func (m *Model) projectQuestCount(id string) int {
 	return n
 }
 
+const undoLimit = 100
+
 func (m *Model) save() {
+	if !m.applyingUndo {
+		m.recordUndo()
+	}
 	_ = store.Save(m.path, m.store)
+}
+
+// recordUndo pushes the last snapshot onto the undo stack when the store has
+// actually changed since it was taken, then remembers the new state. Called
+// from save() (after the mutation), so the pushed snapshot is the pre-change
+// state that Ctrl+Z restores.
+func (m *Model) recordUndo() {
+	cur := m.store.Snapshot()
+	if bytes.Equal(cur, m.lastSnapshot) {
+		return
+	}
+	if m.lastSnapshot != nil {
+		m.undoStack = append(m.undoStack, m.lastSnapshot)
+		if len(m.undoStack) > undoLimit {
+			m.undoStack = m.undoStack[len(m.undoStack)-undoLimit:]
+		}
+	}
+	m.lastSnapshot = cur
+}
+
+// undo restores the most recent pre-change store snapshot. Cursor is kept if
+// its row still exists, else it lands on the nearest surviving row.
+func (m *Model) undo() {
+	if len(m.undoStack) == 0 {
+		return
+	}
+	prev := m.undoStack[len(m.undoStack)-1]
+	m.undoStack = m.undoStack[:len(m.undoStack)-1]
+
+	restored, err := store.RestoreSnapshot(prev)
+	if err != nil {
+		return
+	}
+	*m.store = *restored
+	m.lastSnapshot = prev
+
+	m.applyingUndo = true
+	m.save()
+	m.applyingUndo = false
+
+	m.editor = nil
+	m.clearSelection()
+	rows := m.visibleRows()
+	if row, ok := nearestSelectableRow(rows, findRowIndex(rows, m.cursor)); ok {
+		m.setCursor(row)
+	}
 }
 
 // pushModal opens next, keeping whatever's currently open (if anything) on

@@ -40,6 +40,7 @@ type KeyMap struct {
 	ToggleType      key.Binding
 	MoveProject     key.Binding
 	Delete          key.Binding
+	Undo            key.Binding
 	Search          key.Binding
 	Help            key.Binding
 	ToggleHints     key.Binding
@@ -58,11 +59,12 @@ var Keys = KeyMap{
 	Backspace:       key.NewBinding(key.WithKeys("backspace"), key.WithHelp("Backspace", "delete char / empty row")),
 	ToggleActive:    key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("Ctrl+A", "toggle active")),
 	ToggleDone:      key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("Ctrl+D", "toggle done")),
-	ToggleImportant: key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("Ctrl+P", "toggle important (priority)")),
+	ToggleImportant: key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("Ctrl+P", "cycle priority (med/high/low/none)")),
 	ToggleVault:     key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("Ctrl+V", "toggle vault")),
 	ToggleType:      key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("Ctrl+T", "main/side")),
 	MoveProject:     key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("Ctrl+O", "move to campaign")),
 	Delete:          key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("Ctrl+X", "delete")),
+	Undo:            key.NewBinding(key.WithKeys("ctrl+z"), key.WithHelp("Ctrl+Z", "undo last change")),
 	Search:          key.NewBinding(key.WithKeys("ctrl+f"), key.WithHelp("Ctrl+F", "search")),
 	Help:            key.NewBinding(key.WithKeys("f1"), key.WithHelp("F1", "help")),
 	ToggleHints:     key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("Ctrl+K", "hide/show hover tips")),
@@ -120,6 +122,6 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Left, k.Right, k.MoveUp, k.MoveDown, k.Tab, k.Enter, k.Backspace},
 		{k.ToggleActive, k.ToggleDone, k.ToggleImportant, k.ToggleVault, k.ToggleType, k.MoveProject},
-		{k.Delete, k.Search, k.Help, k.ToggleHints, k.Quit},
+		{k.Delete, k.Undo, k.Search, k.Help, k.ToggleHints, k.Quit},
 	}
 }
