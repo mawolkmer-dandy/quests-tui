@@ -120,16 +120,18 @@ func main() {
 		SideLight: cfg.Colors.SideLight, SideDark: cfg.Colors.SideDark,
 		HeadingLight: cfg.Colors.HeadingLight, HeadingDark: cfg.Colors.HeadingDark,
 		ImportantLight: cfg.Colors.ImportantLight, ImportantDark: cfg.Colors.ImportantDark,
+		PriorityMediumLight: cfg.Colors.PriorityMediumLight, PriorityMediumDark: cfg.Colors.PriorityMediumDark,
 	})
 	ui.ApplyIcons(ui.IconSet{
 		QuestOpen: cfg.Icons.QuestOpen, QuestActive: cfg.Icons.QuestActive, QuestDone: cfg.Icons.QuestDone,
 		NoticeMain: cfg.Icons.NoticeMain, NoticeSide: cfg.Icons.NoticeSide,
-		Important: cfg.Icons.Important,
-		Expanded:  cfg.Icons.Expanded, Collapsed: cfg.Icons.Collapsed,
+		Important: cfg.Icons.Important, PriorityLow: cfg.Icons.PriorityLow,
+		Expanded: cfg.Icons.Expanded, Collapsed: cfg.Icons.Collapsed,
 	})
 	ui.DoneToBottom = cfg.Behavior.DoneToBottom
 	ui.MoveMainToTop = cfg.Behavior.MainToTop
 	ui.MovePriorityToTop = cfg.Behavior.PriorityToTop
+	ui.LowPriorityToBottom = cfg.Behavior.LowPriorityToBottom
 	app.ApplyKeys(cfg.Keys)
 
 	s, err := store.Load(dataPath)

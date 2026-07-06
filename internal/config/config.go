@@ -25,9 +25,12 @@ type Behavior struct {
 	DoneToBottom bool `toml:"done_to_bottom"`
 	// MainToTop floats main quests to the top of their campaign.
 	MainToTop bool `toml:"main_to_top"`
-	// PriorityToTop floats important (priority) quests to the top —
+	// PriorityToTop floats medium/high priority quests to the top —
 	// outranking MainToTop when both are on.
 	PriorityToTop bool `toml:"priority_to_top"`
+	// LowPriorityToBottom sinks low-priority quests to the bottom of their
+	// list, just above completed ones.
+	LowPriorityToBottom bool `toml:"low_priority_to_bottom"`
 	// QuestboardCollapsed starts the Questboard section collapsed.
 	QuestboardCollapsed bool `toml:"questboard_collapsed"`
 	// VaultCollapsed starts the Vault section collapsed.
@@ -49,14 +52,16 @@ type Behavior struct {
 // Colors are hex values ("#E2B714"); each has a light- and dark-terminal
 // variant.
 type Colors struct {
-	MainLight      string `toml:"main_light"`
-	MainDark       string `toml:"main_dark"`
-	SideLight      string `toml:"side_light"`
-	SideDark       string `toml:"side_dark"`
-	HeadingLight   string `toml:"heading_light"`
-	HeadingDark    string `toml:"heading_dark"`
-	ImportantLight string `toml:"important_light"`
-	ImportantDark  string `toml:"important_dark"`
+	MainLight           string `toml:"main_light"`
+	MainDark            string `toml:"main_dark"`
+	SideLight           string `toml:"side_light"`
+	SideDark            string `toml:"side_dark"`
+	HeadingLight        string `toml:"heading_light"`
+	HeadingDark         string `toml:"heading_dark"`
+	ImportantLight      string `toml:"important_light"` // high priority (red)
+	ImportantDark       string `toml:"important_dark"`
+	PriorityMediumLight string `toml:"priority_medium_light"` // medium priority (yellow)
+	PriorityMediumDark  string `toml:"priority_medium_dark"`
 }
 
 type Icons struct {
@@ -65,7 +70,8 @@ type Icons struct {
 	QuestDone   string `toml:"quest_done"`
 	NoticeMain  string `toml:"notice_main"`
 	NoticeSide  string `toml:"notice_side"`
-	Important   string `toml:"important"`
+	Important   string `toml:"important"`    // medium/high priority up-arrow
+	PriorityLow string `toml:"priority_low"` // low priority down-arrow
 	Expanded    string `toml:"expanded"`
 	Collapsed   string `toml:"collapsed"`
 }
@@ -92,6 +98,7 @@ func Default() Config {
 			DoneToBottom:        true,
 			MainToTop:           true,
 			PriorityToTop:       true,
+			LowPriorityToBottom: true,
 			QuestboardCollapsed: true,
 			VaultCollapsed:      true,
 			ShowHints:           true,
@@ -101,14 +108,16 @@ func Default() Config {
 			BackupKeep:          14,
 		},
 		Colors: Colors{
-			MainLight:      "#DF8E1D",
-			MainDark:       "#E2B714",
-			SideLight:      "#1E66F5",
-			SideDark:       "#89B4FA",
-			HeadingLight:   "#40A02B",
-			HeadingDark:    "#A6E3A1",
-			ImportantLight: "#D20F39",
-			ImportantDark:  "#F38BA8",
+			MainLight:           "#DF8E1D",
+			MainDark:            "#E2B714",
+			SideLight:           "#1E66F5",
+			SideDark:            "#89B4FA",
+			HeadingLight:        "#40A02B",
+			HeadingDark:         "#A6E3A1",
+			ImportantLight:      "#D20F39",
+			ImportantDark:       "#F38BA8",
+			PriorityMediumLight: "#DF8E1D",
+			PriorityMediumDark:  "#F9E2AF",
 		},
 		Icons: Icons{
 			QuestOpen:   "◇",
@@ -117,6 +126,7 @@ func Default() Config {
 			NoticeMain:  "!",
 			NoticeSide:  "?",
 			Important:   "↑",
+			PriorityLow: "↓",
 			Expanded:    "▾",
 			Collapsed:   "▸",
 		},
@@ -175,9 +185,10 @@ const sampleConfig = `# Quests configuration — every setting is optional; dele
 # combine; when more than one is on, priority_to_top outranks main_to_top,
 # and done_to_bottom wins over both (a finished quest still sinks to the
 # bottom).
-done_to_bottom = true    # sink completed quests to the bottom
-main_to_top = true       # float main quests to the top
-priority_to_top = true   # float important (priority) quests to the top
+done_to_bottom = true          # sink completed quests to the bottom
+main_to_top = true             # float main quests to the top
+priority_to_top = true         # float medium/high priority quests to the top
+low_priority_to_bottom = true  # sink low-priority quests (just above done)
 # Start the Questboard and Vault sections collapsed.
 questboard_collapsed = true
 vault_collapsed = true
@@ -195,7 +206,8 @@ backup_keep = 14
 [colors]
 # Hex colors; *_light applies on light terminal themes, *_dark on dark.
 # main: main quests (gold) · side: side quests (blue) · heading: "# " lines
-# · important: the priority arrow (red).
+# · important: the high-priority arrow (red) · priority_medium: the
+# medium-priority arrow (yellow). Low priority uses the muted foreground.
 main_light = "#DF8E1D"
 main_dark = "#E2B714"
 side_light = "#1E66F5"
@@ -204,17 +216,21 @@ heading_light = "#40A02B"
 heading_dark = "#A6E3A1"
 important_light = "#D20F39"
 important_dark = "#F38BA8"
+priority_medium_light = "#DF8E1D"
+priority_medium_dark = "#F9E2AF"
 
 [icons]
 # Single-character glyphs. quest_* is the shape by progress; notice_* marks
-# untriaged Questboard quests; important is the priority marker shown left
-# of a flagged quest; expanded/collapsed are the fold carets.
+# untriaged Questboard quests; important is the medium/high priority up-arrow
+# and priority_low the low-priority down-arrow, shown left of a quest;
+# expanded/collapsed are the fold carets.
 quest_open = "◇"
 quest_active = "⬖"
 quest_done = "◆"
 notice_main = "!"
 notice_side = "?"
 important = "↑"
+priority_low = "↓"
 expanded = "▾"
 collapsed = "▸"
 

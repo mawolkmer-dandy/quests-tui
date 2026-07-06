@@ -38,7 +38,7 @@ var (
 type IconSet struct {
 	QuestOpen, QuestActive, QuestDone string
 	NoticeMain, NoticeSide            string
-	Important                         string
+	Important, PriorityLow            string
 	Expanded, Collapsed               string
 }
 
@@ -49,6 +49,7 @@ func ApplyIcons(ic IconSet) {
 	setIf(&GlyphNoticeMain, ic.NoticeMain)
 	setIf(&GlyphNoticeSide, ic.NoticeSide)
 	setIf(&GlyphImportant, ic.Important)
+	setIf(&GlyphPriorityLow, ic.PriorityLow)
 	setIf(&GlyphExpanded, ic.Expanded)
 	setIf(&GlyphCollapsed, ic.Collapsed)
 }
@@ -98,10 +99,11 @@ var (
 // the default. Call before the program starts; the derived styles are
 // rebuilt here.
 type Theme struct {
-	MainLight, MainDark           string
-	SideLight, SideDark           string
-	HeadingLight, HeadingDark     string
-	ImportantLight, ImportantDark string
+	MainLight, MainDark                     string
+	SideLight, SideDark                     string
+	HeadingLight, HeadingDark               string
+	ImportantLight, ImportantDark           string
+	PriorityMediumLight, PriorityMediumDark string
 }
 
 func ApplyTheme(t Theme) {
@@ -113,12 +115,15 @@ func ApplyTheme(t Theme) {
 	setIf(&ColorHeading.Dark, t.HeadingDark)
 	setIf(&ColorImportant.Light, t.ImportantLight)
 	setIf(&ColorImportant.Dark, t.ImportantDark)
+	setIf(&ColorPriorityMedium.Light, t.PriorityMediumLight)
+	setIf(&ColorPriorityMedium.Dark, t.PriorityMediumDark)
 
 	StyleMain = lipgloss.NewStyle().Foreground(ColorAccent)
 	StyleSide = lipgloss.NewStyle().Foreground(ColorSide)
 	StyleCursor = lipgloss.NewStyle().Foreground(ColorAccent)
 	StyleHeading = lipgloss.NewStyle().Bold(true).Foreground(ColorHeading)
 	StyleImportant = lipgloss.NewStyle().Bold(true).Foreground(ColorImportant)
+	StylePriorityMedium = lipgloss.NewStyle().Bold(true).Foreground(ColorPriorityMedium)
 }
 
 // Sort-behavior flags, all set from config (see questPriority). By default
@@ -126,7 +131,8 @@ func ApplyTheme(t Theme) {
 // quests; MoveMainToTop floats main quests; MovePriorityToTop floats
 // important quests (and outranks MoveMainToTop when both are on).
 var (
-	DoneToBottom      bool
-	MoveMainToTop     bool
-	MovePriorityToTop bool
+	DoneToBottom        bool
+	MoveMainToTop       bool
+	MovePriorityToTop   bool
+	LowPriorityToBottom bool
 )
