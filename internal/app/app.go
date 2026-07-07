@@ -125,6 +125,13 @@ type Model struct {
 	lastSnapshot []byte
 	applyingUndo bool
 
+	// afield is the "out on the road" view: a flat, filtered list of quests
+	// (see afieldRows) instead of the full Tavern outline. quickFilter is the
+	// radio chip narrowing it (All / High priority / Taken).
+	afield      bool
+	quickFilter quickFilter
+	animate     bool // whether the intro/transition animation plays (config: intro)
+
 	width, height int
 	scrollOffset  int
 	subtitle      string
@@ -257,6 +264,7 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 		selAnchorLine:     noSelection,
 		hideHoverTips:     !opts.ShowHints,
 		introDone:         !opts.Intro,
+		animate:           opts.Intro,
 		lastSnapshot:      s.Snapshot(),
 	}
 	if rows := m.visibleRows(); len(rows) > 0 {
@@ -338,10 +346,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if time.Since(m.lastWheelAt) < 300*time.Millisecond && mouseAlphabetKey(msg) {
 			return m, nil
 		}
-		if !m.introDone {
-			m.introDone = true // any key skips the splash
-			return m, nil
-		}
+		// The intro/transition animation is non-blocking: keys pass straight
+		// through and act normally while it plays (it finishes on its own).
 		if m.modal != nil {
 			if isFocusModal(m.modal.Kind) && key.Matches(msg, Keys.Help) {
 				m.pushModal(detailHelpModal())
@@ -485,7 +491,94 @@ func (m *Model) closeModal() {
 // visibleRows is the row list every navigation/mutation/render path should
 // use — it applies the live search filter on top of ui.BuildRows so a
 // filtered view can't be navigated "past" into hidden rows.
+// quickFilter is the Afield radio chip narrowing the flat list.
+type quickFilter int
+
+const (
+	filterAll quickFilter = iota
+	filterHigh
+	filterTaken
+)
+
+func (f quickFilter) label() string {
+	switch f {
+	case filterHigh:
+		return "High priority"
+	case filterTaken:
+		return "Taken"
+	default:
+		return "All"
+	}
+}
+
+// quickFilterMatch reports whether q passes the active Afield chip.
+func (m *Model) quickFilterMatch(q *model.Quest) bool {
+	switch m.quickFilter {
+	case filterHigh:
+		return q.Priority == model.PriorityHigh
+	case filterTaken:
+		return q.Status == model.StatusActive
+	default:
+		return true
+	}
+}
+
+// afieldRows is the flat quest list shown out on the road: every non-done
+// quest under a non-archived campaign that passes the quick filter, in the
+// same tiered order the outline uses, tagged with its campaign name. No
+// Questboard/Vault, no headers, no "+ New" affordances — those are Tavern
+// activities.
+func (m *Model) afieldRows() []ui.Row {
+	var rows []ui.Row
+	for i := range m.store.Projects {
+		p := &m.store.Projects[i]
+		if p.Archived {
+			continue
+		}
+		for _, q := range ui.QuestsForCampaign(m.store, p.ID) {
+			if q.Status == model.StatusDone || !m.quickFilterMatch(&q) {
+				continue
+			}
+			rows = append(rows, ui.Row{Kind: ui.RowQuest, ProjectID: p.ID, QuestID: q.ID, ShowProjectTag: true})
+		}
+	}
+	return rows
+}
+
+// setAfield switches between the Tavern and Afield views, replaying the
+// intro transition and rerolling the flavor subtitle for the destination.
+// Setting out defaults the quick chip to Taken (your active quests).
+func (m *Model) setAfield(on bool) tea.Cmd {
+	if m.afield == on {
+		return nil
+	}
+	m.commitEdit()
+	m.afield = on
+	m.editor = nil
+	m.scrollOffset = 0
+	if on {
+		m.quickFilter = filterTaken
+		m.subtitle = ui.RandomAfieldGreeting()
+	} else {
+		m.subtitle = ui.RandomGreeting()
+	}
+	if rows := m.visibleRows(); len(rows) > 0 {
+		m.setCursor(rows[0])
+	} else {
+		m.cursor = cursorTarget{}
+	}
+	if !m.animate {
+		return nil
+	}
+	m.introFrame = 0
+	m.introDone = false
+	return introTick()
+}
+
 func (m *Model) visibleRows() []ui.Row {
+	if m.afield {
+		return m.afieldRows()
+	}
 	rows := ui.BuildRows(m.store, m.collapsedProjects, m.collapsedSections)
 	if strings.TrimSpace(m.searchQuery) == "" {
 		return rows
@@ -948,8 +1041,30 @@ func (m *Model) renderFooter() string {
 	if m.clipboardToastActive {
 		return lipgloss.NewStyle().Padding(0, 1).Render(renderClipboardToast())
 	}
-	h := Keys.Help.Help()
-	return ui.StyleFooter.Render(h.Key + " " + h.Desc)
+	if m.afield {
+		return ui.StyleFooter.Render("⚔ afield · Ctrl+G return to the tavern")
+	}
+	taken := m.takenCount()
+	setOut := "⚔ Ctrl+G set out"
+	if taken > 0 {
+		setOut = fmt.Sprintf("⚔ Ctrl+G set out · %d taken up", taken)
+	}
+	return ui.StyleFooter.Render(setOut)
+}
+
+// takenCount is how many quests are currently taken up (active) under a
+// non-archived campaign — the number you'd take Afield.
+func (m *Model) takenCount() int {
+	n := 0
+	for i := range m.store.Quests {
+		q := &m.store.Quests[i]
+		if q.Status == model.StatusActive && q.ProjectID != "" && !q.Vaulted {
+			if p := m.findProject(q.ProjectID); p != nil && !p.Archived {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // indentLines prepends prefix to every line of s (a possibly multi-line,

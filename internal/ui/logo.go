@@ -35,11 +35,37 @@ var TavernGreetings = []string{
 	"The innkeeper's heard tales of you already.",
 	"Safe travels, whatever road you take.",
 	"There's always another quest.",
+	"The tavern hums with talk of work undone.",
+	"A fire crackles. Your ledger waits.",
+	"Ale in hand, you survey the board.",
+	"Boots off — for now. The board's still full.",
+	"The barkeep nods. Plenty to be done.",
+	"Rumors and requests crowd the board.",
 }
 
-// RandomGreeting picks one subtitle line — call once at startup.
+// AfieldGreetings are the subtitles shown out on the road (the Afield view),
+// picked fresh each time you set out.
+var AfieldGreetings = []string{
+	"The road unspools before you.",
+	"Boots on the trail, objectives ahead.",
+	"No walls here — only the task.",
+	"The wilds are patient. Your quests are not.",
+	"Head down, blade ready.",
+	"The tavern's behind you. Onward.",
+	"Wind at your back, work ahead.",
+	"Mud, miles, and a list to clear.",
+	"Daylight's burning — move.",
+	"One foot, then the next.",
+}
+
+// RandomGreeting picks one tavern subtitle line.
 func RandomGreeting() string {
 	return TavernGreetings[rand.Intn(len(TavernGreetings))]
+}
+
+// RandomAfieldGreeting picks one adventure subtitle line.
+func RandomAfieldGreeting() string {
+	return AfieldGreetings[rand.Intn(len(AfieldGreetings))]
 }
 
 // RenderLogo returns the small banner shown above the outline, centered

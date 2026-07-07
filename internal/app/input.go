@@ -29,6 +29,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, Keys.Undo):
 		m.undo()
 		return nil
+	case key.Matches(msg, Keys.SetOut):
+		return m.setAfield(!m.afield)
+	case msg.Type == tea.KeyEsc && m.afield:
+		return m.setAfield(false)
 	case key.Matches(msg, Keys.Up):
 		m.moveCursor(-1)
 		return nil
