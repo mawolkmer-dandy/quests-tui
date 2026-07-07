@@ -21,7 +21,6 @@ const (
 	ModalCampaignDetail
 	ModalSectionDetail
 	ModalProjectPicker
-	ModalSearch
 	ModalHelp
 	ModalDetailHelp
 )
@@ -64,9 +63,6 @@ type Modal struct {
 
 	// ModalSectionDetail: which section ("inbox" | "someday") this page shows.
 	Section string
-
-	// ModalSearch
-	SearchInput textinput.Model
 }
 
 // campaignQuestRows is the row list scoped to one campaign's quest section —
@@ -207,15 +203,6 @@ func projectPickerModal(s *store.Store, questID, currentProjectID string) *Modal
 		}
 	}
 	return &Modal{Kind: ModalProjectPicker, TargetQuestID: questID, PickerItems: items, PickerIndex: idx}
-}
-
-func searchModal(initial string) *Modal {
-	ti := textinput.New()
-	ti.Placeholder = "Search quests…"
-	ti.SetValue(initial)
-	ti.CursorEnd()
-	_ = ti.Focus()
-	return &Modal{Kind: ModalSearch, SearchInput: ti}
 }
 
 func helpModal() *Modal {
@@ -629,25 +616,6 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 
-	case ModalSearch:
-		switch msg.String() {
-		case "esc":
-			m.searchQuery = ""
-			m.closeModal()
-			return nil
-		case "enter":
-			m.closeModal()
-			return nil
-		}
-		if handled, cmd := m.applySelectionKey(&mod.SearchInput, msg); handled {
-			m.searchQuery = mod.SearchInput.Value()
-			return cmd
-		}
-		var cmd tea.Cmd
-		mod.SearchInput, cmd = mod.SearchInput.Update(msg)
-		m.searchQuery = mod.SearchInput.Value()
-		return cmd
-
 	case ModalQuestDetail:
 		q := m.findQuest(mod.QuestID)
 		if q == nil {
@@ -850,9 +818,6 @@ func (m *Model) renderModal() string {
 		}
 		b.WriteString("\n" + ui.StyleMuted.Render("type to filter · ↑↓ choose · enter confirm · esc cancel"))
 		content = b.String()
-
-	case ModalSearch:
-		content = ui.StyleTitle.Render("Search") + "\n\n" + m.renderEditableText(&mod.SearchInput)
 
 	case ModalDetailHelp:
 		var b strings.Builder

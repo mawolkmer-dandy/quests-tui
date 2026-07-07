@@ -14,14 +14,21 @@ import (
 )
 
 func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
+	// While the search bar is open, it owns its keys (typing, facet cycling,
+	// close); everything else falls through to the normal handling below so
+	// you can still navigate and act on the filtered results.
+	if m.searchOpen {
+		if cmd, handled := m.handleSearchBarKey(msg); handled {
+			return cmd
+		}
+	}
 	switch {
 	case key.Matches(msg, Keys.Help):
 		m.commitEdit()
 		m.pushModal(helpModal())
 		return nil
 	case key.Matches(msg, Keys.Search):
-		m.commitEdit()
-		m.pushModal(searchModal(m.searchQuery))
+		m.openSearch()
 		return nil
 	case key.Matches(msg, Keys.ToggleHints):
 		m.hideHoverTips = !m.hideHoverTips
@@ -376,7 +383,6 @@ func (m *Model) handleEnter() tea.Cmd {
 	}
 	row := rows[idx]
 	m.commitEdit()
-	m.searchQuery = ""
 
 	switch row.Kind {
 	case ui.RowNewProject:

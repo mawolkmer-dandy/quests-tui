@@ -137,6 +137,15 @@ type Model struct {
 	chipLineRow int
 	chipSpans   []chipSpan
 
+	// Inline search/filter bar (Ctrl+F) — see search.go.
+	searchOpen       bool
+	searchInput      textinput.Model
+	searchFocus      int
+	fPriority        facetPriority
+	fStatus          facetStatus
+	fType            facetType
+	savedQuickFilter quickFilter
+
 	width, height int
 	scrollOffset  int
 	subtitle      string
@@ -201,8 +210,6 @@ type Model struct {
 	// non-empty while an inline delete confirmation is armed for the row
 	// under the cursor — a quest or a campaign (see handleBackspace / handleKey).
 	confirmDeleteID string
-
-	searchQuery string
 
 	// modal is the topmost open modal; modalStack holds whatever's beneath
 	// it, so drilling from a campaign's detail page into one of its quests
@@ -507,6 +514,9 @@ type chipSpan struct {
 // records chipSpans for click hit-testing.
 func (m *Model) renderFilterLine(width int, margin string) string {
 	m.chipSpans = nil
+	if m.searchOpen {
+		return margin + m.renderSearchBar()
+	}
 	if !m.afield {
 		return ""
 	}
@@ -605,6 +615,9 @@ func (m *Model) afieldRows() []ui.Row {
 			if q.Status == model.StatusDone || !m.quickFilterMatch(&q) {
 				continue
 			}
+			if m.searchOpen && !m.searchMatch(&q) {
+				continue
+			}
 			rows = append(rows, ui.Row{Kind: ui.RowQuest, ProjectID: p.ID, QuestID: q.ID, ShowProjectTag: true})
 		}
 	}
@@ -645,16 +658,17 @@ func (m *Model) visibleRows() []ui.Row {
 	if m.afield {
 		return m.afieldRows()
 	}
-	rows := ui.BuildRows(m.store, m.collapsedProjects, m.collapsedSections)
-	if strings.TrimSpace(m.searchQuery) == "" {
-		return rows
+	if !m.searchOpen {
+		return ui.BuildRows(m.store, m.collapsedProjects, m.collapsedSections)
 	}
+	// While searching, ignore collapse state so a match in any campaign or
+	// section still surfaces (empty groups are dropped below).
+	rows := ui.BuildRows(m.store, map[string]bool{}, map[string]bool{})
 
-	query := strings.ToLower(m.searchQuery)
 	keep := make([]bool, len(rows))
 	for i, r := range rows {
 		if r.Kind == ui.RowQuest {
-			if q := m.findQuest(r.QuestID); q != nil && strings.Contains(strings.ToLower(q.Title), query) {
+			if q := m.findQuest(r.QuestID); q != nil && m.searchMatch(q) {
 				keep[i] = true
 			}
 		}
