@@ -132,6 +132,11 @@ type Model struct {
 	quickFilter quickFilter
 	animate     bool // whether the intro/transition animation plays (config: intro)
 
+	// chipLineRow is the screen row of the reserved filter line; chipSpans are
+	// the Afield quick-chip click extents on it (see handleMouse).
+	chipLineRow int
+	chipSpans   []chipSpan
+
 	width, height int
 	scrollOffset  int
 	subtitle      string
@@ -491,6 +496,67 @@ func (m *Model) closeModal() {
 // visibleRows is the row list every navigation/mutation/render path should
 // use — it applies the live search filter on top of ui.BuildRows so a
 // filtered view can't be navigated "past" into hidden rows.
+// chipSpan is a quick-chip's clickable extent in absolute screen columns.
+type chipSpan struct {
+	x0, x1 int
+	filter quickFilter
+}
+
+// renderFilterLine renders the reserved line above the rows: the Afield quick
+// chips, or blank (the Tavern, and the search bar, come from elsewhere). It
+// records chipSpans for click hit-testing.
+func (m *Model) renderFilterLine(width int, margin string) string {
+	m.chipSpans = nil
+	if !m.afield {
+		return ""
+	}
+	filters := []quickFilter{filterAll, filterHigh, filterTaken}
+	var b strings.Builder
+	x := m.leftMargin
+	for i, f := range filters {
+		if i > 0 {
+			b.WriteString("  ")
+			x += 2
+		}
+		label := " " + f.label() + " "
+		w := lipgloss.Width(label)
+		m.chipSpans = append(m.chipSpans, chipSpan{x0: x, x1: x + w, filter: f})
+		x += w
+		if f == m.quickFilter {
+			b.WriteString(ui.StyleSelectedRow.Render(label))
+		} else {
+			b.WriteString(ui.StyleMuted.Render(label))
+		}
+	}
+	return margin + b.String()
+}
+
+// cycleQuickFilter steps the Afield chip left/right and re-homes the cursor.
+func (m *Model) cycleQuickFilter(delta int) {
+	const n = 3
+	m.quickFilter = quickFilter((int(m.quickFilter) + delta + n) % n)
+	m.scrollOffset = 0
+	if rows := m.visibleRows(); len(rows) > 0 {
+		m.setCursor(rows[0])
+	} else {
+		m.cursor = cursorTarget{}
+	}
+}
+
+// setQuickFilter selects a chip directly (from a mouse click).
+func (m *Model) setQuickFilter(f quickFilter) {
+	if m.quickFilter == f {
+		return
+	}
+	m.quickFilter = f
+	m.scrollOffset = 0
+	if rows := m.visibleRows(); len(rows) > 0 {
+		m.setCursor(rows[0])
+	} else {
+		m.cursor = cursorTarget{}
+	}
+}
+
 // quickFilter is the Afield radio chip narrowing the flat list.
 type quickFilter int
 
@@ -820,7 +886,7 @@ func (m *Model) View() string {
 	if !m.introDone {
 		logoLines = ui.RenderLogoIntro(contentWidth, m.subtitle, m.introFrame)
 	}
-	logoHeight := len(logoLines) + 1 // +1 for the blank line after it
+	logoHeight := len(logoLines) + 2 // +1 blank line after the logo, +1 reserved filter/chip line
 
 	// Keep viewVPad blank rows top and bottom, but never let the padding eat
 	// more than half the screen (so short terminals stay usable). The logo +
@@ -886,6 +952,9 @@ func (m *Model) View() string {
 		bottomPad = 0
 	}
 	m.rowsScreenTop = topPad + logoHeight
+	// The reserved filter/chip line sits just above the rows (after the logo
+	// and its blank line) — its screen row is used for chip click hit-testing.
+	m.chipLineRow = topPad + len(logoLines) + 1
 
 	m.hintSpans = map[int][]hintSpan{}
 	hoverIdx := -1
@@ -915,6 +984,9 @@ func (m *Model) View() string {
 	} else {
 		b.WriteString("\n")
 	}
+	// The reserved filter line: Afield quick chips, the search bar when open,
+	// or blank — always present so toggling it never reflows the list.
+	b.WriteString(clip.Render(m.renderFilterLine(contentWidth, margin)) + "\n")
 	for i := m.scrollOffset; i < end; i++ {
 		row := rows[i]
 		isCursor := i == idx

@@ -33,6 +33,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.setAfield(!m.afield)
 	case msg.Type == tea.KeyEsc && m.afield:
 		return m.setAfield(false)
+	case m.afield && key.Matches(msg, Keys.Left):
+		m.cycleQuickFilter(-1)
+		return nil
+	case m.afield && key.Matches(msg, Keys.Right):
+		m.cycleQuickFilter(1)
+		return nil
 	case key.Matches(msg, Keys.Up):
 		m.moveCursor(-1)
 		return nil
@@ -731,6 +737,18 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	}
 
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return nil
+	}
+
+	// A click on an Afield quick chip selects it (the chip line sits just
+	// above the rows).
+	if m.afield && msg.Y == m.chipLineRow {
+		for _, sp := range m.chipSpans {
+			if msg.X >= sp.x0 && msg.X < sp.x1 {
+				m.setQuickFilter(sp.filter)
+				break
+			}
+		}
 		return nil
 	}
 
