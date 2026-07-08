@@ -36,7 +36,8 @@ const (
 	listFramesSlow  = 9
 	listFramesFast  = 5
 	headerFramesN   = 10
-	subFramesN      = 12
+	subFramesN      = 15 // subtitle typewriter (a touch slower)
+	leadBeat        = 4  // beat after the subtitle finishes before the list starts
 	pauseFramesSlow = 3
 	pauseFramesFast = 1
 	burnTrail       = 3 // trailing columns dimmed (burning) before they vanish
@@ -129,7 +130,8 @@ func (m *Model) listLead() int {
 	if m.transKind == kindFilter {
 		return 0
 	}
-	return m.headerFrames()
+	// Let the subtitle fully type in, then a short beat, before the list.
+	return m.subFrames() + leadBeat
 }
 
 // dissolvePhaseFrames / revealPhaseFrames: how long each half runs. The
