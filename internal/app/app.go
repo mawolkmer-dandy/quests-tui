@@ -159,10 +159,11 @@ type Model struct {
 	// right-to-left, a pause, then the new view reveals line by line. Runs on
 	// startup, Tavern⇄Afield, and filter changes. transPhase == transNone
 	// when idle.
-	transPhase transPhase
-	transFrame int
-	transOld   []string // rendered rows captured before the change, for the dissolve
-	transFast  bool     // filter changes animate faster than mode switches
+	transPhase  transPhase
+	transFrame  int
+	transOld    []string // rendered rows captured before the change, for the dissolve
+	transOldSub string   // the subtitle being typed out (mode switches only)
+	transFast   bool     // filter changes animate faster than mode switches
 
 	// set each View() call, used by handleMouse to map screen coordinates
 	// back to a row index / in-row column.
@@ -655,6 +656,7 @@ func (m *Model) setAfield(on bool) tea.Cmd {
 	}
 	m.commitEdit()
 	old := m.currentRowLines() // snapshot the departing view for the dissolve
+	m.transOldSub = m.subtitle // the subtitle to type out
 	if m.searchOpen {
 		m.closeSearch()
 	}
