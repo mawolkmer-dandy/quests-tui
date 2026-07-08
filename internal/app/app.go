@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -627,27 +628,41 @@ func (m *Model) quickFilterMatch(q *model.Quest) bool {
 	}
 }
 
-// wildsRows is the flat quest list shown out on the road: every non-done
-// quest under a non-archived campaign that passes the quick filter, in the
-// same tiered order the outline uses, tagged with its campaign name. No
-// Questboard/Vault, no headers, no "+ New" affordances — those are Tavern
-// activities.
+// wildsRows is the flat quest list shown out on the road: every quest under a
+// non-archived campaign that passes the quick filter, tagged with its campaign
+// name. Unlike the Tavern (grouped per campaign), the Wilds is one list sorted
+// GLOBALLY by the same tier logic — priority/main to the top, low then done to
+// the bottom — so it reads like a single focused agenda. No Questboard/Vault,
+// no headers, no "+ New" affordances — those are Tavern activities.
 func (m *Model) wildsRows() []ui.Row {
-	var rows []ui.Row
+	type item struct {
+		q   model.Quest
+		pid string
+	}
+	var items []item
 	for i := range m.store.Projects {
 		p := &m.store.Projects[i]
 		if p.Archived {
 			continue
 		}
 		for _, q := range ui.QuestsForCampaign(m.store, p.ID) {
-			if q.Status == model.StatusDone || !m.quickFilterMatch(&q) {
+			if !m.quickFilterMatch(&q) {
 				continue
 			}
 			if m.searchOpen && !m.searchMatch(&q) {
 				continue
 			}
-			rows = append(rows, ui.Row{Kind: ui.RowQuest, ProjectID: p.ID, QuestID: q.ID, ShowProjectTag: true})
+			items = append(items, item{q: q, pid: p.ID})
 		}
+	}
+	// Sort across all campaigns by the shared tier; stable, so ties keep their
+	// per-campaign order.
+	sort.SliceStable(items, func(a, b int) bool {
+		return ui.SortBucket(items[a].q) < ui.SortBucket(items[b].q)
+	})
+	rows := make([]ui.Row, 0, len(items))
+	for _, it := range items {
+		rows = append(rows, ui.Row{Kind: ui.RowQuest, ProjectID: it.pid, QuestID: it.q.ID, ShowProjectTag: true})
 	}
 	return rows
 }
