@@ -164,6 +164,7 @@ type Model struct {
 	transOld    []string // rendered rows captured before the change, for the dissolve
 	transOldSub string   // the subtitle being typed out (mode switches only)
 	transFast   bool     // filter changes animate faster than mode switches
+	transGen    int      // bumped each beginTransition; ticks from an older gen are ignored (no double-speed)
 
 	// set each View() call, used by handleMouse to map screen coordinates
 	// back to a row index / in-row column.
@@ -340,6 +341,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case transTickMsg:
+		if msg.gen != m.transGen {
+			return m, nil // stale ticker from an interrupted transition
+		}
 		return m, m.advanceTransition()
 
 	case warningExpireMsg:
@@ -1119,16 +1123,16 @@ func (m *Model) afieldEmptyHelp(width int) []string {
 		msg = "No quests match."
 	case m.quickFilter == filterTaken:
 		msg = "The road is quiet — nothing taken up."
-		hint = "Take up a quest with Ctrl+A back in the Tavern, then set out."
+		hint = "Take up a quest with Ctrl+A"
 	case m.quickFilter == filterPriority:
 		msg = "No priority quests afield."
-		hint = "Flag one with Ctrl+P — medium and high float up."
+		hint = "Flag one with Ctrl+P"
 	default:
 		msg = "No quests under any campaign yet."
 	}
 	lines := []string{ui.CenterText(ui.StyleMuted.Render(msg), width)}
 	if hint != "" {
-		lines = append(lines, "", ui.CenterText(ui.StyleMuted.Render(hint), width))
+		lines = append(lines, ui.CenterText(ui.StyleMuted.Render(hint), width))
 	}
 	return lines
 }

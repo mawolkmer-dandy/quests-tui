@@ -47,14 +47,14 @@ var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
 func stripANSI(s string) string { return ansiRE.ReplaceAllString(s, "") }
 
-type transTickMsg struct{}
+type transTickMsg struct{ gen int }
 
-func transTick(fast bool) tea.Cmd {
+func transTick(fast bool, gen int) tea.Cmd {
 	d := 38 * time.Millisecond
 	if fast {
 		d = 16 * time.Millisecond
 	}
-	return tea.Tick(d, func(time.Time) tea.Msg { return transTickMsg{} })
+	return tea.Tick(d, func(time.Time) tea.Msg { return transTickMsg{gen: gen} })
 }
 
 func (m *Model) beginTransition(oldLines []string, fast bool) tea.Cmd {
@@ -67,7 +67,11 @@ func (m *Model) beginTransition(oldLines []string, fast bool) tea.Cmd {
 	m.transFrame = 0
 	m.transPhase = transDissolve
 	m.scrollOffset = 0
-	return transTick(fast)
+	// New generation: any in-flight ticker from a previous transition (e.g.
+	// an interrupted switch or rapid filter changes) is now stale and ignored,
+	// so only one ticker chain ever advances the frame — no 2x speed-up.
+	m.transGen++
+	return transTick(fast, m.transGen)
 }
 
 // currentRowLines renders the visible rows to styled strings (no cursor/hints).
@@ -152,7 +156,7 @@ func (m *Model) advanceTransition() tea.Cmd {
 			return nil
 		}
 	}
-	return transTick(m.transFast)
+	return transTick(m.transFast, m.transGen)
 }
 
 // dissolveLines burns the captured rows away bottom-up over listFrames frames:
