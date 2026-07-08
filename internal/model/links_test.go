@@ -46,6 +46,47 @@ func TestDetectPR(t *testing.T) {
 	}
 }
 
+func TestDetectPRs(t *testing.T) {
+	t.Run("none", func(t *testing.T) {
+		if refs := DetectPRs("no links"); refs != nil {
+			t.Errorf("DetectPRs(none) = %+v, want nil", refs)
+		}
+	})
+	t.Run("multiple in order", func(t *testing.T) {
+		text := "https://github.com/orthly/orthlyweb/pull/47477 then https://github.com/orthly/orthlyweb/pull/47480"
+		refs := DetectPRs(text)
+		if len(refs) != 2 {
+			t.Fatalf("got %d refs, want 2", len(refs))
+		}
+		if refs[0].Code != "#47477" || refs[0].Repo != "orthly/orthlyweb" {
+			t.Errorf("refs[0] = %+v", refs[0])
+		}
+		if refs[1].Code != "#47480" || refs[1].Repo != "orthly/orthlyweb" {
+			t.Errorf("refs[1] = %+v", refs[1])
+		}
+	})
+}
+
+func TestStripLinks(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"pr mid-line", "see https://github.com/orthly/orthlyweb/pull/47477 for details", "see for details"},
+		{"jira trailing", "ticket https://meetdandy.atlassian.net/browse/EPDCHAIR-5713", "ticket"},
+		{"both", "a https://github.com/a/b/pull/9 b https://x.atlassian.net/browse/AB-1 c", "a b c"},
+		{"no link untouched", "plain text", "plain text"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := StripLinks(tt.in); got != tt.want {
+				t.Errorf("StripLinks(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestShortenLinks(t *testing.T) {
 	t.Run("no links", func(t *testing.T) {
 		got, refs := ShortenLinks("plain text")

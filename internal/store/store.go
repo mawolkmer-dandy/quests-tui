@@ -75,6 +75,14 @@ func Load(path string) (*Store, error) {
 			s.Quests[i].Priority = model.PriorityHigh
 		}
 		s.Quests[i].Important = false
+
+		// Migrate the old single-PR fields into the PRs slice. The vestigial
+		// fields are cleared so they drop out on the next save.
+		if len(s.Quests[i].PRs) == 0 && s.Quests[i].PRCode != "" {
+			s.Quests[i].PRs = []model.PRLink{{Code: s.Quests[i].PRCode, Repo: s.Quests[i].PRRepo}}
+		}
+		s.Quests[i].PRCode = ""
+		s.Quests[i].PRRepo = ""
 	}
 	return &s, nil
 }

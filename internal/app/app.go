@@ -289,6 +289,16 @@ type Model struct {
 	focusBodyLineStart int
 	focusContentTop    int
 
+	// focusLinks are the navigable link lines (Jira + each PR) rendered above
+	// the body in the expanded quest view, in top-to-bottom order — arrowing up
+	// off the first body row steps onto the bottom-most of these. focusLinkIdx
+	// is which one the link cursor is on, or noSelection when the body owns the
+	// caret. Rebuilt each renderFocusContent. focusLinkConfirmID arms the inline
+	// y/n prompt for removing the focused link (mirrors confirmDeleteID).
+	focusLinks         []focusLink
+	focusLinkIdx       int
+	focusLinkConfirmID string
+
 	debug     bool
 	lastMsgAt time.Time
 }
@@ -307,6 +317,25 @@ type focusCodeSpan struct {
 	line   int // content line index within renderFocusContent
 	x0, x1 int
 	url    string
+}
+
+// linkKind distinguishes the two removable link kinds in the expanded quest
+// view, so removing one edits the right field on the quest.
+type linkKind int
+
+const (
+	linkJira linkKind = iota
+	linkPR
+)
+
+// focusLink is one navigable link line (the Jira line or a PR line) in the
+// expanded quest view: its content-line index (for caret tracking / scroll),
+// the URL Enter opens, and the identity needed to remove it (kind + code).
+type focusLink struct {
+	line int
+	kind linkKind
+	code string // "EPDCHAIR-5713" or "#47477"
+	url  string
 }
 
 // Options are the config-driven behavior knobs New consumes.
@@ -347,6 +376,7 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 		jiraBaseURL:         opts.JiraBaseURL,
 		prStatus:            map[string]PRStatus{},
 		jiraStatus:          map[string]JiraStatus{},
+		focusLinkIdx:        noSelection,
 	}
 	if rows := m.visibleRows(); len(rows) > 0 {
 		m.setCursor(rows[0])
@@ -564,7 +594,8 @@ func (m *Model) pushModal(next *Modal) {
 	m.modal = next
 	m.hover = nil // mouse is disabled while any modal is open; don't leave a stale hint behind
 	m.clearSelection()
-	m.focusScroll = 0 // a freshly opened focus view starts at the top
+	m.clearFocusLink() // a freshly opened focus view starts with the caret in the body
+	m.focusScroll = 0  // a freshly opened focus view starts at the top
 }
 
 // closeModal closes the current modal, returning to whatever was beneath it
@@ -575,6 +606,7 @@ func (m *Model) closeModal() {
 	// is just a rune index, meaningless (and potentially out of bounds) for
 	// a different, unrelated textinput.
 	m.clearSelection()
+	m.clearFocusLink()
 	m.focusScroll = 0 // re-entering a view below re-scrolls to its caret
 	if n := len(m.modalStack); n > 0 {
 		m.modal = m.modalStack[n-1]
@@ -868,7 +900,7 @@ func (m *Model) insertQuestMetaRows(rows []ui.Row) []ui.Row {
 			continue
 		}
 		q := m.findQuest(r.QuestID)
-		if q == nil || (q.JiraCode == "" && q.PRCode == "") {
+		if q == nil || (q.JiraCode == "" && len(q.PRs) == 0) {
 			continue
 		}
 		out = append(out, ui.Row{Kind: ui.RowQuestMeta, QuestID: r.QuestID, ProjectID: r.ProjectID, Nested: r.Nested})

@@ -43,7 +43,14 @@ var (
 	GlyphPRSuccess      = "✓" // PR CI: success (green)
 	GlyphPRError        = "✗" // PR CI: error/failure (red)
 	GlyphPRRunning      = "◌" // PR CI: running (amber)
-	GlyphLoading        = "·" // code linked but not yet synced (muted)
+	GlyphFetching       = "◌" // code linked but not yet synced — "fetching" (amber)
+	GlyphLoading        = "·" // legacy muted loading dot (kept for compatibility)
+
+	// GlyphStackNode marks each PR in an expanded Graphite-style stack; the
+	// vertical connector between stacked PRs uses GlyphStackConnector. Both
+	// render muted (see sync.go focusPRStackLines).
+	GlyphStackNode      = "○" // node mark on a PR line in an expanded stack
+	GlyphStackConnector = "│" // vertical connector between stacked PRs
 )
 
 // IconSet overrides the glyphs above from user config — empty fields keep

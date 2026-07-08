@@ -87,12 +87,24 @@ type Quest struct {
 	CompletedAt *time.Time  `json:"completedAt,omitempty"`
 
 	// Integration links, captured from URLs pasted into the body (see
-	// internal/model/links.go and internal/app/links.go). Each holds only the
-	// first of its kind found; extra links stay in the body, rendered
-	// shortened. All omitempty, so existing data needs no migration.
-	JiraCode string `json:"jiraCode,omitempty"` // e.g. "EPDCHAIR-5713"
-	PRCode   string `json:"prCode,omitempty"`   // e.g. "#47477"
-	PRRepo   string `json:"prRepo,omitempty"`   // e.g. "orthly/orthlyweb"
+	// internal/model/links.go and internal/app/links.go). JiraCode holds only
+	// the first Jira issue found; PRs holds every linked GitHub PR in the
+	// order it was captured. All omitempty, so existing data needs no
+	// migration.
+	JiraCode string   `json:"jiraCode,omitempty"` // e.g. "EPDCHAIR-5713"
+	PRs      []PRLink `json:"prs,omitempty"`      // every linked GitHub PR
+
+	// Legacy single-PR fields, kept only so pre-PRs data migrates on load (see
+	// store.Load); cleared there so they drop out on the next save.
+	PRCode string `json:"prCode,omitempty"` // deprecated: migrated into PRs
+	PRRepo string `json:"prRepo,omitempty"` // deprecated: migrated into PRs
+}
+
+// PRLink is one linked GitHub pull request: its short code ("#47477") and the
+// "owner/repo" it lives in.
+type PRLink struct {
+	Code string `json:"code"`
+	Repo string `json:"repo"`
 }
 
 // InQuestboard reports whether a quest is currently an untriaged notice on

@@ -1,6 +1,9 @@
 package model
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // Link detection for integration capture (see internal/app/links.go). These
 // are deliberately pure and self-contained so they can be unit-tested and
@@ -41,6 +44,36 @@ func DetectPR(text string) (repo, num string, ok bool) {
 	}
 	return m[1], m[2], true
 }
+
+// PRRef is one detected GitHub PR: its short code ("#47477") and "owner/repo".
+type PRRef struct {
+	Code string
+	Repo string
+}
+
+// DetectPRs returns every GitHub PR in text, in reading order, as PRRefs. Used
+// by the capture path to link all PRs pasted into a quest's body (not just the
+// first).
+func DetectPRs(text string) []PRRef {
+	var refs []PRRef
+	for _, m := range prURLRE.FindAllStringSubmatch(text, -1) {
+		refs = append(refs, PRRef{Code: "#" + m[2], Repo: m[1]})
+	}
+	return refs
+}
+
+// StripLinks removes every Jira browse URL and GitHub PR URL from text and
+// tidies the doubled / edge whitespace their removal leaves behind, returning
+// the cleaned text. Used by the paste-time capture path to pull a pasted URL
+// out of the line once its code has been captured.
+func StripLinks(text string) string {
+	text = jiraURLRE.ReplaceAllString(text, "")
+	text = prURLRE.ReplaceAllString(text, "")
+	text = collapseSpacesRE.ReplaceAllString(text, " ")
+	return strings.TrimSpace(text)
+}
+
+var collapseSpacesRE = regexp.MustCompile(`[ \t]{2,}`)
 
 // ShortenLinks replaces every Jira browse URL and GitHub PR URL in text with
 // its short code ("EPDCHAIR-5713" / "#47477"), returning the rewritten text

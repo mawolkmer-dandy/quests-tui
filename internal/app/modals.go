@@ -627,6 +627,14 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 			m.closeModal()
 			return nil
 		}
+		// The link cursor (Jira/PR lines above the body) owns navigation when
+		// it's active — Enter opens, Ctrl+X arms removal, up/down step through
+		// the links and hand back to the body off the bottom.
+		if m.onFocusLink() {
+			if cmd, handled := m.handleFocusLinkKey(msg, q); handled {
+				return cmd
+			}
+		}
 		if msg.Type == tea.KeyEsc {
 			m.commitBodyLine()
 			m.closeModal()
@@ -636,7 +644,10 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 			return cmd
 		}
 		if msg.String() == "up" {
-			m.moveBodyCursor(-1)
+			// Off the top of the body, step onto the bottom-most link line.
+			if !m.moveBodyCursor(-1) && m.integrationsEnabled && m.focusLinkCount(q) > 0 {
+				m.focusLinkIdx = m.focusLinkCount(q) - 1
+			}
 			return nil
 		}
 		if msg.String() == "down" {
@@ -644,10 +655,21 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		if cmd, handled := m.handleBodyOutlineKey(msg); handled {
+			// A multiline paste can carry linkable URLs — capture across every
+			// line the paste produced, immediately.
+			if syncCmd := m.captureAllBodyLinks(q); syncCmd != nil {
+				return tea.Batch(cmd, syncCmd)
+			}
 			return cmd
 		}
 		var cmd tea.Cmd
 		mod.BodyEditor, cmd = mod.BodyEditor.Update(msg)
+		// After an ordinary edit, if the current line now holds a complete
+		// Jira/PR URL, capture it, strip it from the line, and fire an
+		// immediate sync for just the new code(s).
+		if syncCmd := m.captureCurrentBodyLink(q); syncCmd != nil {
+			return tea.Batch(cmd, syncCmd)
+		}
 		return cmd
 
 	case ModalCampaignDetail:
@@ -860,6 +882,14 @@ func (m *Model) renderModal() string {
 		fmt.Fprintf(&b, "%-11s%s\n", "Shift+←/→", ui.StyleMuted.Render("select character by character (copies as it grows)"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Shift+↑/↓", ui.StyleMuted.Render("extend the selection across lines (copy-only)"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Mouse", ui.StyleMuted.Render("click a line and drag, across lines too"))
+		b.WriteString("\n")
+
+		b.WriteString(ui.StyleSectionHeader.Render("Integration links (quest detail)"))
+		b.WriteString("\n")
+		fmt.Fprintf(&b, "%-11s%s\n", "Paste URL", ui.StyleMuted.Render("a Jira/PR URL is captured instantly and pulled out of the line"))
+		fmt.Fprintf(&b, "%-11s%s\n", "↑ from body", ui.StyleMuted.Render("steps onto the link lines above; ↓ returns to the body"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Enter", ui.StyleMuted.Render("open the focused link in the browser"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+X", ui.StyleMuted.Render("remove the focused link (inline y/n)"))
 		b.WriteString("\n")
 
 		b.WriteString(ui.StyleSectionHeader.Render("Campaign quest list"))
@@ -1080,6 +1110,7 @@ func (m *Model) handleFocusMouse(msg tea.MouseMsg) tea.Cmd {
 	textCol := m.focusLeftMargin + 4 + 2*(*body)[bodyIdx].Indent
 
 	if press {
+		m.clearFocusLink() // clicking into the body takes the caret out of the links
 		m.commitBodyLine()
 		raw := []rune((*body)[bodyIdx].Text)
 		pos := clampInt(m.focusRowOffset[bodyRow]+msg.X-textCol, 0, len(raw))
@@ -1113,6 +1144,7 @@ func (m *Model) renderFocusContent() string {
 	m.focusRowOffset = m.focusRowOffset[:0]
 	m.focusCaretLine = 0
 	m.focusCodeSpans = nil
+	m.focusLinks = nil
 	m.focusBodyLineStart = 0
 
 	var b strings.Builder
@@ -1140,18 +1172,22 @@ func (m *Model) renderFocusContent() string {
 		// gap before the body (see the design). Clickable spans are recorded
 		// against their content-line index for handleFocusMouse.
 		if m.integrationsEnabled {
-			for _, line := range m.focusCodeLines(q, ln) {
+			codeLines := m.focusCodeLines(q, ln)
+			for _, line := range codeLines {
 				emit(line)
 			}
-			if q.JiraCode != "" || q.PRCode != "" {
+			if len(codeLines) > 0 {
 				emit("")
 			}
 		}
 		m.focusBodyLineStart = ln
 		for i, l := range q.Body {
-			rows, caret := m.renderBodyLineWrapped(i, l, i == mod.BodyCursor, m.focusTextWidth)
+			// While the link cursor owns the caret, the body line isn't the
+			// caret line — focusCodeLines already recorded the focused link's
+			// line, so don't let the body's own cursor overwrite it.
+			rows, caret := m.renderBodyLineWrapped(i, l, !m.onFocusLink() && i == mod.BodyCursor, m.focusTextWidth)
 			for ri, row := range rows {
-				if ri == caret {
+				if !m.onFocusLink() && ri == caret {
 					m.focusCaretLine = ln
 				}
 				emit(row)
