@@ -152,12 +152,22 @@ func main() {
 		}
 	}
 
+	// Enforce a 15s floor on the sync interval so a misconfigured tiny value
+	// can't hammer gh/acli.
+	syncSecs := cfg.Behavior.SyncIntervalSecs
+	if syncSecs < 15 {
+		syncSecs = 15
+	}
+
 	m := app.New(s, dataPath, darkBg, app.Options{
 		QuestboardCollapsed: cfg.Behavior.QuestboardCollapsed,
 		VaultCollapsed:      cfg.Behavior.VaultCollapsed,
 		ShowHints:           cfg.Behavior.ShowHints,
 		Animations:          cfg.Behavior.Animations,
 		Greeting:            cfg.Behavior.Greeting,
+		IntegrationsEnabled: cfg.Behavior.IntegrationsEnabled,
+		SyncInterval:        time.Duration(syncSecs) * time.Second,
+		JiraBaseURL:         cfg.Behavior.JiraBaseURL,
 	})
 
 	if os.Getenv("QUESTS_DEBUG") != "" {

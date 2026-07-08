@@ -85,6 +85,14 @@ type Quest struct {
 	CreatedAt   time.Time   `json:"createdAt"`
 	UpdatedAt   time.Time   `json:"updatedAt"`
 	CompletedAt *time.Time  `json:"completedAt,omitempty"`
+
+	// Integration links, captured from URLs pasted into the body (see
+	// internal/model/links.go and internal/app/links.go). Each holds only the
+	// first of its kind found; extra links stay in the body, rendered
+	// shortened. All omitempty, so existing data needs no migration.
+	JiraCode string `json:"jiraCode,omitempty"` // e.g. "EPDCHAIR-5713"
+	PRCode   string `json:"prCode,omitempty"`   // e.g. "#47477"
+	PRRepo   string `json:"prRepo,omitempty"`   // e.g. "orthly/orthlyweb"
 }
 
 // InQuestboard reports whether a quest is currently an untriaged notice on

@@ -255,6 +255,11 @@ func (m *Model) commitBodyLine() {
 		return
 	}
 	(*body)[mod.BodyCursor].Text = mod.BodyEditor.Value()
+	if mod.Kind == ModalQuestDetail {
+		if q := m.findQuest(mod.QuestID); q != nil {
+			m.captureLinks(q)
+		}
+	}
 	m.touchBodyOwner()
 }
 
@@ -784,6 +789,19 @@ func (m *Model) renderModal() string {
 		}
 		b.WriteString("\n")
 
+		b.WriteString(ui.StyleSectionHeader.Render("Integrations"))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("Paste a Jira or GitHub PR URL into a quest's body to link it; click a"))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("code to open it. PR shows " + ui.GlyphPRSuccess + "/" + ui.GlyphPRError + "/" + ui.GlyphPRRunning + " + unresolved/total comments,"))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("Jira shows " + ui.GlyphJiraTodo + "/" + ui.GlyphJiraInProgress + "/" + ui.GlyphJiraDone + " (todo / in progress / done), refreshed every ~60s."))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("Requires gh and acli authenticated locally (gh auth login; acli jira"))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("auth login)."))
+		b.WriteString("\n\n")
+
 		b.WriteString(ui.StyleSectionHeader.Render("Keys"))
 		b.WriteString("\n")
 		for _, group := range Keys.FullHelp() {
@@ -953,7 +971,11 @@ func (m *Model) renderFocusView() string {
 	// Screen positions used by handleFocusMouse (shifted up by scroll). The
 	// header's extents make "← back (esc)" and "F1 help" clickable (the
 	// latter only while it's not swapped out for the clipboard toast).
-	m.focusBodyBaseRow = topPad + 4 - scroll
+	// Content line 0 sits two rows below topPad (the header + its blank);
+	// body row 0 is focusBodyLineStart content lines further down (title,
+	// integration codes, blanks push it down).
+	m.focusContentTop = topPad + 2 - scroll
+	m.focusBodyBaseRow = m.focusContentTop + m.focusBodyLineStart
 	m.focusHeaderRow = topPad - scroll
 	m.focusBackWidth = lipgloss.Width(back)
 	m.focusHelpX = leftMargin + m.focusBackWidth + pad
@@ -1026,6 +1048,15 @@ func (m *Model) handleFocusMouse(msg tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 
+	// A click on an integration code (Jira/PR) under the title opens its URL.
+	if press {
+		for _, sp := range m.focusCodeSpans {
+			if msg.Y == m.focusContentTop+sp.line && msg.X >= sp.x0 && msg.X < sp.x1 {
+				return openURL(sp.url)
+			}
+		}
+	}
+
 	if mod.Kind == ModalCampaignDetail && mod.InQuestList {
 		return nil
 	}
@@ -1081,6 +1112,8 @@ func (m *Model) renderFocusContent() string {
 	m.focusRowLine = m.focusRowLine[:0]
 	m.focusRowOffset = m.focusRowOffset[:0]
 	m.focusCaretLine = 0
+	m.focusCodeSpans = nil
+	m.focusBodyLineStart = 0
 
 	var b strings.Builder
 	ln := 0 // lines emitted so far, so we can record where the caret lands
@@ -1103,6 +1136,18 @@ func (m *Model) renderFocusContent() string {
 		}
 		emit(glyphStyle.Render(glyph) + " " + ui.StyleTitle.Render(title))
 		emit("")
+		// Integration codes stacked vertically under the title, then a blank
+		// gap before the body (see the design). Clickable spans are recorded
+		// against their content-line index for handleFocusMouse.
+		if m.integrationsEnabled {
+			for _, line := range m.focusCodeLines(q, ln) {
+				emit(line)
+			}
+			if q.JiraCode != "" || q.PRCode != "" {
+				emit("")
+			}
+		}
+		m.focusBodyLineStart = ln
 		for i, l := range q.Body {
 			rows, caret := m.renderBodyLineWrapped(i, l, i == mod.BodyCursor, m.focusTextWidth)
 			for ri, row := range rows {
@@ -1128,6 +1173,7 @@ func (m *Model) renderFocusContent() string {
 
 		emit(ui.StyleTitle.Render(name) + progress)
 		emit("")
+		m.focusBodyLineStart = ln
 		for i, l := range p.Body {
 			editing := !mod.InQuestList && i == mod.BodyCursor
 			rows, caret := m.renderBodyLineWrapped(i, l, editing, m.focusTextWidth)

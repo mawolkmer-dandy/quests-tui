@@ -21,6 +21,11 @@ const (
 	RowNewQuest
 	RowSpacer
 	RowLabel
+	// RowQuestMeta is the non-selectable integration sub-line rendered just
+	// below a quest row that has a Jira/PR link (see internal/app rendering).
+	// It's deliberately absent from Selectable() so cursor nav and the mouse
+	// skip it, keeping one selectable row per screen line.
+	RowQuestMeta
 )
 
 // Row is one visible line of the outline. Quest rows under a project don't

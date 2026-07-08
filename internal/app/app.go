@@ -258,8 +258,55 @@ type Model struct {
 	// those stragglers can't land in the text.
 	lastWheelAt time.Time
 
+	// Integration sync (see sync.go). prStatus/jiraStatus cache the latest
+	// fetched status keyed by code; neither is persisted nor part of undo.
+	// integrationsEnabled gates the whole feature (config); syncInterval is
+	// the ticker period (>=15s floor); jiraBaseURL builds clickable Jira
+	// links. syncing guards against overlapping fetch passes; lastSyncAt is
+	// when the most recent pass landed.
+	integrationsEnabled bool
+	syncInterval        time.Duration
+	jiraBaseURL         string
+	prStatus            map[string]PRStatus
+	jiraStatus          map[string]JiraStatus
+	syncing             bool
+	lastSyncAt          time.Time
+
+	// codeSpans maps a visible row index to the clickable extents of the
+	// integration codes rendered on its meta sub-line, parallel to hintSpans
+	// (see handleMouse). focusCodeSpans is the same for the expanded quest
+	// focus view (see handleFocusMouse).
+	codeSpans      map[int][]codeSpan
+	focusCodeSpans []focusCodeSpan
+
+	// focusBodyLineStart is the content-line index (within renderFocusContent's
+	// output) at which the first body row is emitted — the title, integration
+	// codes, and blanks above it push it down, so handleFocusMouse maps a
+	// click Y back to a body row against this rather than a fixed offset.
+	// focusContentTop is content line 0's screen row (topPad + header rows -
+	// scroll), so a recorded focus code span's screen row is that plus the
+	// span's content line.
+	focusBodyLineStart int
+	focusContentTop    int
+
 	debug     bool
 	lastMsgAt time.Time
+}
+
+// codeSpan is an integration code's clickable extent in absolute screen
+// columns, carrying the URL a click should open.
+type codeSpan struct {
+	x0, x1 int
+	url    string
+}
+
+// focusCodeSpan is a codeSpan in the expanded quest focus view, recorded
+// against its content-line index (converted to a screen row at hit-test time
+// via focusContentTop, since the view scrolls).
+type focusCodeSpan struct {
+	line   int // content line index within renderFocusContent
+	x0, x1 int
+	url    string
 }
 
 // Options are the config-driven behavior knobs New consumes.
@@ -269,6 +316,13 @@ type Options struct {
 	ShowHints           bool
 	Animations          bool
 	Greeting            string // empty picks a random tavern greeting
+
+	// Integrations wiring (see sync.go). IntegrationsEnabled gates the whole
+	// Jira/PR feature; SyncInterval is the refresh period (a 15s floor is
+	// enforced by the caller); JiraBaseURL builds clickable Jira links.
+	IntegrationsEnabled bool
+	SyncInterval        time.Duration
+	JiraBaseURL         string
 }
 
 func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
@@ -277,17 +331,22 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 		subtitle = ui.RandomGreeting()
 	}
 	m := &Model{
-		store:             s,
-		path:              path,
-		darkBg:            darkBg,
-		subtitle:          subtitle,
-		collapsedProjects: map[string]bool{},
-		collapsedSections: map[string]bool{"inbox": opts.QuestboardCollapsed, "someday": opts.VaultCollapsed},
-		selAnchor:         noSelection,
-		selAnchorLine:     noSelection,
-		hideHoverTips:     !opts.ShowHints,
-		animate:           opts.Animations,
-		lastSnapshot:      s.Snapshot(),
+		store:               s,
+		path:                path,
+		darkBg:              darkBg,
+		subtitle:            subtitle,
+		collapsedProjects:   map[string]bool{},
+		collapsedSections:   map[string]bool{"inbox": opts.QuestboardCollapsed, "someday": opts.VaultCollapsed},
+		selAnchor:           noSelection,
+		selAnchorLine:       noSelection,
+		hideHoverTips:       !opts.ShowHints,
+		animate:             opts.Animations,
+		lastSnapshot:        s.Snapshot(),
+		integrationsEnabled: opts.IntegrationsEnabled,
+		syncInterval:        opts.SyncInterval,
+		jiraBaseURL:         opts.JiraBaseURL,
+		prStatus:            map[string]PRStatus{},
+		jiraStatus:          map[string]JiraStatus{},
 	}
 	if rows := m.visibleRows(); len(rows) > 0 {
 		m.setCursor(rows[0])
@@ -305,7 +364,11 @@ func (m *Model) Init() tea.Cmd {
 	// Update) so it doesn't burn frames before there's a size to render into.
 	// Start watching the quick-add spool so captures made elsewhere (CLI,
 	// Raycast) show up live without a relaunch.
-	return m.watchQuickAdd()
+	cmds := []tea.Cmd{m.watchQuickAdd()}
+	if m.integrationsEnabled {
+		cmds = append(cmds, syncTick(m.syncInterval))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -347,6 +410,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // stale ticker from an interrupted transition
 		}
 		return m, m.advanceTransition()
+
+	case syncTickMsg:
+		return m, m.onSyncTick()
+
+	case syncResultMsg:
+		m.applySyncResult(msg)
+		return m, nil
 
 	case warningExpireMsg:
 		m.clearWarningIfCurrent(msg.gen)
@@ -647,7 +717,7 @@ func (m *Model) wildsRows() []ui.Row {
 		}
 		rows = append(rows, ui.Row{Kind: ui.RowQuest, ProjectID: q.ProjectID, QuestID: id, ShowProjectTag: true})
 	}
-	return rows
+	return m.insertQuestMetaRows(rows)
 }
 
 // wildsEligible maps every quest that can appear in the Wilds (under a
@@ -783,12 +853,35 @@ func (m *Model) animateFilter(fn func()) tea.Cmd {
 	return m.beginTransition(old, kindFilter)
 }
 
+// insertQuestMetaRows inserts a non-selectable RowQuestMeta immediately after
+// every RowQuest whose quest carries a Jira or PR link, so the integration
+// sub-line renders directly under its quest. The meta row inherits the quest's
+// ID and Nested flag (for indent alignment). A no-op when integrations are off.
+func (m *Model) insertQuestMetaRows(rows []ui.Row) []ui.Row {
+	if !m.integrationsEnabled {
+		return rows
+	}
+	out := make([]ui.Row, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r)
+		if r.Kind != ui.RowQuest {
+			continue
+		}
+		q := m.findQuest(r.QuestID)
+		if q == nil || (q.JiraCode == "" && q.PRCode == "") {
+			continue
+		}
+		out = append(out, ui.Row{Kind: ui.RowQuestMeta, QuestID: r.QuestID, ProjectID: r.ProjectID, Nested: r.Nested})
+	}
+	return out
+}
+
 func (m *Model) visibleRows() []ui.Row {
 	if m.wilds {
 		return m.wildsRows()
 	}
 	if !m.searchOpen {
-		return ui.BuildRows(m.store, m.collapsedProjects, m.collapsedSections)
+		return m.insertQuestMetaRows(ui.BuildRows(m.store, m.collapsedProjects, m.collapsedSections))
 	}
 	// While searching, ignore collapse state so a match in any campaign or
 	// section still surfaces (empty groups are dropped below).
@@ -829,7 +922,7 @@ func (m *Model) visibleRows() []ui.Row {
 		}
 		i++ // RowNewProject: not relevant while searching
 	}
-	return out
+	return m.insertQuestMetaRows(out)
 }
 
 // setCursor moves the cursor to row and (re)seeds the live editor for it —
@@ -1102,6 +1195,7 @@ func (m *Model) View() string {
 	m.chipLineRow = topPad + len(logoLines) + 1
 
 	m.hintSpans = map[int][]hintSpan{}
+	m.codeSpans = map[int][]codeSpan{}
 	hoverIdx := -1
 	if m.hover != nil {
 		hoverIdx = findRowIndex(rows, *m.hover)
@@ -1135,6 +1229,15 @@ func (m *Model) View() string {
 	b.WriteString("\n") // breathing room between the filter line and the list
 	for i := m.scrollOffset; i < end; i++ {
 		row := rows[i]
+		if row.Kind == ui.RowQuestMeta {
+			line, spans := m.renderQuestMetaLine(row, contentWidth)
+			if len(spans) > 0 {
+				m.codeSpans[i] = spans
+			}
+			b.WriteString(clip.Render(margin + line))
+			b.WriteString("\n")
+			continue
+		}
 		isCursor := i == idx
 		confirming := isCursor && m.confirmDeleteID != "" && rowMatchesConfirmDelete(row, m.confirmDeleteID)
 		warning := m.warningText != "" && m.warningTarget.matches(row)

@@ -783,6 +783,17 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	if row.Kind == ui.RowSpacer {
 		return nil
 	}
+	// A click on an integration code in a quest's meta sub-line opens its
+	// URL. Meta rows aren't selectable, so this is handled before any cursor
+	// move (which would otherwise reject them).
+	if row.Kind == ui.RowQuestMeta {
+		for _, sp := range m.codeSpans[idx] {
+			if msg.X >= sp.x0 && msg.X < sp.x1 {
+				return openURL(sp.url)
+			}
+		}
+		return nil
+	}
 	relX := msg.X - m.leftMargin
 	nestOffset := 0
 	if row.Nested {
@@ -871,7 +882,7 @@ func (m *Model) updateHover(msg tea.MouseMsg, rows []ui.Row) {
 		return
 	}
 	idx := m.scrollOffset + relY
-	if idx < 0 || idx >= len(rows) || rows[idx].Kind == ui.RowSpacer {
+	if idx < 0 || idx >= len(rows) || rows[idx].Kind == ui.RowSpacer || rows[idx].Kind == ui.RowQuestMeta {
 		m.hover = nil
 		return
 	}

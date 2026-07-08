@@ -557,6 +557,16 @@ func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, wid
 		return rows, cursorSeg
 	}
 
+	// TODO(integrations): render any EXTRA Jira/PR URL on a non-edited body
+	// line shortened to its code (model.ShortenLinks), clickable. Deferred
+	// because shortening `display` shifts every downstream rune offset used by
+	// the cross-line selection range mapping (bodyLineSelRange/strip) and the
+	// focusRowOffset mouse hit-test map — reconciling those against the
+	// pre-shorten raw text needs its own offset-translation layer to avoid
+	// breaking selection and caret placement. The captured code is already
+	// surfaced above the body (see renderFocusContent / focusCodeLines), so
+	// links are still visible and clickable; only inline shortening of extras
+	// is pending.
 	dr := []rune(display)
 	strip := len([]rune(l.Text)) - len(dr)
 	selLo, selHi, hasSel := m.bodyLineSelRange(i, len([]rune(l.Text)))

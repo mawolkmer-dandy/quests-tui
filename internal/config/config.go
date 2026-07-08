@@ -48,6 +48,16 @@ type Behavior struct {
 	Backups bool `toml:"backups"`
 	// BackupKeep is how many daily backups to retain.
 	BackupKeep int `toml:"backup_keep"`
+	// IntegrationsEnabled turns on Jira/GitHub-PR linking: paste a URL into a
+	// quest's body to link it, and its status refreshes in the background.
+	// Requires `gh` and `acli` authenticated locally.
+	IntegrationsEnabled bool `toml:"integrations_enabled"`
+	// SyncIntervalSecs is how often (seconds) linked PR/Jira statuses refresh;
+	// a 15s floor is enforced when applied.
+	SyncIntervalSecs int `toml:"sync_interval_secs"`
+	// JiraBaseURL is the Jira instance base for building clickable browse
+	// links from an issue key.
+	JiraBaseURL string `toml:"jira_base_url"`
 }
 
 // Colors are hex values ("#E2B714"); each has a light- and dark-terminal
@@ -107,6 +117,9 @@ func Default() Config {
 			Greeting:            "",
 			Backups:             true,
 			BackupKeep:          14,
+			IntegrationsEnabled: true,
+			SyncIntervalSecs:    60,
+			JiraBaseURL:         "https://meetdandy.atlassian.net",
 		},
 		Colors: Colors{
 			MainLight:           "#DF8E1D",
@@ -204,6 +217,14 @@ greeting = ""
 # file, keeping the most recent backup_keep days.
 backups = true
 backup_keep = 14
+# Link Jira issues and GitHub PRs by pasting their URL into a quest's body:
+# the code (e.g. EPDCHAIR-5713 / #47477) then shows its live status, refreshed
+# every sync_interval_secs (minimum 15). Requires gh and acli authenticated
+# locally (gh auth login; acli jira auth login). jira_base_url builds the
+# clickable browse link from an issue key.
+integrations_enabled = true
+sync_interval_secs = 60
+jira_base_url = "https://meetdandy.atlassian.net"
 
 [colors]
 # Hex colors; *_light applies on light terminal themes, *_dark on dark.

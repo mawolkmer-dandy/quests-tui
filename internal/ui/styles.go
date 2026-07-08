@@ -31,6 +31,19 @@ var (
 	GlyphExpanded  = "▾"
 	GlyphCollapsed = "▸"
 	GlyphCursor    = "› "
+
+	// Integration status glyphs (see internal/app/sync.go rendering). Each is
+	// a single narrow char, matching the glyph discipline above. Jira status
+	// is a filling circle (empty → half → full); a PR shows a check/cross for
+	// CI and a dotted circle while it's still running; a code whose sync
+	// hasn't landed yet shows the muted loading dot.
+	GlyphJiraTodo       = "○" // Jira: to do (muted)
+	GlyphJiraInProgress = "◑" // Jira: in progress (gold)
+	GlyphJiraDone       = "●" // Jira: done (green)
+	GlyphPRSuccess      = "✓" // PR CI: success (green)
+	GlyphPRError        = "✗" // PR CI: error/failure (red)
+	GlyphPRRunning      = "◌" // PR CI: running (amber)
+	GlyphLoading        = "·" // code linked but not yet synced (muted)
 )
 
 // IconSet overrides the glyphs above from user config — empty fields keep
@@ -74,6 +87,7 @@ var (
 	ColorHeading        = lipgloss.AdaptiveColor{Light: "#40A02B", Dark: "#A6E3A1"}
 	ColorImportant      = lipgloss.AdaptiveColor{Light: "#D20F39", Dark: "#F38BA8"} // high priority (red)
 	ColorPriorityMedium = lipgloss.AdaptiveColor{Light: "#DF8E1D", Dark: "#F9E2AF"} // medium priority (yellow)
+	ColorRunning        = lipgloss.AdaptiveColor{Light: "#FE640B", Dark: "#FAB387"} // integration "running" state (amber)
 	ColorSelected       = lipgloss.AdaptiveColor{Light: "#CCD0DA", Dark: "#313244"}
 
 	StyleTitle          = lipgloss.NewStyle().Bold(true)
@@ -84,6 +98,7 @@ var (
 	StyleCursor         = lipgloss.NewStyle().Foreground(ColorAccent)
 	StyleImportant      = lipgloss.NewStyle().Bold(true).Foreground(ColorImportant)      // high priority
 	StylePriorityMedium = lipgloss.NewStyle().Bold(true).Foreground(ColorPriorityMedium) // medium priority
+	StyleRunning        = lipgloss.NewStyle().Foreground(ColorRunning)                   // integration "running" state
 
 	// Selected rows (used by the project-picker modal's list) set both fg
 	// and bg explicitly as a self-consistent pair, so contrast holds

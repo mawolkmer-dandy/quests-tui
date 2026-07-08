@@ -105,6 +105,9 @@ func (m *Model) currentRowLines() []string {
 	rows := m.visibleRows()
 	out := make([]string, 0, len(rows))
 	for _, r := range rows {
+		if r.Kind == ui.RowQuestMeta {
+			continue // meta sub-lines are app-level; skip in the cosmetic transition snapshot
+		}
 		line, _ := ui.RenderRow(r, m.store, "", false, cw, "")
 		out = append(out, line)
 	}
