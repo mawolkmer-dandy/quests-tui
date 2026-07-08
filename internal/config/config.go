@@ -38,8 +38,9 @@ type Behavior struct {
 	// ShowHints shows the inline action hints ("→ open (tab)"); toggleable
 	// at runtime either way.
 	ShowHints bool `toml:"show_hints"`
-	// Intro plays the startup logo animation.
-	Intro bool `toml:"intro"`
+	// Animations plays the environment-change animation (startup, Tavern⇄
+	// Afield, and filter changes). Set false to switch instantly.
+	Animations bool `toml:"animations"`
 	// Greeting fixes the subtitle under the logo; empty picks a random
 	// tavern greeting each launch.
 	Greeting string `toml:"greeting"`
@@ -102,7 +103,7 @@ func Default() Config {
 			QuestboardCollapsed: true,
 			VaultCollapsed:      true,
 			ShowHints:           true,
-			Intro:               true,
+			Animations:          true,
 			Greeting:            "",
 			Backups:             true,
 			BackupKeep:          14,
@@ -194,8 +195,9 @@ questboard_collapsed = true
 vault_collapsed = true
 # Show the inline action hints ("→ open (tab)"); toggleable at runtime too.
 show_hints = true
-# Play the startup logo animation.
-intro = true
+# Play the environment-change animation (startup, Tavern⇄Afield, filtering).
+# Set false to switch instantly.
+animations = true
 # Fix the subtitle under the logo; leave empty for a random tavern greeting.
 greeting = ""
 # Write a daily copy of data.json into the backups/ folder next to this

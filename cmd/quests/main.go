@@ -156,7 +156,7 @@ func main() {
 		QuestboardCollapsed: cfg.Behavior.QuestboardCollapsed,
 		VaultCollapsed:      cfg.Behavior.VaultCollapsed,
 		ShowHints:           cfg.Behavior.ShowHints,
-		Intro:               cfg.Behavior.Intro,
+		Animations:          cfg.Behavior.Animations,
 		Greeting:            cfg.Behavior.Greeting,
 	})
 

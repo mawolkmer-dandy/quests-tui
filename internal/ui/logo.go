@@ -134,6 +134,9 @@ func introShineTitle(frame int) string {
 	return b.String()
 }
 
+// CenterText centers s within width (ANSI-aware).
+func CenterText(s string, width int) string { return centerText(s, width) }
+
 func centerText(s string, width int) string {
 	w := lipgloss.Width(s)
 	pad := (width - w) / 2

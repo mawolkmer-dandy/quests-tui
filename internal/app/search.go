@@ -196,8 +196,8 @@ func (m *Model) handleSearchBarKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		if m.searchFocus == focusText {
 			return m.handleReveal(), true // open the cursor's quest
 		}
-		m.cycleFacet(m.searchFocus, 1)
-		return nil, true
+		focus := m.searchFocus
+		return m.animateFilter(func() { m.cycleFacet(focus, 1) }), true
 	case msg.Type == tea.KeyRunes, msg.Type == tea.KeySpace,
 		msg.Type == tea.KeyBackspace, msg.Type == tea.KeyDelete:
 		var cmd tea.Cmd

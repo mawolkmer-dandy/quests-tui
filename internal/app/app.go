@@ -137,6 +137,11 @@ type Model struct {
 	chipLineRow int
 	chipSpans   []chipSpan
 
+	// modeToggleRow / modeSpans: the TAVERN/AFIELD header's screen row and the
+	// two labels' click extents (see handleMouse).
+	modeToggleRow int
+	modeSpans     []modeSpan
+
 	// Inline search/filter bar (Ctrl+F) — see search.go.
 	searchOpen       bool
 	searchInput      textinput.Model
@@ -150,12 +155,14 @@ type Model struct {
 	scrollOffset  int
 	subtitle      string
 
-	// startup logo animation (see anim.go, ui.RenderLogoIntro) — plays in
-	// place inside the already fully-laid-out outline; introDone switches
-	// the logo over to its plain, static rendering once it finishes (or is
-	// skipped by a keypress).
-	introFrame int
-	introDone  bool
+	// Environment-change animation (see transition.go): old rows burn away
+	// right-to-left, a pause, then the new view reveals line by line. Runs on
+	// startup, Tavern⇄Afield, and filter changes. transPhase == transNone
+	// when idle.
+	transPhase transPhase
+	transFrame int
+	transOld   []string // rendered rows captured before the change, for the dissolve
+	transFast  bool     // filter changes animate faster than mode switches
 
 	// set each View() call, used by handleMouse to map screen coordinates
 	// back to a row index / in-row column.
@@ -256,7 +263,7 @@ type Options struct {
 	QuestboardCollapsed bool
 	VaultCollapsed      bool
 	ShowHints           bool
-	Intro               bool
+	Animations          bool
 	Greeting            string // empty picks a random tavern greeting
 }
 
@@ -275,8 +282,7 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 		selAnchor:         noSelection,
 		selAnchorLine:     noSelection,
 		hideHoverTips:     !opts.ShowHints,
-		introDone:         !opts.Intro,
-		animate:           opts.Intro,
+		animate:           opts.Animations,
 		lastSnapshot:      s.Snapshot(),
 	}
 	if rows := m.visibleRows(); len(rows) > 0 {
@@ -326,13 +332,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// most of the animation before there's anything to render it into.
 		firstSize := m.width == 0
 		m.width, m.height = msg.Width, msg.Height
-		if firstSize && !m.introDone {
-			return m, introTick()
+		if firstSize && m.animate {
+			// Reveal the opening view with the environment animation.
+			return m, m.beginTransition(nil, false)
 		}
 		return m, nil
 
-	case introTickMsg:
-		return m, m.advanceIntro()
+	case transTickMsg:
+		return m, m.advanceTransition()
 
 	case warningExpireMsg:
 		m.clearWarningIfCurrent(msg.gen)
@@ -370,8 +377,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handleKey(msg)
 
 	case tea.MouseMsg:
-		if !m.introDone {
-			return m, nil
+		if m.transitioning() {
+			return m, nil // ignore mouse mid-animation
 		}
 		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
 			m.lastWheelAt = time.Now()
@@ -647,6 +654,10 @@ func (m *Model) setAfield(on bool) tea.Cmd {
 		return nil
 	}
 	m.commitEdit()
+	old := m.currentRowLines() // snapshot the departing view for the dissolve
+	if m.searchOpen {
+		m.closeSearch()
+	}
 	m.afield = on
 	m.editor = nil
 	m.scrollOffset = 0
@@ -661,12 +672,31 @@ func (m *Model) setAfield(on bool) tea.Cmd {
 	} else {
 		m.cursor = cursorTarget{}
 	}
+	return m.beginTransition(old, false)
+}
+
+// contentWidth is the centered column the outline/header/footer live in.
+func (m *Model) contentWidth() int {
+	cw := m.width - 4
+	if cw > 80 {
+		cw = 80
+	}
+	if cw < 20 {
+		cw = 20
+	}
+	return cw
+}
+
+// animateFilter runs a filter change (chip/facet) wrapped in the fast
+// dissolve→reveal so the list visibly re-forms; instant when animations off.
+func (m *Model) animateFilter(fn func()) tea.Cmd {
 	if !m.animate {
+		fn()
 		return nil
 	}
-	m.introFrame = 0
-	m.introDone = false
-	return introTick()
+	old := m.currentRowLines()
+	fn()
+	return m.beginTransition(old, true)
 }
 
 func (m *Model) visibleRows() []ui.Row {
@@ -891,13 +921,11 @@ func (m *Model) View() string {
 		return m.renderModal()
 	}
 
-	contentWidth := m.width - 4
-	if contentWidth > 80 {
-		contentWidth = 80
+	if m.transitioning() {
+		return m.renderTransitionView()
 	}
-	if contentWidth < 20 {
-		contentWidth = 20
-	}
+
+	contentWidth := m.contentWidth()
 	m.leftMargin = (m.width - contentWidth) / 2
 	if m.leftMargin < 0 {
 		m.leftMargin = 0
@@ -911,10 +939,7 @@ func (m *Model) View() string {
 		availableHeight = 1
 	}
 
-	logoLines := ui.RenderLogo(contentWidth, m.subtitle)
-	if !m.introDone {
-		logoLines = ui.RenderLogoIntro(contentWidth, m.subtitle, m.introFrame)
-	}
+	logoLines := m.renderHeader(contentWidth)
 	logoHeight := len(logoLines) + 3 // blank after logo, reserved filter line, blank after filter
 
 	// Keep viewVPad blank rows top and bottom, but never let the padding eat
@@ -981,6 +1006,7 @@ func (m *Model) View() string {
 		bottomPad = 0
 	}
 	m.rowsScreenTop = topPad + logoHeight
+	m.modeToggleRow = topPad // the header's first line is the TAVERN/AFIELD toggle
 	// The reserved filter/chip line sits just above the rows (after the logo
 	// and its blank line) — its screen row is used for chip click hit-testing.
 	m.chipLineRow = topPad + len(logoLines) + 1
@@ -1143,15 +1169,14 @@ func (m *Model) renderFooter() string {
 	if m.clipboardToastActive {
 		return lipgloss.NewStyle().Padding(0, 1).Render(renderClipboardToast())
 	}
-	if m.afield {
-		return ui.StyleFooter.Render("⚔ afield · Ctrl+G return to the tavern")
+	// Mode switching lives in the header now; the footer just shows a taken-up
+	// count in the Tavern as a gentle nudge toward setting out.
+	if !m.afield {
+		if taken := m.takenCount(); taken > 0 {
+			return ui.StyleFooter.Render(fmt.Sprintf("%d taken up", taken))
+		}
 	}
-	taken := m.takenCount()
-	setOut := "⚔ Ctrl+G set out"
-	if taken > 0 {
-		setOut = fmt.Sprintf("⚔ Ctrl+G set out · %d taken up", taken)
-	}
-	return ui.StyleFooter.Render(setOut)
+	return ""
 }
 
 // takenCount is how many quests are currently taken up (active) under a

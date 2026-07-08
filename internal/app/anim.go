@@ -4,32 +4,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-
-	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
-
-const animFPS = 60 * time.Millisecond
-
-type introTickMsg struct{}
-
-func introTick() tea.Cmd {
-	return tea.Tick(animFPS, func(time.Time) tea.Msg { return introTickMsg{} })
-}
-
-// advanceIntro steps the startup shine/typewriter animation (see
-// ui.RenderLogoIntro) — View() renders it in place, in the logo's normal
-// spot, so nothing about the rest of the screen changes when it finishes.
-func (m *Model) advanceIntro() tea.Cmd {
-	if m.introDone {
-		return nil
-	}
-	m.introFrame++
-	if m.introFrame >= ui.IntroTotalFrames(m.subtitle) {
-		m.introDone = true
-		return nil
-	}
-	return introTick()
-}
 
 const warningDuration = 2 * time.Second
 
