@@ -43,9 +43,9 @@ var TavernGreetings = []string{
 	"Rumors and requests crowd the board.",
 }
 
-// AfieldGreetings are the subtitles shown out on the road (the Afield view),
+// WildsGreetings are the subtitles shown out on the road (the Wilds view),
 // picked fresh each time you set out.
-var AfieldGreetings = []string{
+var WildsGreetings = []string{
 	"The road unspools before you.",
 	"Boots on the trail, objectives ahead.",
 	"No walls here — only the task.",
@@ -63,9 +63,9 @@ func RandomGreeting() string {
 	return TavernGreetings[rand.Intn(len(TavernGreetings))]
 }
 
-// RandomAfieldGreeting picks one adventure subtitle line.
-func RandomAfieldGreeting() string {
-	return AfieldGreetings[rand.Intn(len(AfieldGreetings))]
+// RandomWildsGreeting picks one adventure subtitle line.
+func RandomWildsGreeting() string {
+	return WildsGreetings[rand.Intn(len(WildsGreetings))]
 }
 
 // RenderLogo returns the small banner shown above the outline, centered

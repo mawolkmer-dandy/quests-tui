@@ -39,7 +39,7 @@ type Behavior struct {
 	// at runtime either way.
 	ShowHints bool `toml:"show_hints"`
 	// Animations plays the environment-change animation (startup, Tavern⇄
-	// Afield, and filter changes). Set false to switch instantly.
+	// Wilds, and filter changes). Set false to switch instantly.
 	Animations bool `toml:"animations"`
 	// Greeting fixes the subtitle under the logo; empty picks a random
 	// tavern greeting each launch.
@@ -195,7 +195,7 @@ questboard_collapsed = true
 vault_collapsed = true
 # Show the inline action hints ("→ open (tab)"); toggleable at runtime too.
 show_hints = true
-# Play the environment-change animation (startup, Tavern⇄Afield, filtering).
+# Play the environment-change animation (startup, Tavern⇄Wilds, filtering).
 # Set false to switch instantly.
 animations = true
 # Fix the subtitle under the logo; leave empty for a random tavern greeting.

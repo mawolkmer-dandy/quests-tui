@@ -11,7 +11,7 @@ import (
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
 
-// The environment-change animation. Moving between the Tavern and Afield (or
+// The environment-change animation. Moving between the Tavern and Wilds (or
 // filtering, or launching) plays the same beat in both directions: the current
 // list burns away bottom-up, character by character, the block collapsing
 // toward center as lines vanish; the subtitle types out and the header word
@@ -41,7 +41,13 @@ const (
 	pauseFramesSlow = 3
 	pauseFramesFast = 1
 	burnTrail       = 3 // trailing columns dimmed (burning) before they vanish
-	modeWordLen     = 6 // "TAVERN" / "AFIELD"
+)
+
+// The two mode-toggle words (differ in length, so the letter animation uses
+// each word's own length).
+const (
+	tavernLabel = "TAVERN"
+	wildsLabel  = "WILDS"
 )
 
 var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
@@ -284,10 +290,10 @@ func (m *Model) transitionSubtitle() string {
 
 func (m *Model) transitioning() bool { return m.transPhase != transNone }
 
-// modeSpan is a TAVERN/AFIELD header label's clickable extent.
+// modeSpan is a TAVERN/WILDS header label's clickable extent.
 type modeSpan struct {
 	x0, x1 int
-	afield bool
+	wilds  bool
 }
 
 func allBools(n int, v bool) []bool {
@@ -313,40 +319,38 @@ func litFromRight(n, k int, set bool) []bool {
 	return out
 }
 
-// animatedModeLetters returns the per-letter brightness for TAVERN and AFIELD.
+// animatedModeLetters returns the per-letter brightness for TAVERN and WILDS.
 // The sweep flows in the switch direction so one word pours into the other: to
-// Afield it runs left-to-right (TAVERN mutes L→R, then AFIELD lights L→R); to
+// Wilds it runs left-to-right (TAVERN mutes L→R, then WILDS lights L→R); to
 // Tavern it runs right-to-left.
-func (m *Model) animatedModeLetters() (tav, afi []bool) {
-	n := modeWordLen
-	toAfield := m.afield
+func (m *Model) animatedModeLetters() (tav, wild []bool) {
+	nt, nw := len([]rune(tavernLabel)), len([]rune(wildsLabel))
+	toWilds := m.wilds
 	if m.transKind == kindFilter {
 		// Filter changes don't switch mode — keep the header static.
-		return allBools(n, !toAfield), allBools(n, toAfield)
+		return allBools(nt, !toWilds), allBools(nw, toWilds)
 	}
 	if m.transKind == kindStartup {
-		// No previous mode: just light TAVERN in, left-to-right; AFIELD stays
+		// No previous mode: just light TAVERN in, left-to-right; WILDS stays
 		// muted. (Startup is reveal-only.)
-		k := int(m.headerFraction() * float64(n))
-		return litFromLeft(n, k, true), allBools(n, false)
+		k := int(m.headerFraction() * float64(nt))
+		return litFromLeft(nt, k, true), allBools(nw, false)
 	}
 	switch m.transPhase {
 	case transDissolve:
-		k := int(m.headerFraction() * float64(n))
-		if toAfield {
-			return litFromLeft(n, k, false), allBools(n, false)
+		if toWilds { // leaving Tavern: TAVERN mutes L→R
+			return litFromLeft(nt, int(m.headerFraction()*float64(nt)), false), allBools(nw, false)
 		}
-		return allBools(n, false), litFromRight(n, k, false)
+		return allBools(nt, false), litFromRight(nw, int(m.headerFraction()*float64(nw)), false)
 	case transReveal:
-		k := int(m.headerFraction() * float64(n))
-		if toAfield {
-			return allBools(n, false), litFromLeft(n, k, true)
+		if toWilds { // arriving Wilds: WILDS lights L→R
+			return allBools(nt, false), litFromLeft(nw, int(m.headerFraction()*float64(nw)), true)
 		}
-		return litFromRight(n, k, true), allBools(n, false)
+		return litFromRight(nt, int(m.headerFraction()*float64(nt)), true), allBools(nw, false)
 	case transPause:
-		return allBools(n, false), allBools(n, false)
+		return allBools(nt, false), allBools(nw, false)
 	}
-	return allBools(n, !toAfield), allBools(n, toAfield)
+	return allBools(nt, !toWilds), allBools(nw, toWilds)
 }
 
 // renderHeader is the two banner lines for the resting view.
@@ -358,30 +362,31 @@ func (m *Model) renderHeader(width int) []string {
 }
 
 func (m *Model) renderModeToggle(width int) string {
-	return m.renderModeLine(width, allBools(modeWordLen, !m.afield), allBools(modeWordLen, m.afield))
+	return m.renderModeLine(width, allBools(len([]rune(tavernLabel)), !m.wilds), allBools(len([]rune(wildsLabel)), m.wilds))
 }
 
-// renderModeLine draws "TAVERN   AFIELD" with per-letter brightness, centering
+// renderModeLine draws "TAVERN   WILDS" with per-letter brightness, centering
 // the two words as a unit exactly where QUESTS sat. Padding is RELATIVE (the
 // caller prepends the left margin); modeSpans are absolute for click testing.
-func (m *Model) renderModeLine(width int, litTav, litAfi []bool) string {
-	const tav, afi, gap = "TAVERN", "AFIELD", "   "
-	coreW := len([]rune(tav)) + len([]rune(gap)) + len([]rune(afi))
+func (m *Model) renderModeLine(width int, litTav, litWild []bool) string {
+	const gap = "   "
+	tav, wild := tavernLabel, wildsLabel
+	coreW := len([]rune(tav)) + len([]rune(gap)) + len([]rune(wild))
 	pad := (width - coreW) / 2
 	if pad < 0 {
 		pad = 0
 	}
-	tw, aw := len([]rune(tav)), len([]rune(afi))
+	tw, ww := len([]rune(tav)), len([]rune(wild))
 	absX := m.leftMargin + pad
 	m.modeSpans = []modeSpan{
-		{x0: absX, x1: absX + tw, afield: false},
-		{x0: absX + tw + len([]rune(gap)), x1: absX + tw + len([]rune(gap)) + aw, afield: true},
+		{x0: absX, x1: absX + tw, wilds: false},
+		{x0: absX + tw + len([]rune(gap)), x1: absX + tw + len([]rune(gap)) + ww, wilds: true},
 	}
 	var b strings.Builder
 	b.WriteString(strings.Repeat(" ", pad))
 	b.WriteString(styledWord(tav, litTav))
 	b.WriteString(gap)
-	b.WriteString(styledWord(afi, litAfi))
+	b.WriteString(styledWord(wild, litWild))
 	if !m.hideHoverTips {
 		b.WriteString(ui.StyleMuted.Render("  ⌃G"))
 	}
@@ -402,7 +407,7 @@ func styledWord(word string, lit []bool) string {
 
 // renderTransitionView draws one animation frame, re-centered on the current
 // row count so the block collapses to the header and grows back out with no
-// end jump. The filter line (Afield chips / open search bar) stays put.
+// end jump. The filter line (Wilds chips / open search bar) stays put.
 func (m *Model) renderTransitionView() string {
 	width := m.contentWidth()
 	m.leftMargin = (m.width - width) / 2

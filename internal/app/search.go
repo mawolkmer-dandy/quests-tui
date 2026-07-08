@@ -14,7 +14,7 @@ import (
 // The inline search/filter bar (Ctrl+F) — a fuzzy name find plus priority /
 // status / type facet chips, shown on the reserved line in both views. It
 // replaces the old search modal. While open it filters the current view;
-// closing it clears the filter (and, in Afield, restores the quick chip that
+// closing it clears the filter (and, in Wilds, restores the quick chip that
 // was active before it opened).
 
 type facetPriority int
@@ -60,7 +60,7 @@ func newSearchInput() textinput.Model {
 	return ti
 }
 
-// openSearch shows the bar and focuses the text field. In Afield it parks the
+// openSearch shows the bar and focuses the text field. In Wilds it parks the
 // quick chip on All (so the search spans everything) and remembers the old one
 // to restore on close.
 func (m *Model) openSearch() {
@@ -72,7 +72,7 @@ func (m *Model) openSearch() {
 	m.searchFocus = focusText
 	m.searchInput = newSearchInput()
 	m.fPriority, m.fStatus, m.fType = fpAny, fsAny, ftAny
-	if m.afield {
+	if m.wilds {
 		m.savedQuickFilter = m.quickFilter
 		m.quickFilter = filterAll
 	}
@@ -80,14 +80,14 @@ func (m *Model) openSearch() {
 }
 
 // closeSearch hides the bar and clears the filter — back to All in the Tavern,
-// or the pre-search quick chip in Afield.
+// or the pre-search quick chip in Wilds.
 func (m *Model) closeSearch() {
 	if !m.searchOpen {
 		return
 	}
 	m.searchOpen = false
 	m.searchInput.Blur()
-	if m.afield {
+	if m.wilds {
 		m.quickFilter = m.savedQuickFilter
 	}
 	m.rehomeCursor()

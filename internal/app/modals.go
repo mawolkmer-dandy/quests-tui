@@ -757,11 +757,11 @@ func (m *Model) renderModal() string {
 		b.WriteString(ui.StyleSectionHeader.Render("Terms"))
 		b.WriteString("\n")
 		fmt.Fprintf(&b, "%-11s%s\n", "Tavern", ui.StyleMuted.Render("home base — the full outline: Questboard, campaigns, Vault"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Afield", ui.StyleMuted.Render("focused view (Ctrl+G) — just your taken-up quests to work through"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Wilds", ui.StyleMuted.Render("focused view (Ctrl+G) — just your taken-up quests to work through"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Questboard", ui.StyleMuted.Render("your inbox — new quests with no campaign yet"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Campaigns", ui.StyleMuted.Render("your projects — each lists its own quests"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Vault", ui.StyleMuted.Render("your archive — parked quests and retired campaigns"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Take up", ui.StyleMuted.Render("mark a quest active (Ctrl+A) to bring it Afield"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Take up", ui.StyleMuted.Render("mark a quest active (Ctrl+A) to bring it Wilds"))
 		b.WriteString("\n")
 
 		b.WriteString(ui.StyleSectionHeader.Render("Data"))

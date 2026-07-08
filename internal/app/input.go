@@ -37,12 +37,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.undo()
 		return nil
 	case key.Matches(msg, Keys.SetOut):
-		return m.setAfield(!m.afield)
-	case msg.Type == tea.KeyEsc && m.afield:
-		return m.setAfield(false)
-	case m.afield && key.Matches(msg, Keys.Left):
+		return m.setWilds(!m.wilds)
+	case msg.Type == tea.KeyEsc && m.wilds:
+		return m.setWilds(false)
+	case m.wilds && key.Matches(msg, Keys.Left):
 		return m.animateFilter(func() { m.cycleQuickFilter(-1) })
-	case m.afield && key.Matches(msg, Keys.Right):
+	case m.wilds && key.Matches(msg, Keys.Right):
 		return m.animateFilter(func() { m.cycleQuickFilter(1) })
 	case key.Matches(msg, Keys.Up):
 		m.moveCursor(-1)
@@ -744,19 +744,19 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 
-	// A click on a TAVERN/AFIELD header label switches to that mode.
+	// A click on a TAVERN/WILDS header label switches to that mode.
 	if msg.Y == m.modeToggleRow {
 		for _, sp := range m.modeSpans {
 			if msg.X >= sp.x0 && msg.X < sp.x1 {
-				return m.setAfield(sp.afield)
+				return m.setWilds(sp.wilds)
 			}
 		}
 		return nil
 	}
 
-	// A click on an Afield quick chip selects it (the chip line sits just
+	// A click on an Wilds quick chip selects it (the chip line sits just
 	// above the rows).
-	if m.afield && msg.Y == m.chipLineRow {
+	if m.wilds && msg.Y == m.chipLineRow {
 		for _, sp := range m.chipSpans {
 			if msg.X >= sp.x0 && msg.X < sp.x1 {
 				f := sp.filter

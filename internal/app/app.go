@@ -125,19 +125,19 @@ type Model struct {
 	lastSnapshot []byte
 	applyingUndo bool
 
-	// afield is the "out on the road" view: a flat, filtered list of quests
-	// (see afieldRows) instead of the full Tavern outline. quickFilter is the
+	// wilds is the "out on the road" view: a flat, filtered list of quests
+	// (see wildsRows) instead of the full Tavern outline. quickFilter is the
 	// radio chip narrowing it (All / High priority / Taken).
-	afield      bool
+	wilds       bool
 	quickFilter quickFilter
 	animate     bool // whether the intro/transition animation plays (config: intro)
 
 	// chipLineRow is the screen row of the reserved filter line; chipSpans are
-	// the Afield quick-chip click extents on it (see handleMouse).
+	// the Wilds quick-chip click extents on it (see handleMouse).
 	chipLineRow int
 	chipSpans   []chipSpan
 
-	// modeToggleRow / modeSpans: the TAVERN/AFIELD header's screen row and the
+	// modeToggleRow / modeSpans: the TAVERN/WILDS header's screen row and the
 	// two labels' click extents (see handleMouse).
 	modeToggleRow int
 	modeSpans     []modeSpan
@@ -157,7 +157,7 @@ type Model struct {
 
 	// Environment-change animation (see transition.go): old rows burn away
 	// right-to-left, a pause, then the new view reveals line by line. Runs on
-	// startup, Tavern⇄Afield, and filter changes. transPhase == transNone
+	// startup, Tavern⇄Wilds, and filter changes. transPhase == transNone
 	// when idle.
 	transPhase  transPhase
 	transFrame  int
@@ -522,7 +522,7 @@ type chipSpan struct {
 	filter quickFilter
 }
 
-// renderFilterLine renders the reserved line above the rows: the Afield quick
+// renderFilterLine renders the reserved line above the rows: the Wilds quick
 // chips, or blank (the Tavern, and the search bar, come from elsewhere). It
 // records chipSpans for click hit-testing.
 func (m *Model) renderFilterLine(width int, margin string) string {
@@ -530,7 +530,7 @@ func (m *Model) renderFilterLine(width int, margin string) string {
 	if m.searchOpen {
 		return margin + m.renderSearchBar()
 	}
-	if !m.afield {
+	if !m.wilds {
 		return ""
 	}
 	filters := []quickFilter{filterTaken, filterPriority, filterAll}
@@ -569,7 +569,7 @@ func (m *Model) renderFilterLine(width int, margin string) string {
 	return b.String()
 }
 
-// cycleQuickFilter steps the Afield chip left/right and re-homes the cursor.
+// cycleQuickFilter steps the Wilds chip left/right and re-homes the cursor.
 func (m *Model) cycleQuickFilter(delta int) {
 	const n = 3
 	m.quickFilter = quickFilter((int(m.quickFilter) + delta + n) % n)
@@ -595,7 +595,7 @@ func (m *Model) setQuickFilter(f quickFilter) {
 	}
 }
 
-// quickFilter is the Afield radio chip narrowing the flat list.
+// quickFilter is the Wilds radio chip narrowing the flat list.
 type quickFilter int
 
 const (
@@ -615,7 +615,7 @@ func (f quickFilter) label() string {
 	}
 }
 
-// quickFilterMatch reports whether q passes the active Afield chip.
+// quickFilterMatch reports whether q passes the active Wilds chip.
 func (m *Model) quickFilterMatch(q *model.Quest) bool {
 	switch m.quickFilter {
 	case filterTaken:
@@ -627,12 +627,12 @@ func (m *Model) quickFilterMatch(q *model.Quest) bool {
 	}
 }
 
-// afieldRows is the flat quest list shown out on the road: every non-done
+// wildsRows is the flat quest list shown out on the road: every non-done
 // quest under a non-archived campaign that passes the quick filter, in the
 // same tiered order the outline uses, tagged with its campaign name. No
 // Questboard/Vault, no headers, no "+ New" affordances — those are Tavern
 // activities.
-func (m *Model) afieldRows() []ui.Row {
+func (m *Model) wildsRows() []ui.Row {
 	var rows []ui.Row
 	for i := range m.store.Projects {
 		p := &m.store.Projects[i]
@@ -652,11 +652,11 @@ func (m *Model) afieldRows() []ui.Row {
 	return rows
 }
 
-// setAfield switches between the Tavern and Afield views, replaying the
+// setWilds switches between the Tavern and Wilds views, replaying the
 // intro transition and rerolling the flavor subtitle for the destination.
 // Setting out defaults the quick chip to Taken (your active quests).
-func (m *Model) setAfield(on bool) tea.Cmd {
-	if m.afield == on {
+func (m *Model) setWilds(on bool) tea.Cmd {
+	if m.wilds == on {
 		return nil
 	}
 	m.commitEdit()
@@ -665,12 +665,12 @@ func (m *Model) setAfield(on bool) tea.Cmd {
 	if m.searchOpen {
 		m.closeSearch()
 	}
-	m.afield = on
+	m.wilds = on
 	m.editor = nil
 	m.scrollOffset = 0
 	if on {
 		m.quickFilter = filterTaken
-		m.subtitle = ui.RandomAfieldGreeting()
+		m.subtitle = ui.RandomWildsGreeting()
 	} else {
 		m.subtitle = ui.RandomGreeting()
 	}
@@ -707,8 +707,8 @@ func (m *Model) animateFilter(fn func()) tea.Cmd {
 }
 
 func (m *Model) visibleRows() []ui.Row {
-	if m.afield {
-		return m.afieldRows()
+	if m.wilds {
+		return m.wildsRows()
 	}
 	if !m.searchOpen {
 		return ui.BuildRows(m.store, m.collapsedProjects, m.collapsedSections)
@@ -1003,10 +1003,10 @@ func (m *Model) View() string {
 		shown = 0
 	}
 
-	// Afield empty-state help (e.g. the Taken chip with nothing taken up).
+	// Wilds empty-state help (e.g. the Taken chip with nothing taken up).
 	var emptyHelp []string
-	if m.afield && len(rows) == 0 {
-		emptyHelp = m.afieldEmptyHelp(contentWidth)
+	if m.wilds && len(rows) == 0 {
+		emptyHelp = m.wildsEmptyHelp(contentWidth)
 	}
 
 	blockHeight := logoHeight + shown + len(emptyHelp)
@@ -1019,7 +1019,7 @@ func (m *Model) View() string {
 		bottomPad = 0
 	}
 	m.rowsScreenTop = topPad + logoHeight
-	m.modeToggleRow = topPad // the header's first line is the TAVERN/AFIELD toggle
+	m.modeToggleRow = topPad // the header's first line is the TAVERN/WILDS toggle
 	// The reserved filter/chip line sits just above the rows (after the logo
 	// and its blank line) — its screen row is used for chip click hit-testing.
 	m.chipLineRow = topPad + len(logoLines) + 1
@@ -1052,7 +1052,7 @@ func (m *Model) View() string {
 	} else {
 		b.WriteString("\n")
 	}
-	// The reserved filter line: Afield quick chips, the search bar when open,
+	// The reserved filter line: Wilds quick chips, the search bar when open,
 	// or blank — always present so toggling it never reflows the list.
 	b.WriteString(clip.Render(m.renderFilterLine(contentWidth, margin)) + "\n")
 	b.WriteString("\n") // breathing room between the filter line and the list
@@ -1115,9 +1115,9 @@ func (m *Model) View() string {
 	return strings.TrimRight(b.String(), "\n") + "\n" + footer
 }
 
-// afieldEmptyHelp is the centered flavor + how-to shown when the Afield list
+// wildsEmptyHelp is the centered flavor + how-to shown when the Wilds list
 // is empty for the active chip — most usefully explaining how to take quests.
-func (m *Model) afieldEmptyHelp(width int) []string {
+func (m *Model) wildsEmptyHelp(width int) []string {
 	var msg, hint string
 	switch {
 	case m.searchOpen:
@@ -1126,7 +1126,7 @@ func (m *Model) afieldEmptyHelp(width int) []string {
 		msg = "The road is quiet — nothing taken up."
 		hint = "Take up a quest with Ctrl+A"
 	case m.quickFilter == filterPriority:
-		msg = "No priority quests afield."
+		msg = "No priority quests wilds."
 		hint = "Flag one with Ctrl+P"
 	default:
 		msg = "No quests under any campaign yet."
@@ -1210,7 +1210,7 @@ func (m *Model) renderFooter() string {
 	}
 	// Mode switching lives in the header now; the footer just shows a taken-up
 	// count in the Tavern as a gentle nudge toward setting out.
-	if !m.afield {
+	if !m.wilds {
 		if taken := m.takenCount(); taken > 0 {
 			return ui.StyleFooter.Render(fmt.Sprintf("%d taken up", taken))
 		}
@@ -1219,7 +1219,7 @@ func (m *Model) renderFooter() string {
 }
 
 // takenCount is how many quests are currently taken up (active) under a
-// non-archived campaign — the number you'd take Afield.
+// non-archived campaign — the number you'd take Wilds.
 func (m *Model) takenCount() int {
 	n := 0
 	for i := range m.store.Quests {
