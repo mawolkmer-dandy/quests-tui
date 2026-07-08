@@ -834,7 +834,7 @@ func (m *Model) renderModal() string {
 		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+D", ui.StyleMuted.Render("toggle the objective under the cursor"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Tab / ⇧Tab", ui.StyleMuted.Render("indent / outdent the line (nest objectives)"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Enter", ui.StyleMuted.Render("inside a list \"- \" carries onto the next line; empty, it exits the list"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Paste", ui.StyleMuted.Render("multi-line text splits into real lines (\"- \"/\"# \" recognized)"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Paste", ui.StyleMuted.Render("multi-line text splits into real lines (\"- \" / \"# \" recognized)"))
 		b.WriteString("\n")
 
 		b.WriteString(ui.StyleSectionHeader.Render("Selecting text"))
