@@ -33,10 +33,10 @@ const (
 )
 
 const (
-	listFramesSlow  = 6
-	listFramesFast  = 3
-	headerFramesN   = 8
-	subFramesN      = 10
+	listFramesSlow  = 9
+	listFramesFast  = 5
+	headerFramesN   = 10
+	subFramesN      = 12
 	pauseFramesSlow = 3
 	pauseFramesFast = 1
 	burnTrail       = 3 // trailing columns dimmed (burning) before they vanish
@@ -272,6 +272,10 @@ func litFromRight(n, k int, set bool) []bool {
 func (m *Model) animatedModeLetters() (tav, afi []bool) {
 	n := modeWordLen
 	toAfield := m.afield
+	if m.transFast {
+		// Filter changes don't switch mode — keep the header static.
+		return allBools(n, !toAfield), allBools(n, toAfield)
+	}
 	switch m.transPhase {
 	case transDissolve:
 		k := int(m.headerFraction() * float64(n))

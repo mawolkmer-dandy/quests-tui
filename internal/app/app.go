@@ -998,7 +998,13 @@ func (m *Model) View() string {
 		shown = 0
 	}
 
-	blockHeight := logoHeight + shown
+	// Afield empty-state help (e.g. the Taken chip with nothing taken up).
+	var emptyHelp []string
+	if m.afield && len(rows) == 0 {
+		emptyHelp = m.afieldEmptyHelp(contentWidth)
+	}
+
+	blockHeight := logoHeight + shown + len(emptyHelp)
 	topPad := vpad + (innerHeight-blockHeight)/2
 	if topPad < 0 {
 		topPad = 0
@@ -1089,6 +1095,9 @@ func (m *Model) View() string {
 		b.WriteString(clip.Render(margin + rendered))
 		b.WriteString("\n")
 	}
+	for _, line := range emptyHelp {
+		b.WriteString(clip.Render(margin+line) + "\n")
+	}
 	for i := 0; i < bottomPad; i++ {
 		// First row of the bottom padding signals "more below".
 		if i == 0 && end < len(rows) {
@@ -1099,6 +1108,29 @@ func (m *Model) View() string {
 	}
 
 	return strings.TrimRight(b.String(), "\n") + "\n" + footer
+}
+
+// afieldEmptyHelp is the centered flavor + how-to shown when the Afield list
+// is empty for the active chip — most usefully explaining how to take quests.
+func (m *Model) afieldEmptyHelp(width int) []string {
+	var msg, hint string
+	switch {
+	case m.searchOpen:
+		msg = "No quests match."
+	case m.quickFilter == filterTaken:
+		msg = "The road is quiet — nothing taken up."
+		hint = "Take up a quest with Ctrl+A back in the Tavern, then set out."
+	case m.quickFilter == filterPriority:
+		msg = "No priority quests afield."
+		hint = "Flag one with Ctrl+P — medium and high float up."
+	default:
+		msg = "No quests under any campaign yet."
+	}
+	lines := []string{ui.CenterText(ui.StyleMuted.Render(msg), width)}
+	if hint != "" {
+		lines = append(lines, "", ui.CenterText(ui.StyleMuted.Render(hint), width))
+	}
+	return lines
 }
 
 // hintPart is one "<icon> <verb> (<key>)" action tip; action names the key
