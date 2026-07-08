@@ -386,7 +386,27 @@ func (m *Model) renderTransitionView() string {
 	if innerHeight < 1 {
 		innerHeight = 1
 	}
-	blockHeight := logoHeight + rowCount
+	// Clamp the visible rows to the viewport, exactly like the resting view,
+	// so a big list never spills past our boundaries mid-animation. When the
+	// list is taller than the region, show what fits and mark "more below"
+	// with the "···" fold.
+	viewHeight := innerHeight - logoHeight
+	if viewHeight < 1 {
+		viewHeight = 1
+	}
+	shown := rowCount
+	overflow := false
+	if shown > viewHeight {
+		shown = viewHeight - 1 // reserve a line for the bottom fold
+		if shown < 0 {
+			shown = 0
+		}
+		overflow = true
+	}
+	blockHeight := logoHeight + shown
+	if overflow {
+		blockHeight++
+	}
 	topPad := vpad + (innerHeight-blockHeight)/2
 	if topPad < 0 {
 		topPad = 0
@@ -405,8 +425,11 @@ func (m *Model) renderTransitionView() string {
 	b.WriteString("\n")                                                  // blank before rows
 	m.modeToggleRow = topPad
 	m.chipLineRow = topPad + len(header) + 1
-	for _, line := range rowLines {
+	for _, line := range rowLines[:shown] {
 		b.WriteString(clip.Render(margin+line) + "\n")
+	}
+	if overflow {
+		b.WriteString(foldHint(margin, width) + "\n")
 	}
 	return b.String()
 }
