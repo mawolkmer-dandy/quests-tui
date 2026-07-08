@@ -55,7 +55,7 @@ const (
 func newSearchInput() textinput.Model {
 	ti := textinput.New()
 	ti.Prompt = ""
-	ti.Placeholder = "find a campaign or objective…"
+	ti.Placeholder = "find a campaign or quest…"
 	_ = ti.Focus()
 	return ti
 }
@@ -173,9 +173,11 @@ func (m *Model) cycleFacet(focus, delta int) {
 	m.rehomeCursor()
 }
 
-// handleSearchBarKey intercepts the keys the bar owns while it's open, letting
-// everything else (Up/Down navigation, Ctrl+D/A etc. on the cursor row) fall
-// through to the normal outline handler.
+// handleSearchBarKey intercepts the keys the bar owns while it's open. Left/
+// Right move focus across [text · prio · status · type]; Enter toggles the
+// focused select (Tab is left free to open the cursor's quest); typing always
+// edits the find field. Up/Down and command chords fall through so you can
+// still navigate and act on the filtered results.
 func (m *Model) handleSearchBarKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	switch {
 	case msg.Type == tea.KeyEsc:
@@ -184,37 +186,24 @@ func (m *Model) handleSearchBarKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	case key.Matches(msg, Keys.Search):
 		m.closeSearch()
 		return nil, true
-	case msg.Type == tea.KeyTab:
-		m.searchFocus = (m.searchFocus + 1) % focusCount
-		return nil, true
-	case msg.Type == tea.KeyShiftTab:
+	case msg.Type == tea.KeyLeft:
 		m.searchFocus = (m.searchFocus + focusCount - 1) % focusCount
 		return nil, true
-	}
-
-	if m.searchFocus == focusText {
-		switch {
-		case msg.Type == tea.KeyEnter:
-			return m.handleReveal(), true // open the cursor's quest
-		case msg.Type == tea.KeyRunes, msg.Type == tea.KeySpace,
-			msg.Type == tea.KeyBackspace, msg.Type == tea.KeyLeft, msg.Type == tea.KeyRight,
-			msg.Type == tea.KeyHome, msg.Type == tea.KeyEnd, msg.Type == tea.KeyDelete:
-			var cmd tea.Cmd
-			m.searchInput, cmd = m.searchInput.Update(msg)
-			m.rehomeCursor()
-			return cmd, true
-		}
-		return nil, false
-	}
-
-	// A facet chip is focused: left/right/space/enter cycle its value.
-	switch {
-	case msg.Type == tea.KeyLeft:
-		m.cycleFacet(m.searchFocus, -1)
+	case msg.Type == tea.KeyRight:
+		m.searchFocus = (m.searchFocus + 1) % focusCount
 		return nil, true
-	case msg.Type == tea.KeyRight, msg.Type == tea.KeySpace, msg.Type == tea.KeyEnter:
+	case msg.Type == tea.KeyEnter:
+		if m.searchFocus == focusText {
+			return m.handleReveal(), true // open the cursor's quest
+		}
 		m.cycleFacet(m.searchFocus, 1)
 		return nil, true
+	case msg.Type == tea.KeyRunes, msg.Type == tea.KeySpace,
+		msg.Type == tea.KeyBackspace, msg.Type == tea.KeyDelete:
+		var cmd tea.Cmd
+		m.searchInput, cmd = m.searchInput.Update(msg)
+		m.rehomeCursor()
+		return cmd, true
 	}
 	return nil, false
 }

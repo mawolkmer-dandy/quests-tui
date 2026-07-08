@@ -520,25 +520,40 @@ func (m *Model) renderFilterLine(width int, margin string) string {
 	if !m.afield {
 		return ""
 	}
-	filters := []quickFilter{filterAll, filterHigh, filterTaken}
+	filters := []quickFilter{filterTaken, filterPriority, filterAll}
+	labels := make([]string, len(filters))
+	widths := make([]int, len(filters))
+	total := 0
+	for i, f := range filters {
+		labels[i] = " " + f.label() + " "
+		widths[i] = lipgloss.Width(labels[i])
+		if i > 0 {
+			total += 2
+		}
+		total += widths[i]
+	}
+	// Center the chip row within the content column.
+	startX := m.leftMargin + (width-total)/2
+	if startX < m.leftMargin {
+		startX = m.leftMargin
+	}
 	var b strings.Builder
-	x := m.leftMargin
+	b.WriteString(strings.Repeat(" ", startX))
+	x := startX
 	for i, f := range filters {
 		if i > 0 {
 			b.WriteString("  ")
 			x += 2
 		}
-		label := " " + f.label() + " "
-		w := lipgloss.Width(label)
-		m.chipSpans = append(m.chipSpans, chipSpan{x0: x, x1: x + w, filter: f})
-		x += w
+		m.chipSpans = append(m.chipSpans, chipSpan{x0: x, x1: x + widths[i], filter: f})
+		x += widths[i]
 		if f == m.quickFilter {
-			b.WriteString(ui.StyleSelectedRow.Render(label))
+			b.WriteString(ui.StyleSelectedRow.Render(labels[i]))
 		} else {
-			b.WriteString(ui.StyleMuted.Render(label))
+			b.WriteString(ui.StyleMuted.Render(labels[i]))
 		}
 	}
-	return margin + b.String()
+	return b.String()
 }
 
 // cycleQuickFilter steps the Afield chip left/right and re-homes the cursor.
@@ -571,17 +586,17 @@ func (m *Model) setQuickFilter(f quickFilter) {
 type quickFilter int
 
 const (
-	filterAll quickFilter = iota
-	filterHigh
-	filterTaken
+	filterTaken quickFilter = iota
+	filterPriority
+	filterAll
 )
 
 func (f quickFilter) label() string {
 	switch f {
-	case filterHigh:
-		return "High priority"
 	case filterTaken:
 		return "Taken"
+	case filterPriority:
+		return "Priority"
 	default:
 		return "All"
 	}
@@ -590,10 +605,10 @@ func (f quickFilter) label() string {
 // quickFilterMatch reports whether q passes the active Afield chip.
 func (m *Model) quickFilterMatch(q *model.Quest) bool {
 	switch m.quickFilter {
-	case filterHigh:
-		return q.Priority == model.PriorityHigh
 	case filterTaken:
 		return q.Status == model.StatusActive
+	case filterPriority:
+		return q.Priority == model.PriorityHigh || q.Priority == model.PriorityMedium
 	default:
 		return true
 	}
@@ -900,7 +915,7 @@ func (m *Model) View() string {
 	if !m.introDone {
 		logoLines = ui.RenderLogoIntro(contentWidth, m.subtitle, m.introFrame)
 	}
-	logoHeight := len(logoLines) + 2 // +1 blank line after the logo, +1 reserved filter/chip line
+	logoHeight := len(logoLines) + 3 // blank after logo, reserved filter line, blank after filter
 
 	// Keep viewVPad blank rows top and bottom, but never let the padding eat
 	// more than half the screen (so short terminals stay usable). The logo +
@@ -1001,6 +1016,7 @@ func (m *Model) View() string {
 	// The reserved filter line: Afield quick chips, the search bar when open,
 	// or blank — always present so toggling it never reflows the list.
 	b.WriteString(clip.Render(m.renderFilterLine(contentWidth, margin)) + "\n")
+	b.WriteString("\n") // breathing room between the filter line and the list
 	for i := m.scrollOffset; i < end; i++ {
 		row := rows[i]
 		isCursor := i == idx
