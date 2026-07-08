@@ -635,36 +635,98 @@ func (m *Model) quickFilterMatch(q *model.Quest) bool {
 // the bottom — so it reads like a single focused agenda. No Questboard/Vault,
 // no headers, no "+ New" affordances — those are Tavern activities.
 func (m *Model) wildsRows() []ui.Row {
-	type item struct {
-		q   model.Quest
-		pid string
-	}
-	var items []item
-	for i := range m.store.Projects {
-		p := &m.store.Projects[i]
-		if p.Archived {
+	byID := m.wildsEligible()
+	var rows []ui.Row
+	for _, id := range m.wildsOrderedIDs(byID) {
+		q := byID[id]
+		if !m.quickFilterMatch(&q) {
 			continue
 		}
-		for _, q := range ui.QuestsForCampaign(m.store, p.ID) {
-			if !m.quickFilterMatch(&q) {
-				continue
-			}
-			if m.searchOpen && !m.searchMatch(&q) {
-				continue
-			}
-			items = append(items, item{q: q, pid: p.ID})
+		if m.searchOpen && !m.searchMatch(&q) {
+			continue
 		}
-	}
-	// Sort across all campaigns by the shared tier; stable, so ties keep their
-	// per-campaign order.
-	sort.SliceStable(items, func(a, b int) bool {
-		return ui.SortBucket(items[a].q) < ui.SortBucket(items[b].q)
-	})
-	rows := make([]ui.Row, 0, len(items))
-	for _, it := range items {
-		rows = append(rows, ui.Row{Kind: ui.RowQuest, ProjectID: it.pid, QuestID: it.q.ID, ShowProjectTag: true})
+		rows = append(rows, ui.Row{Kind: ui.RowQuest, ProjectID: q.ProjectID, QuestID: id, ShowProjectTag: true})
 	}
 	return rows
+}
+
+// wildsEligible maps every quest that can appear in the Wilds (under a
+// non-archived campaign, not vaulted) by ID.
+func (m *Model) wildsEligible() map[string]model.Quest {
+	out := map[string]model.Quest{}
+	for i := range m.store.Projects {
+		if m.store.Projects[i].Archived {
+			continue
+		}
+		for _, q := range ui.QuestsForCampaign(m.store, m.store.Projects[i].ID) {
+			out[q.ID] = q
+		}
+	}
+	return out
+}
+
+// wildsOrderedIDs is the canonical Wilds order: quests the user has manually
+// placed (WildsOrder) first, in that order, then any remaining eligible quests
+// sorted by tier (priority/main up, low/done down) — so a fresh Wilds reads by
+// priority and stays that way until you rearrange it.
+func (m *Model) wildsOrderedIDs(byID map[string]model.Quest) []string {
+	order := make([]string, 0, len(byID))
+	seen := map[string]bool{}
+	for _, id := range m.store.WildsOrder {
+		if _, ok := byID[id]; ok && !seen[id] {
+			order = append(order, id)
+			seen[id] = true
+		}
+	}
+	var rest []model.Quest
+	for id, q := range byID {
+		if !seen[id] {
+			rest = append(rest, q)
+		}
+	}
+	sort.SliceStable(rest, func(a, b int) bool {
+		if ba, bb := ui.SortBucket(rest[a]), ui.SortBucket(rest[b]); ba != bb {
+			return ba < bb
+		}
+		return rest[a].ID < rest[b].ID // deterministic tiebreak (map order isn't)
+	})
+	for _, q := range rest {
+		order = append(order, q.ID)
+	}
+	return order
+}
+
+// moveWildsQuest reorders the cursor quest within the Wilds list by swapping it
+// with its visible neighbor, persisting the new order to WildsOrder. This is
+// independent of the Tavern's per-campaign order.
+func (m *Model) moveWildsQuest(delta int) {
+	if m.cursor.kind != ui.RowQuest {
+		return
+	}
+	vis := m.wildsRows()
+	vIdx := findRowIndex(vis, m.cursor)
+	nIdx := vIdx + delta
+	if vIdx < 0 || nIdx < 0 || nIdx >= len(vis) {
+		return
+	}
+	idA, idB := m.cursor.questID, vis[nIdx].QuestID
+	full := m.wildsOrderedIDs(m.wildsEligible())
+	ia, ib := indexOfStr(full, idA), indexOfStr(full, idB)
+	if ia < 0 || ib < 0 {
+		return
+	}
+	full[ia], full[ib] = full[ib], full[ia]
+	m.store.WildsOrder = full
+	m.save()
+}
+
+func indexOfStr(ss []string, s string) int {
+	for i, v := range ss {
+		if v == s {
+			return i
+		}
+	}
+	return -1
 }
 
 // setWilds switches between the Tavern and Wilds views, replaying the

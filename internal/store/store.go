@@ -15,6 +15,10 @@ import (
 type Store struct {
 	Projects []model.Project `json:"projects"`
 	Quests   []model.Quest   `json:"quests"`
+	// WildsOrder is the user's manual ordering of quests in the Wilds view, by
+	// quest ID — independent of the per-campaign order in the Tavern. Quests
+	// not listed here fall in after, sorted by tier. Stale IDs are ignored.
+	WildsOrder []string `json:"wildsOrder,omitempty"`
 }
 
 // DefaultDir is where Quests keeps its data file, config, and backups:

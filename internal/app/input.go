@@ -171,6 +171,11 @@ func (m *Model) moveCursor(delta int) {
 // moveRow (Shift+Up/Down) reorders whatever's under the cursor — a quest
 // among its siblings, or a campaign among the others.
 func (m *Model) moveRow(delta int) {
+	if m.wilds {
+		// The Wilds has its own manual order, independent of the Tavern.
+		m.moveWildsQuest(delta)
+		return
+	}
 	switch m.cursor.kind {
 	case ui.RowQuest:
 		m.moveQuest(delta)
