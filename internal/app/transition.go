@@ -13,12 +13,15 @@ import (
 
 // The environment-change animation. Moving between the Tavern and Afield (or
 // filtering, or launching) plays the same beat in both directions: the current
-// list burns away bottom-up, character by character (right-to-left), the block
-// collapsing toward center as lines vanish; the subtitle types out and the
-// header word mutes letter by letter; a brief pause; then the new subtitle
-// types in, the new header word lights up, and the new list reveals line by
-// line, the block growing back out. Because it re-centers every frame, the
-// final frame already sits where the resting view does — no end jump.
+// list burns away bottom-up, character by character, the block collapsing
+// toward center as lines vanish; the subtitle types out and the header word
+// mutes; a brief pause; then the new subtitle types in, the header word lights
+// up, and the new list reveals line by line, growing back out. It re-centers
+// every frame, so the final frame already sits where the resting view does.
+//
+// Timing is FIXED in frames (not content-dependent), so a switch is always the
+// same length regardless of list size. Each element has its own pace: the list
+// is fastest, the header a touch slower, the subtitle slowest.
 
 type transPhase int
 
@@ -29,16 +32,15 @@ const (
 	transReveal
 )
 
-// Per-frame tuning. Filter changes run faster than mode switches (transFast).
 const (
-	dissolveStepSlow = 3 // columns burned per frame
-	dissolveStepFast = 12
-	revealEverySlow  = 2 // frames per revealed line
-	revealEveryFast  = 1
-	pauseFramesSlow  = 5
-	pauseFramesFast  = 1
-	burnTrail        = 3 // trailing columns dimmed (burning) before they vanish
-	modeWordLen      = 6 // "TAVERN" / "AFIELD"
+	listFramesSlow  = 6
+	listFramesFast  = 3
+	headerFramesN   = 8
+	subFramesN      = 10
+	pauseFramesSlow = 3
+	pauseFramesFast = 1
+	burnTrail       = 3 // trailing columns dimmed (burning) before they vanish
+	modeWordLen     = 6 // "TAVERN" / "AFIELD"
 )
 
 var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
@@ -55,9 +57,6 @@ func transTick(fast bool) tea.Cmd {
 	return tea.Tick(d, func(time.Time) tea.Msg { return transTickMsg{} })
 }
 
-// beginTransition starts the dissolve from oldLines (captured before the state
-// change) into whatever the new state now renders. No-op when animations are
-// off. Pass fast=true for filter changes.
 func (m *Model) beginTransition(oldLines []string, fast bool) tea.Cmd {
 	if !m.animate {
 		m.transPhase = transNone
@@ -83,19 +82,16 @@ func (m *Model) currentRowLines() []string {
 	return out
 }
 
-func (m *Model) dissolveStep() int {
-	if m.transFast {
-		return dissolveStepFast
-	}
-	return dissolveStepSlow
-}
+// --- fixed per-element timings -------------------------------------------
 
-func (m *Model) revealEvery() int {
+func (m *Model) listFrames() int {
 	if m.transFast {
-		return revealEveryFast
+		return listFramesFast
 	}
-	return revealEverySlow
+	return listFramesSlow
 }
+func (m *Model) headerFrames() int { return headerFramesN }
+func (m *Model) subFrames() int    { return subFramesN }
 
 func (m *Model) pauseFrames() int {
 	if m.transFast {
@@ -104,8 +100,30 @@ func (m *Model) pauseFrames() int {
 	return pauseFramesSlow
 }
 
-// totalOldChars is the sum of the captured rows' widths — how many columns the
-// dissolve has to burn through before it's done.
+// phaseFrames is how long the dissolve and the reveal each run — the slowest
+// animated element. Filter changes only animate the list.
+func (m *Model) phaseFrames() int {
+	if m.transFast {
+		return m.listFrames()
+	}
+	return m.subFrames()
+}
+
+func frac(frame, frames int) float64 {
+	if frames <= 0 {
+		return 1
+	}
+	f := float64(frame) / float64(frames)
+	if f > 1 {
+		f = 1
+	}
+	return f
+}
+
+func (m *Model) listFraction() float64   { return frac(m.transFrame, m.listFrames()) }
+func (m *Model) headerFraction() float64 { return frac(m.transFrame, m.headerFrames()) }
+func (m *Model) subFraction() float64    { return frac(m.transFrame, m.subFrames()) }
+
 func (m *Model) totalOldChars() int {
 	n := 0
 	for _, l := range m.transOld {
@@ -114,35 +132,11 @@ func (m *Model) totalOldChars() int {
 	return n
 }
 
-func (m *Model) dissolveFraction() float64 {
-	total := m.totalOldChars()
-	if total == 0 {
-		return 1
-	}
-	f := float64(m.transFrame*m.dissolveStep()) / float64(total)
-	if f > 1 {
-		f = 1
-	}
-	return f
-}
-
-func (m *Model) revealFraction() float64 {
-	n := len(m.currentRowLines())
-	if n == 0 {
-		return 1
-	}
-	f := float64(m.transFrame/m.revealEvery()) / float64(n)
-	if f > 1 {
-		f = 1
-	}
-	return f
-}
-
 func (m *Model) advanceTransition() tea.Cmd {
 	m.transFrame++
 	switch m.transPhase {
 	case transDissolve:
-		if m.transFrame*m.dissolveStep() >= m.totalOldChars() {
+		if m.transFrame >= m.phaseFrames() {
 			m.transPhase = transPause
 			m.transFrame = 0
 		}
@@ -152,7 +146,7 @@ func (m *Model) advanceTransition() tea.Cmd {
 			m.transFrame = 0
 		}
 	case transReveal:
-		if m.transFrame/m.revealEvery() >= len(m.currentRowLines()) {
+		if m.transFrame >= m.phaseFrames() {
 			m.transPhase = transNone
 			m.transOld = nil
 			return nil
@@ -161,12 +155,12 @@ func (m *Model) advanceTransition() tea.Cmd {
 	return transTick(m.transFast)
 }
 
-// dissolveLines burns the captured rows away bottom-up: `erased` columns are
-// consumed from the last line's right edge, carrying up to the line above once
-// a line is spent. Fully-burned trailing lines drop out entirely, so the block
-// shrinks line by line while the active line burns character by character.
+// dissolveLines burns the captured rows away bottom-up over listFrames frames:
+// a fixed fraction of the total characters is consumed from the last line's
+// right edge, carrying up as lines are spent. Fully-burned trailing lines drop
+// out, so the block shrinks line by line while the active line burns per char.
 func (m *Model) dissolveLines() []string {
-	erased := m.transFrame * m.dissolveStep()
+	erased := int(m.listFraction() * float64(m.totalOldChars()))
 	lines := make([]string, len(m.transOld))
 	copy(lines, m.transOld)
 	for i := len(lines) - 1; i >= 0 && erased > 0; i-- {
@@ -189,10 +183,10 @@ func (m *Model) dissolveLines() []string {
 	return lines[:end]
 }
 
-// revealLines fills the new rows back in top-down, one every revealEvery frames.
+// revealLines fills the new rows back in top-down over listFrames frames.
 func (m *Model) revealLines() []string {
 	all := m.currentRowLines()
-	n := m.transFrame / m.revealEvery()
+	n := int(m.listFraction() * float64(len(all)))
 	if n > len(all) {
 		n = len(all)
 	}
@@ -206,7 +200,6 @@ func max0(n int) int {
 	return n
 }
 
-// transitionRows is the row lines to show this frame.
 func (m *Model) transitionRows() []string {
 	switch m.transPhase {
 	case transDissolve:
@@ -217,8 +210,8 @@ func (m *Model) transitionRows() []string {
 	return nil // pause
 }
 
-// transitionSubtitle types the subtitle out (dissolve) and back in (reveal).
-// Filter changes leave it untouched.
+// transitionSubtitle types the subtitle out (dissolve) and in (reveal) over
+// subFrames. Filter changes leave it untouched.
 func (m *Model) transitionSubtitle() string {
 	if m.transFast {
 		return m.subtitle
@@ -226,13 +219,13 @@ func (m *Model) transitionSubtitle() string {
 	switch m.transPhase {
 	case transDissolve:
 		r := []rune(m.transOldSub)
-		keep := len(r) - int(m.dissolveFraction()*float64(len(r)))
+		keep := len(r) - int(m.subFraction()*float64(len(r)))
 		return string(r[:max0(keep)])
 	case transPause:
 		return ""
 	case transReveal:
 		r := []rune(m.subtitle)
-		n := int(m.revealFraction() * float64(len(r)))
+		n := int(m.subFraction() * float64(len(r)))
 		if n > len(r) {
 			n = len(r)
 		}
@@ -257,8 +250,6 @@ func allBools(n int, v bool) []bool {
 	return out
 }
 
-// litFromLeft/litFromRight build per-letter "is bright" masks: k letters set
-// from the left or right end, the rest the opposite.
 func litFromLeft(n, k int, set bool) []bool {
 	out := allBools(n, !set)
 	for i := 0; i < k && i < n; i++ {
@@ -274,34 +265,33 @@ func litFromRight(n, k int, set bool) []bool {
 	return out
 }
 
-// animatedModeLetters returns the per-letter bright masks for TAVERN and
-// AFIELD this frame. TAVERN always animates left-to-right, AFIELD right-to-
-// left. During the dissolve the outgoing word mutes; during the reveal the
-// incoming (now-active) word lights up; between, both are muted.
+// animatedModeLetters returns the per-letter brightness for TAVERN and AFIELD.
+// The sweep flows in the switch direction so one word pours into the other: to
+// Afield it runs left-to-right (TAVERN mutes L→R, then AFIELD lights L→R); to
+// Tavern it runs right-to-left.
 func (m *Model) animatedModeLetters() (tav, afi []bool) {
 	n := modeWordLen
-	toAfield := m.afield // destination (state already switched)
+	toAfield := m.afield
 	switch m.transPhase {
 	case transDissolve:
-		k := int(m.dissolveFraction() * float64(n))
-		if toAfield { // leaving Tavern: TAVERN mutes L→R
+		k := int(m.headerFraction() * float64(n))
+		if toAfield {
 			return litFromLeft(n, k, false), allBools(n, false)
 		}
-		return allBools(n, false), litFromRight(n, k, false) // AFIELD mutes R→L
+		return allBools(n, false), litFromRight(n, k, false)
 	case transReveal:
-		k := int(m.revealFraction() * float64(n))
-		if toAfield { // arriving Afield: AFIELD lights R→L
-			return allBools(n, false), litFromRight(n, k, true)
+		k := int(m.headerFraction() * float64(n))
+		if toAfield {
+			return allBools(n, false), litFromLeft(n, k, true)
 		}
-		return litFromLeft(n, k, true), allBools(n, false) // TAVERN lights L→R
+		return litFromRight(n, k, true), allBools(n, false)
 	case transPause:
 		return allBools(n, false), allBools(n, false)
 	}
 	return allBools(n, !toAfield), allBools(n, toAfield)
 }
 
-// renderHeader is the two banner lines: the TAVERN/AFIELD toggle and the
-// flavor subtitle (used by the resting view).
+// renderHeader is the two banner lines for the resting view.
 func (m *Model) renderHeader(width int) []string {
 	return []string{
 		m.renderModeToggle(width),
@@ -309,29 +299,28 @@ func (m *Model) renderHeader(width int) []string {
 	}
 }
 
-// renderModeToggle draws the resting header: the active mode bright, the other
-// muted.
 func (m *Model) renderModeToggle(width int) string {
 	return m.renderModeLine(width, allBools(modeWordLen, !m.afield), allBools(modeWordLen, m.afield))
 }
 
 // renderModeLine draws "TAVERN   AFIELD" with per-letter brightness, centering
-// the two words as a unit exactly where QUESTS sat (the trailing ⌃G hint is
-// appended without shifting that center). Records modeSpans for clicks.
+// the two words as a unit exactly where QUESTS sat. Padding is RELATIVE (the
+// caller prepends the left margin); modeSpans are absolute for click testing.
 func (m *Model) renderModeLine(width int, litTav, litAfi []bool) string {
 	const tav, afi, gap = "TAVERN", "AFIELD", "   "
 	coreW := len([]rune(tav)) + len([]rune(gap)) + len([]rune(afi))
-	startX := m.leftMargin + (width-coreW)/2
-	if startX < m.leftMargin {
-		startX = m.leftMargin
+	pad := (width - coreW) / 2
+	if pad < 0 {
+		pad = 0
 	}
 	tw, aw := len([]rune(tav)), len([]rune(afi))
+	absX := m.leftMargin + pad
 	m.modeSpans = []modeSpan{
-		{x0: startX, x1: startX + tw, afield: false},
-		{x0: startX + tw + len([]rune(gap)), x1: startX + tw + len([]rune(gap)) + aw, afield: true},
+		{x0: absX, x1: absX + tw, afield: false},
+		{x0: absX + tw + len([]rune(gap)), x1: absX + tw + len([]rune(gap)) + aw, afield: true},
 	}
 	var b strings.Builder
-	b.WriteString(strings.Repeat(" ", startX))
+	b.WriteString(strings.Repeat(" ", pad))
 	b.WriteString(styledWord(tav, litTav))
 	b.WriteString(gap)
 	b.WriteString(styledWord(afi, litAfi))
@@ -353,9 +342,9 @@ func styledWord(word string, lit []bool) string {
 	return b.String()
 }
 
-// renderTransitionView draws one animation frame, re-centered on the CURRENT
-// row count each frame so the block collapses to the header (dissolve) and
-// grows back out (reveal) with no end jump.
+// renderTransitionView draws one animation frame, re-centered on the current
+// row count so the block collapses to the header and grows back out with no
+// end jump. The filter line (Afield chips / open search bar) stays put.
 func (m *Model) renderTransitionView() string {
 	width := m.contentWidth()
 	m.leftMargin = (m.width - width) / 2
@@ -394,7 +383,6 @@ func (m *Model) renderTransitionView() string {
 	if topPad < 0 {
 		topPad = 0
 	}
-	m.modeToggleRow = topPad
 
 	clip := lipgloss.NewStyle().MaxWidth(m.width)
 	var b strings.Builder
@@ -404,7 +392,11 @@ func (m *Model) renderTransitionView() string {
 	for _, line := range header {
 		b.WriteString(clip.Render(margin+line) + "\n")
 	}
-	b.WriteString("\n\n\n") // blank / reserved filter line / blank
+	b.WriteString("\n")                                                  // blank after header
+	b.WriteString(clip.Render(m.renderFilterLine(width, margin)) + "\n") // persistent chips / search bar
+	b.WriteString("\n")                                                  // blank before rows
+	m.modeToggleRow = topPad
+	m.chipLineRow = topPad + len(header) + 1
 	for _, line := range rowLines {
 		b.WriteString(clip.Render(margin+line) + "\n")
 	}
