@@ -58,7 +58,7 @@ var Keys = KeyMap{
 	Tab:             key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "reveal / open")),
 	Enter:           key.NewBinding(key.WithKeys("enter"), key.WithHelp("Enter", "new line")),
 	Backspace:       key.NewBinding(key.WithKeys("backspace"), key.WithHelp("Backspace", "delete char / empty row")),
-	ToggleActive:    key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("Ctrl+A", "toggle active")),
+	ToggleActive:    key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("Ctrl+A", "toggle active/taken")),
 	ToggleDone:      key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("Ctrl+D", "toggle done")),
 	ToggleImportant: key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("Ctrl+P", "cycle priority (med/high/low/none)")),
 	ToggleVault:     key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("Ctrl+V", "toggle vault")),

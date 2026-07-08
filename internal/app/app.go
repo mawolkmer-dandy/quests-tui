@@ -161,10 +161,11 @@ type Model struct {
 	// when idle.
 	transPhase  transPhase
 	transFrame  int
-	transOld    []string // rendered rows captured before the change, for the dissolve
-	transOldSub string   // the subtitle being typed out (mode switches only)
-	transFast   bool     // filter changes animate faster than mode switches
-	transGen    int      // bumped each beginTransition; ticks from an older gen are ignored (no double-speed)
+	transOld    []string  // rendered rows captured before the change, for the dissolve
+	transOldSub string    // the subtitle being typed out (mode switches only)
+	transFast   bool      // filter changes animate faster than mode switches
+	transGen    int       // bumped each beginTransition; ticks from an older gen are ignored (no double-speed)
+	transKind   transKind // startup / mode switch / filter — drives header + stagger
 
 	// set each View() call, used by handleMouse to map screen coordinates
 	// back to a row index / in-row column.
@@ -336,7 +337,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		if firstSize && m.animate {
 			// Reveal the opening view with the environment animation.
-			return m, m.beginTransition(nil, false)
+			return m, m.beginTransition(nil, kindStartup)
 		}
 		return m, nil
 
@@ -678,7 +679,7 @@ func (m *Model) setAfield(on bool) tea.Cmd {
 	} else {
 		m.cursor = cursorTarget{}
 	}
-	return m.beginTransition(old, false)
+	return m.beginTransition(old, kindMode)
 }
 
 // contentWidth is the centered column the outline/header/footer live in.
@@ -702,7 +703,7 @@ func (m *Model) animateFilter(fn func()) tea.Cmd {
 	}
 	old := m.currentRowLines()
 	fn()
-	return m.beginTransition(old, true)
+	return m.beginTransition(old, kindFilter)
 }
 
 func (m *Model) visibleRows() []ui.Row {

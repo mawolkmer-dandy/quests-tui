@@ -47,6 +47,18 @@ var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
 func stripANSI(s string) string { return ansiRE.ReplaceAllString(s, "") }
 
+// transKind distinguishes the three triggers, which animate differently:
+// startup reveals only (no prior view/mode), a mode switch does the full
+// dissolve→reveal with the header sweep, and a filter change is a quick
+// list-only re-form with a static header/subtitle.
+type transKind int
+
+const (
+	kindMode transKind = iota
+	kindFilter
+	kindStartup
+)
+
 type transTickMsg struct{ gen int }
 
 func transTick(fast bool, gen int) tea.Cmd {
@@ -57,21 +69,27 @@ func transTick(fast bool, gen int) tea.Cmd {
 	return tea.Tick(d, func(time.Time) tea.Msg { return transTickMsg{gen: gen} })
 }
 
-func (m *Model) beginTransition(oldLines []string, fast bool) tea.Cmd {
+func (m *Model) beginTransition(oldLines []string, kind transKind) tea.Cmd {
 	if !m.animate {
 		m.transPhase = transNone
 		return nil
 	}
 	m.transOld = oldLines
-	m.transFast = fast
+	m.transKind = kind
+	m.transFast = kind == kindFilter
 	m.transFrame = 0
-	m.transPhase = transDissolve
+	// Startup has no previous view to burn away — reveal straight in.
+	if kind == kindStartup {
+		m.transPhase = transReveal
+	} else {
+		m.transPhase = transDissolve
+	}
 	m.scrollOffset = 0
 	// New generation: any in-flight ticker from a previous transition (e.g.
 	// an interrupted switch or rapid filter changes) is now stale and ignored,
 	// so only one ticker chain ever advances the frame — no 2x speed-up.
 	m.transGen++
-	return transTick(fast, m.transGen)
+	return transTick(m.transFast, m.transGen)
 }
 
 // currentRowLines renders the visible rows to styled strings (no cursor/hints).
@@ -104,13 +122,35 @@ func (m *Model) pauseFrames() int {
 	return pauseFramesSlow
 }
 
-// phaseFrames is how long the dissolve and the reveal each run — the slowest
-// animated element. Filter changes only animate the list.
-func (m *Model) phaseFrames() int {
+// listLead is how many frames the header/subtitle get before the list starts
+// (revealing) — so "TAVERN lights up, subtitle loads, then the list loads".
+// Filter changes have no header/subtitle, so the list starts immediately.
+func (m *Model) listLead() int {
+	if m.transKind == kindFilter {
+		return 0
+	}
+	return m.headerFrames()
+}
+
+// dissolvePhaseFrames / revealPhaseFrames: how long each half runs. The
+// dissolve burns everything concurrently; the reveal staggers the list after
+// the header/subtitle.
+func (m *Model) dissolvePhaseFrames() int {
 	if m.transFast {
 		return m.listFrames()
 	}
 	return m.subFrames()
+}
+
+func (m *Model) revealPhaseFrames() int {
+	if m.transFast {
+		return m.listFrames()
+	}
+	lead := m.listLead() + m.listFrames()
+	if m.subFrames() > lead {
+		return m.subFrames()
+	}
+	return lead
 }
 
 func frac(frame, frames int) float64 {
@@ -140,7 +180,7 @@ func (m *Model) advanceTransition() tea.Cmd {
 	m.transFrame++
 	switch m.transPhase {
 	case transDissolve:
-		if m.transFrame >= m.phaseFrames() {
+		if m.transFrame >= m.dissolvePhaseFrames() {
 			m.transPhase = transPause
 			m.transFrame = 0
 		}
@@ -150,7 +190,7 @@ func (m *Model) advanceTransition() tea.Cmd {
 			m.transFrame = 0
 		}
 	case transReveal:
-		if m.transFrame >= m.phaseFrames() {
+		if m.transFrame >= m.revealPhaseFrames() {
 			m.transPhase = transNone
 			m.transOld = nil
 			return nil
@@ -187,10 +227,12 @@ func (m *Model) dissolveLines() []string {
 	return lines[:end]
 }
 
-// revealLines fills the new rows back in top-down over listFrames frames.
+// revealLines fills the new rows back in top-down, starting only after the
+// listLead frames (so the header/subtitle come in first).
 func (m *Model) revealLines() []string {
 	all := m.currentRowLines()
-	n := int(m.listFraction() * float64(len(all)))
+	f := frac(max0(m.transFrame-m.listLead()), m.listFrames())
+	n := int(f * float64(len(all)))
 	if n > len(all) {
 		n = len(all)
 	}
@@ -276,9 +318,15 @@ func litFromRight(n, k int, set bool) []bool {
 func (m *Model) animatedModeLetters() (tav, afi []bool) {
 	n := modeWordLen
 	toAfield := m.afield
-	if m.transFast {
+	if m.transKind == kindFilter {
 		// Filter changes don't switch mode — keep the header static.
 		return allBools(n, !toAfield), allBools(n, toAfield)
+	}
+	if m.transKind == kindStartup {
+		// No previous mode: just light TAVERN in, left-to-right; AFIELD stays
+		// muted. (Startup is reveal-only.)
+		k := int(m.headerFraction() * float64(n))
+		return litFromLeft(n, k, true), allBools(n, false)
 	}
 	switch m.transPhase {
 	case transDissolve:

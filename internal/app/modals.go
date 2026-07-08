@@ -756,9 +756,12 @@ func (m *Model) renderModal() string {
 
 		b.WriteString(ui.StyleSectionHeader.Render("Terms"))
 		b.WriteString("\n")
+		fmt.Fprintf(&b, "%-11s%s\n", "Tavern", ui.StyleMuted.Render("home base — the full outline: Questboard, campaigns, Vault"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Afield", ui.StyleMuted.Render("focused view (Ctrl+G) — just your taken-up quests to work through"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Questboard", ui.StyleMuted.Render("your inbox — new quests with no campaign yet"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Campaigns", ui.StyleMuted.Render("your projects — each lists its own quests"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Vault", ui.StyleMuted.Render("your archive — parked quests and retired campaigns"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Take up", ui.StyleMuted.Render("mark a quest active (Ctrl+A) to bring it Afield"))
 		b.WriteString("\n")
 
 		b.WriteString(ui.StyleSectionHeader.Render("Data"))
@@ -845,7 +848,7 @@ func (m *Model) renderModal() string {
 		b.WriteString("\n")
 		fmt.Fprintf(&b, "%-11s%s\n", "Tab", ui.StyleMuted.Render("open a listed quest's own detail view"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Enter", ui.StyleMuted.Render("add a quest via \"+ New Quest\", or a sibling below one"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+D/G/T", ui.StyleMuted.Render("toggle done / active / type on the highlighted quest"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+D/G/T", ui.StyleMuted.Render("toggle done / active-taken / type on the highlighted quest"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+P", ui.StyleMuted.Render("move the highlighted quest to a different campaign"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+X", ui.StyleMuted.Render("delete the highlighted quest (inline y/n)"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Shift+↑/↓", ui.StyleMuted.Render("reorder the highlighted quest"))
