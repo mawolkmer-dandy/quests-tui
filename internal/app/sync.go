@@ -25,12 +25,12 @@ import (
 // PRStatus is a pull request's CI + review-thread state, plus the branch refs
 // used to order linked PRs into a Graphite-style stack (see prStack).
 type PRStatus struct {
-	Code               string // "#47477"
-	Status             string // "running" | "error" | "success"
-	CommentsUnresolved int
-	CommentsTotal      int
-	BaseRef            string // the branch this PR targets (baseRefName)
-	HeadRef            string // this PR's own branch (headRefName)
+	Code             string // "#47477"
+	Status           string // "running" | "error" | "success"
+	CommentsResolved int
+	CommentsTotal    int
+	BaseRef          string // the branch this PR targets (baseRefName)
+	HeadRef          string // this PR's own branch (headRefName)
 }
 
 // JiraStatus is a Jira issue's coarse status category.
@@ -200,13 +200,6 @@ type reviewThreadsResponse struct {
 				ReviewThreads struct {
 					Nodes []struct {
 						IsResolved bool `json:"isResolved"`
-						Comments   struct {
-							Nodes []struct {
-								Author struct {
-									TypeName string `json:"__typename"`
-								} `json:"author"`
-							} `json:"nodes"`
-						} `json:"comments"`
 					} `json:"nodes"`
 				} `json:"reviewThreads"`
 			} `json:"pullRequest"`
@@ -225,17 +218,17 @@ func fetchPRStatus(prCode, prRepo string) (PRStatus, bool) {
 	if !ok {
 		return PRStatus{}, false
 	}
-	unresolved, total, ok := fetchPRReviewThreads(owner, repo, num)
+	resolved, total, ok := fetchPRReviewThreads(owner, repo, num)
 	if !ok {
 		return PRStatus{}, false
 	}
 	return PRStatus{
-		Code:               prCode,
-		Status:             status,
-		CommentsUnresolved: unresolved,
-		CommentsTotal:      total,
-		BaseRef:            baseRef,
-		HeadRef:            headRef,
+		Code:             prCode,
+		Status:           status,
+		CommentsResolved: resolved,
+		CommentsTotal:    total,
+		BaseRef:          baseRef,
+		HeadRef:          headRef,
 	}, true
 }
 
@@ -288,9 +281,9 @@ func collapseRollup(entries []prRollupEntry) string {
 	return "success"
 }
 
-const reviewThreadsQuery = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{__typename}}}}}}}}`
+const reviewThreadsQuery = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}}}}}`
 
-func fetchPRReviewThreads(owner, repo, num string) (unresolved, total int, ok bool) {
+func fetchPRReviewThreads(owner, repo, num string) (resolved, total int, ok bool) {
 	out, err := runCmd("gh", "api", "graphql",
 		"-f", "query="+reviewThreadsQuery,
 		"-F", "owner="+owner,
@@ -306,18 +299,11 @@ func fetchPRReviewThreads(owner, repo, num string) (unresolved, total int, ok bo
 	}
 	nodes := resp.Data.Repository.PullRequest.ReviewThreads.Nodes
 	for _, n := range nodes {
-		// Skip bot-authored threads (Cursor Bugbot, CodeRabbit, etc.) — they're
-		// informational, not review comments the PR author resolves. Only count
-		// threads a human started, matching what you actually need to act on.
-		if len(n.Comments.Nodes) > 0 && n.Comments.Nodes[0].Author.TypeName == "Bot" {
-			continue
-		}
-		total++
-		if !n.IsResolved {
-			unresolved++
+		if n.IsResolved {
+			resolved++
 		}
 	}
-	return unresolved, total, true
+	return resolved, len(nodes), true
 }
 
 // --- Jira fetch -----------------------------------------------------------
@@ -515,18 +501,19 @@ func (m *Model) jiraStatusWord(code string) string {
 	}
 }
 
-// prCommentsText is the always-shown "<unresolved>/<total> comments" for a PR,
-// including "0/0" when there are none (or before it's synced).
+// prCommentsText is the always-shown "<resolved>/<total> comments" for a PR,
+// including "0/0" when there are none (or before it's synced). A PR is fully
+// addressed when the two numbers match.
 func (m *Model) prCommentsText(code string) string {
 	st := m.prStatus[code]
-	return fmt.Sprintf("%d/%d comments", st.CommentsUnresolved, st.CommentsTotal)
+	return fmt.Sprintf("%d/%d comments", st.CommentsResolved, st.CommentsTotal)
 }
 
-// prCommentsCount is the compact "<unresolved>/<total>" for the list inline,
+// prCommentsCount is the compact "<resolved>/<total>" for the list inline,
 // always shown (0/0 included).
 func (m *Model) prCommentsCount(code string) string {
 	st := m.prStatus[code]
-	return fmt.Sprintf("%d/%d", st.CommentsUnresolved, st.CommentsTotal)
+	return fmt.Sprintf("%d/%d", st.CommentsResolved, st.CommentsTotal)
 }
 
 // jiraGlyph is the filling-circle status glyph for a Jira code: the amber

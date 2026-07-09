@@ -836,7 +836,7 @@ func (m *Model) renderModal() string {
 		b.WriteString("\n")
 		b.WriteString(ui.StyleMuted.Render("the expanded view to open (↵) or remove (" + Keys.Delete.Help().Key + ") it. PR shows " + ui.GlyphPRSuccess + "/" + ui.GlyphPRError + "/" + ui.GlyphPRRunning + "/" + ui.GlyphPRMerged + ","))
 		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("+ unresolved/total comments; Jira shows " + ui.GlyphJiraTodo + "/" + ui.GlyphJiraInProgress + "/" + ui.GlyphJiraDone + " (todo / wip / done), ~60s."))
+		b.WriteString(ui.StyleMuted.Render("+ resolved/total comments; Jira shows " + ui.GlyphJiraTodo + "/" + ui.GlyphJiraInProgress + "/" + ui.GlyphJiraDone + " (todo / wip / done), ~60s."))
 		b.WriteString("\n")
 		b.WriteString(ui.StyleMuted.Render("Requires gh and acli authenticated locally (gh auth login; acli jira"))
 		b.WriteString("\n")
