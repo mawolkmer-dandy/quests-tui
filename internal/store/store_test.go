@@ -56,3 +56,40 @@ func TestLoadMigratesLegacyPR(t *testing.T) {
 		t.Errorf("quest c legacy fields not cleared: %q %q", qc.PRCode, qc.PRRepo)
 	}
 }
+
+// TestLoadMigratesLegacyJira verifies the pre-slice single-Jira field migrates
+// into JiraCodes on load and is cleared, without clobbering existing JiraCodes.
+func TestLoadMigratesLegacyJira(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.json")
+
+	legacy := Store{
+		Quests: []model.Quest{
+			{ID: "a", JiraCode: "EPDCHAIR-1"},
+			{ID: "b"}, // no Jira
+			{ID: "c", JiraCodes: []string{"ES-2"}, JiraCode: "ES-9"}, // already migrated: keep, drop legacy
+		},
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if qa := s.Quests[0]; len(qa.JiraCodes) != 1 || qa.JiraCodes[0] != "EPDCHAIR-1" || qa.JiraCode != "" {
+		t.Errorf("quest a = %+v, want JiraCodes [EPDCHAIR-1], legacy cleared", qa)
+	}
+	if len(s.Quests[1].JiraCodes) != 0 {
+		t.Errorf("quest b JiraCodes = %+v, want none", s.Quests[1].JiraCodes)
+	}
+	if qc := s.Quests[2]; len(qc.JiraCodes) != 1 || qc.JiraCodes[0] != "ES-2" || qc.JiraCode != "" {
+		t.Errorf("quest c = %+v, want pre-existing [ES-2] kept, legacy cleared", qc)
+	}
+}

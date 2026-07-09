@@ -10,23 +10,14 @@ import (
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
 )
 
-// captureLinks scans a quest's body lines in order and fills in its
-// integration links: the FIRST Jira URL sets JiraCode (if empty); EVERY GitHub
-// PR URL is appended to PRs (deduped by code), in reading order. Once a code is
-// present it's left alone, so re-running is idempotent — called from
-// commitBodyLine (ModalQuestDetail only) as a safety net over the instant
-// paste-time capture (see updateModal).
-func (m *Model) captureLinks(q *model.Quest) {
-	for _, l := range q.Body {
-		if q.JiraCode == "" {
-			if code, ok := model.DetectJira(l.Text); ok {
-				q.JiraCode = code
-			}
-		}
-		for _, ref := range model.DetectPRs(l.Text) {
-			appendPRLink(q, ref)
+// appendJiraCode adds code to q.JiraCodes unless it's already linked.
+func appendJiraCode(q *model.Quest, code string) {
+	for _, c := range q.JiraCodes {
+		if c == code {
+			return
 		}
 	}
+	q.JiraCodes = append(q.JiraCodes, code)
 }
 
 // appendPRLink adds ref to q.PRs unless a PR with the same code is already
@@ -114,7 +105,13 @@ func (m *Model) handleFocusLinkKey(msg tea.KeyMsg, q *model.Quest) (tea.Cmd, boo
 func (m *Model) removeFocusLink(q *model.Quest, link focusLink) {
 	switch link.kind {
 	case linkJira:
-		q.JiraCode = ""
+		out := q.JiraCodes[:0]
+		for _, c := range q.JiraCodes {
+			if c != link.code {
+				out = append(out, c)
+			}
+		}
+		q.JiraCodes = out
 	case linkPR:
 		out := q.PRs[:0]
 		for _, pr := range q.PRs {
@@ -138,9 +135,10 @@ func (m *Model) removeFocusLink(q *model.Quest, link focusLink) {
 }
 
 // captureCurrentBodyLink inspects the live editor value of the current body
-// line for a COMPLETE Jira/PR URL. Any it finds are captured onto q (JiraCode /
+// line for a COMPLETE Jira/PR URL. Any it finds are captured onto q (JiraCodes /
 // PRs), the URL text is stripped out of the line (so the raw URL doesn't linger
-// where it was pasted), the editor is reseeded with the stripped text, and an
+// where it was pasted), the editor is reseeded with the stripped text, a
+// pastePrompt is armed (so the next key can keep it inline instead), and an
 // immediate sync for just the newly-captured code(s) is returned. Returns nil
 // when nothing new was captured. Only meaningful for ModalQuestDetail.
 func (m *Model) captureCurrentBodyLink(q *model.Quest) tea.Cmd {
@@ -166,14 +164,20 @@ func (m *Model) captureCurrentBodyLink(q *model.Quest) tea.Cmd {
 	ed.CursorEnd()
 	mod.BodyEditor = ed
 	m.touchBodyOwner()
+	m.pastePrompt = &pastePrompt{
+		codes:    codes,
+		origText: map[int]string{mod.BodyCursor: value},
+		line:     mod.BodyCursor,
+	}
 	return m.syncNow(codes)
 }
 
-// captureAllBodyLinks captures links across EVERY body line (used after a
-// multiline paste, whose lines are already committed to the body), stripping
-// each URL out of its line. Returns an immediate sync for the new code(s), or
-// nil when nothing new was captured.
-func (m *Model) captureAllBodyLinks(q *model.Quest) tea.Cmd {
+// captureBodyLinesRange captures links across body lines [start, end] only
+// (the lines a multiline paste just produced — scanning the whole body would
+// re-capture pre-existing inline references), stripping each URL out of its
+// line. Returns an immediate sync for the new code(s), or nil when nothing new
+// was captured.
+func (m *Model) captureBodyLinesRange(q *model.Quest, start, end int) tea.Cmd {
 	mod := m.modal
 	if mod == nil || mod.Kind != ModalQuestDetail {
 		return nil
@@ -182,9 +186,16 @@ func (m *Model) captureAllBodyLinks(q *model.Quest) tea.Cmd {
 	if body == nil {
 		return nil
 	}
+	if start < 0 {
+		start = 0
+	}
+	if end >= len(*body) {
+		end = len(*body) - 1
+	}
 
 	var all []string
-	for i := range *body {
+	origText := map[int]string{}
+	for i := start; i <= end; i++ {
 		text := (*body)[i].Text
 		if i == mod.BodyCursor {
 			text = mod.BodyEditor.Value()
@@ -193,6 +204,7 @@ func (m *Model) captureAllBodyLinks(q *model.Quest) tea.Cmd {
 		if len(codes) == 0 {
 			continue
 		}
+		origText[i] = text
 		(*body)[i].Text = stripped
 		if i == mod.BodyCursor {
 			ed := m.newBodyEditor(stripped)
@@ -205,6 +217,7 @@ func (m *Model) captureAllBodyLinks(q *model.Quest) tea.Cmd {
 		return nil
 	}
 	m.touchBodyOwner()
+	m.pastePrompt = &pastePrompt{codes: all, origText: origText, line: mod.BodyCursor}
 	return m.syncNow(all)
 }
 
@@ -217,9 +230,10 @@ func (m *Model) captureAndStrip(q *model.Quest, text string) (stripped string, n
 		return text, nil
 	}
 
-	if code, ok := model.DetectJira(text); ok {
-		if q.JiraCode == "" {
-			q.JiraCode = code
+	for _, code := range model.DetectJiras(text) {
+		before := len(q.JiraCodes)
+		appendJiraCode(q, code)
+		if len(q.JiraCodes) > before {
 			newCodes = append(newCodes, code)
 		}
 	}
@@ -233,6 +247,59 @@ func (m *Model) captureAndStrip(q *model.Quest, text string) (stripped string, n
 
 	// Remove the raw URLs from the line, tidying the whitespace left behind.
 	return model.StripLinks(text), newCodes
+}
+
+// referencePendingLinks resolves an active pastePrompt as "reference": it
+// un-tracks the just-captured codes and restores each affected body line to the
+// text it had before the URL was stripped, so the raw URL stays inline (a
+// terminal-clickable reference) instead of being tracked. The editor is
+// re-homed onto the primary affected line.
+func (m *Model) referencePendingLinks(q *model.Quest) {
+	p := m.pastePrompt
+	m.pastePrompt = nil
+	if p == nil {
+		return
+	}
+	for _, code := range p.codes {
+		untrackCode(q, code)
+	}
+	body := m.currentBody()
+	if body != nil {
+		for i, text := range p.origText {
+			if i >= 0 && i < len(*body) {
+				(*body)[i].Text = text
+			}
+		}
+		if p.line >= 0 && p.line < len(*body) {
+			ed := m.newBodyEditor((*body)[p.line].Text)
+			ed.CursorEnd()
+			m.modal.BodyEditor = ed
+			m.modal.BodyCursor = p.line
+		}
+	}
+	m.touchBodyOwner()
+}
+
+// untrackCode removes a single captured code from q — a "#"-prefixed code drops
+// from PRs, anything else from JiraCodes.
+func untrackCode(q *model.Quest, code string) {
+	if strings.HasPrefix(code, "#") {
+		out := q.PRs[:0]
+		for _, pr := range q.PRs {
+			if pr.Code != code {
+				out = append(out, pr)
+			}
+		}
+		q.PRs = out
+		return
+	}
+	out := q.JiraCodes[:0]
+	for _, c := range q.JiraCodes {
+		if c != code {
+			out = append(out, c)
+		}
+	}
+	q.JiraCodes = out
 }
 
 // openURL opens url in the system browser, fire-and-forget — a failed launch

@@ -103,9 +103,11 @@ func (m *Model) collectSyncTargets() (prs []syncTarget, jira []string) {
 				prs = append(prs, syncTarget{prCode: pr.Code, prRepo: pr.Repo})
 			}
 		}
-		if q.JiraCode != "" && !seenJira[q.JiraCode] {
-			seenJira[q.JiraCode] = true
-			jira = append(jira, q.JiraCode)
+		for _, code := range q.JiraCodes {
+			if !seenJira[code] {
+				seenJira[code] = true
+				jira = append(jira, code)
+			}
 		}
 	}
 	return prs, jira
@@ -561,16 +563,17 @@ type integrationSegment struct {
 	url   string
 }
 
-// integrationSegments builds the Jira segment then one segment per linked PR
-// (in stack order), each clickable. The code text is muted; its status glyph
-// follows it; each PR also carries its always-shown "<u>/<t>" comment count
-// (0/0 included). No tree/connectors here — that's the expanded view only.
+// integrationSegments builds one segment per linked Jira issue then one per
+// linked PR (in stack order), each clickable. The code text is muted; its
+// status glyph follows it; each PR also carries its always-shown "<u>/<t>"
+// comment count (0/0 included). No tree/connectors here — that's the expanded
+// view only.
 func (m *Model) integrationSegments(q *model.Quest) []integrationSegment {
 	var segs []integrationSegment
-	if q.JiraCode != "" {
-		text := ui.StyleMuted.Render(q.JiraCode) + " " + m.jiraGlyph(q.JiraCode)
-		width := lipgloss.Width(q.JiraCode) + 1 + 1
-		segs = append(segs, integrationSegment{text: text, width: width, url: jiraURL(q.JiraCode, m.jiraBaseURL)})
+	for _, code := range q.JiraCodes {
+		text := ui.StyleMuted.Render(code) + " " + m.jiraGlyph(code)
+		width := lipgloss.Width(code) + 1 + 1
+		segs = append(segs, integrationSegment{text: text, width: width, url: jiraURL(code, m.jiraBaseURL)})
 	}
 	for _, node := range m.prStack(q.PRs) {
 		pr := node.link
@@ -610,7 +613,12 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 	stack := m.prStack(q.PRs)
 
 	// Pad every code to the widest one so the status text after it lines up.
-	codeW := lipgloss.Width(q.JiraCode)
+	codeW := 0
+	for _, code := range q.JiraCodes {
+		if w := lipgloss.Width(code); w > codeW {
+			codeW = w
+		}
+	}
 	for _, node := range stack {
 		if w := lipgloss.Width(node.link.Code); w > codeW {
 			codeW = w
@@ -650,9 +658,9 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		ln++
 	}
 
-	if q.JiraCode != "" {
-		text := ui.StyleMuted.Render(m.jiraStatusWord(q.JiraCode))
-		addLink("", m.jiraGlyph(q.JiraCode), q.JiraCode, text, linkJira, jiraURL(q.JiraCode, m.jiraBaseURL))
+	for _, code := range q.JiraCodes {
+		text := ui.StyleMuted.Render(m.jiraStatusWord(code))
+		addLink("", m.jiraGlyph(code), code, text, linkJira, jiraURL(code, m.jiraBaseURL))
 	}
 
 	for i, node := range stack {
@@ -677,11 +685,7 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 // focusLinkCount is how many navigable link lines the expanded quest view
 // currently has (Jira + each PR) — used to bound link-cursor movement.
 func (m *Model) focusLinkCount(q *model.Quest) int {
-	n := len(m.prStack(q.PRs))
-	if q.JiraCode != "" {
-		n++
-	}
-	return n
+	return len(q.JiraCodes) + len(m.prStack(q.PRs))
 }
 
 // renderQuestMetaLine renders the integration sub-line for a RowQuestMeta,

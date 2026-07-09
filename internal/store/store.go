@@ -83,6 +83,12 @@ func Load(path string) (*Store, error) {
 		}
 		s.Quests[i].PRCode = ""
 		s.Quests[i].PRRepo = ""
+
+		// Migrate the old single-Jira field into the JiraCodes slice, likewise.
+		if len(s.Quests[i].JiraCodes) == 0 && s.Quests[i].JiraCode != "" {
+			s.Quests[i].JiraCodes = []string{s.Quests[i].JiraCode}
+		}
+		s.Quests[i].JiraCode = ""
 	}
 	return &s, nil
 }

@@ -255,11 +255,6 @@ func (m *Model) commitBodyLine() {
 		return
 	}
 	(*body)[mod.BodyCursor].Text = mod.BodyEditor.Value()
-	if mod.Kind == ModalQuestDetail {
-		if q := m.findQuest(mod.QuestID); q != nil {
-			m.captureLinks(q)
-		}
-	}
 	m.touchBodyOwner()
 }
 
@@ -454,8 +449,14 @@ func (m *Model) handleBodyOutlineKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 
 	case msg.Type == tea.KeyRunes && strings.ContainsAny(string(msg.Runes), "\n\r"):
 		// A multi-line paste — split it into real body lines instead of
-		// letting textinput collapse the newlines into spaces.
-		m.pasteBodyLines(string(msg.Runes))
+		// letting textinput collapse the newlines into spaces. Any links in the
+		// pasted lines (and ONLY those lines) are captured immediately.
+		start, end := m.pasteBodyLines(string(msg.Runes))
+		if mod.Kind == ModalQuestDetail {
+			if q := m.findQuest(mod.QuestID); q != nil {
+				return m.captureBodyLinesRange(q, start, end), true
+			}
+		}
 		return nil, true
 
 	case msg.Type == tea.KeyTab:
@@ -516,8 +517,10 @@ func (m *Model) indentBodyLine(delta int) {
 // pasteBodyLines inserts pasted multi-line text at the cursor: the first
 // pasted line joins the text before the cursor, the rest become their own
 // body lines, and whatever followed the cursor ends up after the final
-// pasted line — standard editor paste semantics.
-func (m *Model) pasteBodyLines(text string) {
+// pasted line — standard editor paste semantics. Returns the [start, end]
+// range of body-line indices the paste touched, so link capture can scan only
+// those lines (never pre-existing inline references elsewhere in the body).
+func (m *Model) pasteBodyLines(text string) (start, end int) {
 	mod := m.modal
 	body := m.currentBody()
 
@@ -529,6 +532,7 @@ func (m *Model) pasteBodyLines(text string) {
 	pos := mod.BodyEditor.Position()
 	left, right := string(raw[:pos]), string(raw[pos:])
 
+	start = mod.BodyCursor
 	indent := (*body)[mod.BodyCursor].Indent // pasted lines keep the current nesting
 	(*body)[mod.BodyCursor].Text = left + chunks[0]
 	insertAt := mod.BodyCursor + 1
@@ -544,6 +548,7 @@ func (m *Model) pasteBodyLines(text string) {
 	(*body)[lastIdx].Text += right
 	m.touchBodyOwner()
 	m.seedBodyEditor(lastIdx, endCol)
+	return start, lastIdx
 }
 
 // focusScrollBy moves the focus-view caret n rows up/down by replaying that
@@ -635,6 +640,21 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 				return cmd
 			}
 		}
+		// A just-pasted link was auto-tracked; the next key resolves the offer to
+		// keep it inline instead. "r" references it (un-track, restore the URL);
+		// any other key confirms the track and is then handled normally.
+		if m.pastePrompt != nil {
+			switch msg.String() {
+			case "r":
+				m.referencePendingLinks(q)
+				return nil
+			case "t":
+				m.pastePrompt = nil
+				return nil
+			default:
+				m.pastePrompt = nil
+			}
+		}
 		if msg.Type == tea.KeyEsc {
 			m.commitBodyLine()
 			m.closeModal()
@@ -655,11 +675,6 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		if cmd, handled := m.handleBodyOutlineKey(msg); handled {
-			// A multiline paste can carry linkable URLs — capture across every
-			// line the paste produced, immediately.
-			if syncCmd := m.captureAllBodyLinks(q); syncCmd != nil {
-				return tea.Batch(cmd, syncCmd)
-			}
 			return cmd
 		}
 		var cmd tea.Cmd
@@ -813,11 +828,15 @@ func (m *Model) renderModal() string {
 
 		b.WriteString(ui.StyleSectionHeader.Render("Integrations"))
 		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("Paste a Jira or GitHub PR URL into a quest's body to link it; click a"))
+		b.WriteString(ui.StyleMuted.Render("Paste a Jira or GitHub PR URL into a quest's body to link it (multiple of"))
 		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("code to open it. PR shows " + ui.GlyphPRSuccess + "/" + ui.GlyphPRError + "/" + ui.GlyphPRRunning + "/" + ui.GlyphPRMerged + " + unresolved/total comments,"))
+		b.WriteString(ui.StyleMuted.Render("each allowed). On paste it's tracked — press r to keep it inline as a"))
 		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("Jira shows " + ui.GlyphJiraTodo + "/" + ui.GlyphJiraInProgress + "/" + ui.GlyphJiraDone + " (todo / in progress / done), refreshed every ~60s."))
+		b.WriteString(ui.StyleMuted.Render("plain reference instead. Click a code to open it; arrow onto a link in"))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("the expanded view to open (↵) or remove (" + Keys.Delete.Help().Key + ") it. PR shows " + ui.GlyphPRSuccess + "/" + ui.GlyphPRError + "/" + ui.GlyphPRRunning + "/" + ui.GlyphPRMerged + ","))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("+ unresolved/total comments; Jira shows " + ui.GlyphJiraTodo + "/" + ui.GlyphJiraInProgress + "/" + ui.GlyphJiraDone + " (todo / wip / done), ~60s."))
 		b.WriteString("\n")
 		b.WriteString(ui.StyleMuted.Render("Requires gh and acli authenticated locally (gh auth login; acli jira"))
 		b.WriteString("\n")
@@ -946,6 +965,13 @@ func (m *Model) renderFocusView() string {
 	right := ui.StyleMuted.Render("F1 help")
 	if m.clipboardToastActive {
 		right = renderClipboardToast()
+	}
+	if m.pastePrompt != nil {
+		noun := "link"
+		if len(m.pastePrompt.codes) > 1 {
+			noun = "links"
+		}
+		right = ui.StyleMain.Render("tracked "+noun) + ui.StyleMuted.Render("  t keep · r reference")
 	}
 	pad := contentWidth - lipgloss.Width(back) - lipgloss.Width(right)
 	if pad < 1 {

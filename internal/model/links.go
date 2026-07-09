@@ -35,6 +35,16 @@ func DetectJira(text string) (code string, ok bool) {
 	return m[1], true
 }
 
+// DetectJiras returns every Jira issue key in text, in reading order. Used by
+// the capture path to link all Jira issues pasted into a quest's body.
+func DetectJiras(text string) []string {
+	var codes []string
+	for _, m := range jiraURLRE.FindAllStringSubmatch(text, -1) {
+		codes = append(codes, m[1])
+	}
+	return codes
+}
+
 // DetectPR returns the first GitHub PR's "owner/repo" and number in text, if
 // any.
 func DetectPR(text string) (repo, num string, ok bool) {

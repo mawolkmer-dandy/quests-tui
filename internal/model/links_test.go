@@ -67,6 +67,21 @@ func TestDetectPRs(t *testing.T) {
 	})
 }
 
+func TestDetectJiras(t *testing.T) {
+	t.Run("none", func(t *testing.T) {
+		if codes := DetectJiras("no links"); codes != nil {
+			t.Errorf("DetectJiras(none) = %+v, want nil", codes)
+		}
+	})
+	t.Run("multiple in order", func(t *testing.T) {
+		text := "https://meetdandy.atlassian.net/browse/EPDCHAIR-5713 and https://x/browse/ES-8858"
+		codes := DetectJiras(text)
+		if len(codes) != 2 || codes[0] != "EPDCHAIR-5713" || codes[1] != "ES-8858" {
+			t.Fatalf("got %+v, want [EPDCHAIR-5713 ES-8858]", codes)
+		}
+	})
+}
+
 func TestStripLinks(t *testing.T) {
 	tests := []struct {
 		name string

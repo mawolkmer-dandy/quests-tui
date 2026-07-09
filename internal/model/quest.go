@@ -87,17 +87,17 @@ type Quest struct {
 	CompletedAt *time.Time  `json:"completedAt,omitempty"`
 
 	// Integration links, captured from URLs pasted into the body (see
-	// internal/model/links.go and internal/app/links.go). JiraCode holds only
-	// the first Jira issue found; PRs holds every linked GitHub PR in the
-	// order it was captured. All omitempty, so existing data needs no
-	// migration.
-	JiraCode string   `json:"jiraCode,omitempty"` // e.g. "EPDCHAIR-5713"
-	PRs      []PRLink `json:"prs,omitempty"`      // every linked GitHub PR
+	// internal/model/links.go and internal/app/links.go). JiraCodes holds every
+	// linked Jira issue and PRs every linked GitHub PR, each in the order it was
+	// captured. All omitempty.
+	JiraCodes []string `json:"jiraCodes,omitempty"` // every linked Jira issue, e.g. "EPDCHAIR-5713"
+	PRs       []PRLink `json:"prs,omitempty"`       // every linked GitHub PR
 
-	// Legacy single-PR fields, kept only so pre-PRs data migrates on load (see
-	// store.Load); cleared there so they drop out on the next save.
-	PRCode string `json:"prCode,omitempty"` // deprecated: migrated into PRs
-	PRRepo string `json:"prRepo,omitempty"` // deprecated: migrated into PRs
+	// Legacy single-link fields, kept only so pre-slice data migrates on load
+	// (see store.Load); cleared there so they drop out on the next save.
+	JiraCode string `json:"jiraCode,omitempty"` // deprecated: migrated into JiraCodes
+	PRCode   string `json:"prCode,omitempty"`   // deprecated: migrated into PRs
+	PRRepo   string `json:"prRepo,omitempty"`   // deprecated: migrated into PRs
 }
 
 // PRLink is one linked GitHub pull request: its short code ("#47477") and the
