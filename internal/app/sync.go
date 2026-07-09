@@ -370,12 +370,13 @@ func runCmd(name string, args ...string) ([]byte, error) {
 
 // prStackNode is one linked PR positioned within a Graphite-style stack: its
 // link, its tree depth (0 = a root targeting main/trunk or an unlinked
-// branch), and whether it's the last child on its immediate branch (used to
-// decide connector glyphs, though the current renderer draws a uniform
-// connector).
+// branch), and whether it belongs to a real multi-PR stack (a connected
+// component of size > 1). stacked gates the tree connector glyphs, so two
+// unrelated PRs on the same quest don't render as if they were stacked.
 type prStackNode struct {
-	link  model.PRLink
-	depth int
+	link    model.PRLink
+	depth   int
+	stacked bool
 }
 
 // prStack orders a quest's linked PRs into a Graphite-style stack using the
@@ -417,29 +418,41 @@ func (m *Model) prStack(prs []model.PRLink) []prStackNode {
 		}
 	}
 
-	var nodes []prStackNode
-	var visit func(i, depth int)
 	visited := make([]bool, len(prs))
-	visit = func(i, depth int) {
+	var visit func(i, depth int, out *[]prStackNode)
+	visit = func(i, depth int, out *[]prStackNode) {
 		if visited[i] {
 			return // defend against a ref cycle
 		}
 		visited[i] = true
-		nodes = append(nodes, prStackNode{link: prs[i], depth: depth})
+		*out = append(*out, prStackNode{link: prs[i], depth: depth})
 		for _, c := range children[i] {
-			visit(c, depth+1)
+			visit(c, depth+1, out)
 		}
+	}
+	// Build one connected component per root, then flag every node in a
+	// multi-PR component as stacked. Components render contiguously (a root
+	// followed by its descendants), so this keeps the pre-order output.
+	var nodes []prStackNode
+	appendComponent := func(root int) {
+		var comp []prStackNode
+		visit(root, 0, &comp)
+		stacked := len(comp) > 1
+		for k := range comp {
+			comp[k].stacked = stacked
+		}
+		nodes = append(nodes, comp...)
 	}
 	for i := range prs {
 		if parent[i] < 0 {
-			visit(i, 0)
+			appendComponent(i)
 		}
 	}
 	// Any PR left unvisited (part of a cycle whose members all had parents)
-	// still needs to render — append them flat as roots.
+	// still needs to render — append each as its own component root.
 	for i := range prs {
 		if !visited[i] {
-			visit(i, 0)
+			appendComponent(i)
 		}
 	}
 	return nodes
@@ -646,10 +659,13 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		pr := node.link
 		glyph, _ := m.prGlyph(pr.Code)
 		text := ui.StyleMuted.Render(m.prStatusWord(pr.Code) + " · " + m.prCommentsText(pr.Code))
+		// Only PRs in a real stack get a tree marker. A component's members
+		// are contiguous, so the current node is the last of its stack when the
+		// next node starts a new component (depth 0) or the slice ends.
 		marker := ""
-		if len(stack) > 1 {
+		if node.stacked {
 			marker = ui.GlyphStackBranchMid
-			if i == len(stack)-1 {
+			if i == len(stack)-1 || stack[i+1].depth == 0 {
 				marker = ui.GlyphStackBranchEnd
 			}
 		}

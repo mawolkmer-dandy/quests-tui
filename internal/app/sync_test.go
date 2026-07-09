@@ -34,6 +34,9 @@ func TestPRStack(t *testing.T) {
 		if len(nodes) != 1 || codes[0] != "#1" || depths[0] != 0 {
 			t.Fatalf("got codes=%v depths=%v", codes, depths)
 		}
+		if nodes[0].stacked {
+			t.Fatalf("a lone PR must not be marked stacked")
+		}
 	})
 
 	t.Run("child directly below parent", func(t *testing.T) {
@@ -50,6 +53,9 @@ func TestPRStack(t *testing.T) {
 		}
 		if depths[0] != 0 || depths[1] != 1 {
 			t.Fatalf("got depths=%v, want [0 1]", depths)
+		}
+		if !nodes[0].stacked || !nodes[1].stacked {
+			t.Fatalf("both PRs in a stack must be marked stacked")
 		}
 	})
 
@@ -79,6 +85,9 @@ func TestPRStack(t *testing.T) {
 		_, depths := codesAndDepths(nodes)
 		if len(nodes) != 2 || depths[0] != 0 || depths[1] != 0 {
 			t.Fatalf("got depths=%v, want two roots [0 0]", depths)
+		}
+		if nodes[0].stacked || nodes[1].stacked {
+			t.Fatalf("independent PRs must not be marked stacked")
 		}
 	})
 
