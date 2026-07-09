@@ -43,6 +43,8 @@ var (
 	GlyphPRSuccess      = "✓" // PR CI: success (green)
 	GlyphPRError        = "✗" // PR CI: error/failure (red)
 	GlyphPRRunning      = "◌" // PR CI: running (amber)
+	GlyphPRMerged       = "◆" // PR merged (mauve) — outranks CI state
+	GlyphPRClosed       = "⊘" // PR closed unmerged (muted)
 	GlyphFetching       = "◌" // code linked but not yet synced — "fetching" (amber)
 	GlyphLoading        = "·" // legacy muted loading dot (kept for compatibility)
 
@@ -96,6 +98,7 @@ var (
 	ColorImportant      = lipgloss.AdaptiveColor{Light: "#D20F39", Dark: "#F38BA8"} // high priority (red)
 	ColorPriorityMedium = lipgloss.AdaptiveColor{Light: "#DF8E1D", Dark: "#F9E2AF"} // medium priority (yellow)
 	ColorRunning        = lipgloss.AdaptiveColor{Light: "#FE640B", Dark: "#FAB387"} // integration "running" state (amber)
+	ColorMerged         = lipgloss.AdaptiveColor{Light: "#8839EF", Dark: "#CBA6F7"} // merged PR (mauve)
 	ColorSelected       = lipgloss.AdaptiveColor{Light: "#CCD0DA", Dark: "#313244"}
 
 	StyleTitle          = lipgloss.NewStyle().Bold(true)
@@ -107,6 +110,7 @@ var (
 	StyleImportant      = lipgloss.NewStyle().Bold(true).Foreground(ColorImportant)      // high priority
 	StylePriorityMedium = lipgloss.NewStyle().Bold(true).Foreground(ColorPriorityMedium) // medium priority
 	StyleRunning        = lipgloss.NewStyle().Foreground(ColorRunning)                   // integration "running" state
+	StyleMerged         = lipgloss.NewStyle().Foreground(ColorMerged)                    // merged PR
 
 	// Selected rows (used by the project-picker modal's list) set both fg
 	// and bg explicitly as a self-consistent pair, so contrast holds

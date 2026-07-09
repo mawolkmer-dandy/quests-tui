@@ -815,7 +815,7 @@ func (m *Model) renderModal() string {
 		b.WriteString("\n")
 		b.WriteString(ui.StyleMuted.Render("Paste a Jira or GitHub PR URL into a quest's body to link it; click a"))
 		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("code to open it. PR shows " + ui.GlyphPRSuccess + "/" + ui.GlyphPRError + "/" + ui.GlyphPRRunning + " + unresolved/total comments,"))
+		b.WriteString(ui.StyleMuted.Render("code to open it. PR shows " + ui.GlyphPRSuccess + "/" + ui.GlyphPRError + "/" + ui.GlyphPRRunning + "/" + ui.GlyphPRMerged + " + unresolved/total comments,"))
 		b.WriteString("\n")
 		b.WriteString(ui.StyleMuted.Render("Jira shows " + ui.GlyphJiraTodo + "/" + ui.GlyphJiraInProgress + "/" + ui.GlyphJiraDone + " (todo / in progress / done), refreshed every ~60s."))
 		b.WriteString("\n")

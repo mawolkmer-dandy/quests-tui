@@ -188,6 +188,7 @@ type prRollupResponse struct {
 	StatusCheckRollup []prRollupEntry `json:"statusCheckRollup"`
 	BaseRefName       string          `json:"baseRefName"`
 	HeadRefName       string          `json:"headRefName"`
+	State             string          `json:"state"` // OPEN | MERGED | CLOSED
 }
 
 type reviewThreadsResponse struct {
@@ -231,13 +232,22 @@ func fetchPRStatus(prCode, prRepo string) (PRStatus, bool) {
 
 func fetchPRCIStatus(prRepo, num string) (status, baseRef, headRef string, ok bool) {
 	url := prURL(prRepo, num)
-	out, err := runCmd("gh", "pr", "view", url, "--json", "statusCheckRollup,baseRefName,headRefName")
+	out, err := runCmd("gh", "pr", "view", url, "--json", "state,statusCheckRollup,baseRefName,headRefName")
 	if err != nil {
 		return "", "", "", false
 	}
 	var resp prRollupResponse
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return "", "", "", false
+	}
+	// A merged/closed PR outranks its last CI run — a merged PR showing
+	// "passing" (or a closed one showing whatever its checks were) would read
+	// as still-open work.
+	switch strings.ToUpper(resp.State) {
+	case "MERGED":
+		return "merged", resp.BaseRefName, resp.HeadRefName, true
+	case "CLOSED":
+		return "closed", resp.BaseRefName, resp.HeadRefName, true
 	}
 	return collapseRollup(resp.StatusCheckRollup), resp.BaseRefName, resp.HeadRefName, true
 }
@@ -437,15 +447,19 @@ func (m *Model) prStack(prs []model.PRLink) []prStackNode {
 
 // --- rendering ------------------------------------------------------------
 
-// prStatusWord is the expanded-view word for a PR's CI state:
-// success→"passing", error→"failing", running→"running", not-yet-synced→
-// "fetching…".
+// prStatusWord is the expanded-view word for a PR's state: merged→"merged",
+// closed→"closed", else the CI state success→"passing", error→"failing",
+// running→"running" (not-yet-synced→"fetching…").
 func (m *Model) prStatusWord(code string) string {
 	st, ok := m.prStatus[code]
 	if !ok {
 		return "fetching…"
 	}
 	switch st.Status {
+	case "merged":
+		return "merged"
+	case "closed":
+		return "closed"
 	case "error":
 		return "failing"
 	case "running":
@@ -513,6 +527,10 @@ func (m *Model) prGlyph(code string) (glyph string, synced bool) {
 		return ui.StyleRunning.Render(ui.GlyphFetching), false
 	}
 	switch st.Status {
+	case "merged":
+		return ui.StyleMerged.Render(ui.GlyphPRMerged), true
+	case "closed":
+		return ui.StyleMuted.Render(ui.GlyphPRClosed), true
 	case "error":
 		return lipgloss.NewStyle().Foreground(ui.ColorImportant).Render(ui.GlyphPRError), true
 	case "running":
