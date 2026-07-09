@@ -553,11 +553,17 @@ func (m *Model) integrationSegments(q *model.Quest) []integrationSegment {
 }
 
 // focusCodeLines renders the expanded quest focus view's integration links,
-// indented to align with the body text (4 cols): the Jira line first (plain),
-// then the linked PRs drawn as a gt-ls-style vertical stack — parent on top, a
-// muted "│" connector between consecutive PRs, each PR line prefixed by a muted
-// "○" node then "#code  <status word> · <u/t> comments". A lone PR (no stack)
-// renders as a plain PR line with no connector.
+// indented to align with the body text (4 cols). Every line shares one column
+// layout so the status icons line up vertically:
+//
+//	<2-col stack gutter><status glyph> <code padded> <status text>
+//
+// The Jira line comes first (blank gutter), then the linked PRs in gt-ls stack
+// order (parent targeting main on top). When 2+ PRs form a stack their gutter
+// carries a muted tree marker — "├" for every PR but the last, "└" for the last
+// — so they read as one connected stack; a lone PR gets a blank gutter. The
+// code column is padded to the widest code so the trailing status text aligns
+// too.
 //
 // It records each link's clickable span (focusCodeSpans, for mouse) AND its
 // navigable focusLink entry (for the cursor), both keyed to the content-line
@@ -566,8 +572,19 @@ func (m *Model) integrationSegments(q *model.Quest) []integrationSegment {
 // remove") or, while a removal is armed, the inline "remove this link? y/n"
 // prompt — and its line index is recorded as the caret line for scrolling.
 func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
-	const indent = 4 // body text starts 4 cols in (see focusTextWidth)
+	const indent = 4  // body text starts 4 cols in (see focusTextWidth)
+	const gutterW = 2 // left slot holding the stack marker (blank otherwise)
 	pad := strings.Repeat(" ", indent)
+
+	stack := m.prStack(q.PRs)
+
+	// Pad every code to the widest one so the status text after it lines up.
+	codeW := lipgloss.Width(q.JiraCode)
+	for _, node := range stack {
+		if w := lipgloss.Width(node.link.Code); w > codeW {
+			codeW = w
+		}
+	}
 
 	var lines []string
 	ln := startLn
@@ -584,39 +601,41 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		return "  " + ui.StyleMuted.Render("↵ open · "+Keys.Delete.Help().Key+" remove")
 	}
 
-	addLink := func(content, prefix string, prefixW int, kind linkKind, code, url string) {
+	// addLink emits one aligned link line: a fixed-width stack gutter, the
+	// (already-styled) status glyph, the padded code, then the status text. The
+	// clickable span and cursor target both start at the code.
+	addLink := func(marker, glyph, code, text string, kind linkKind, url string) {
 		li := len(m.focusLinks)
-		x := m.focusLeftMargin + indent + prefixW
-		// The clickable code span sits after the stack prefix.
-		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(content), url: url})
+		gutter := marker + strings.Repeat(" ", gutterW-lipgloss.Width(marker))
+		x := m.focusLeftMargin + indent + gutterW + lipgloss.Width(glyph) + 1
+		codePadded := code + strings.Repeat(" ", codeW-lipgloss.Width(code))
+		body := ui.StyleMuted.Render(codePadded) + "  " + text
+		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: url})
 		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: kind, code: code, url: url})
 		if m.focusLinkIdx == li {
 			m.focusCaretLine = ln
 		}
-		lines = append(lines, pad+prefix+content+hintFor(li))
+		lines = append(lines, pad+ui.StyleMuted.Render(gutter)+glyph+" "+body+hintFor(li))
 		ln++
 	}
 
 	if q.JiraCode != "" {
-		content := ui.StyleMuted.Render(q.JiraCode) + " " + m.jiraGlyph(q.JiraCode) + " " + ui.StyleMuted.Render(m.jiraStatusWord(q.JiraCode))
-		addLink(content, "", 0, linkJira, q.JiraCode, jiraURL(q.JiraCode, m.jiraBaseURL))
+		text := ui.StyleMuted.Render(m.jiraStatusWord(q.JiraCode))
+		addLink("", m.jiraGlyph(q.JiraCode), q.JiraCode, text, linkJira, jiraURL(q.JiraCode, m.jiraBaseURL))
 	}
 
-	stack := m.prStack(q.PRs)
 	for i, node := range stack {
 		pr := node.link
 		glyph, _ := m.prGlyph(pr.Code)
-		content := ui.StyleMuted.Render(pr.Code) + "  " + glyph + " " +
-			ui.StyleMuted.Render(m.prStatusWord(pr.Code)+" · "+m.prCommentsText(pr.Code))
-
-		// A connector line above every PR after the first of a stack, so
-		// consecutive PRs read as a single stack; a lone PR gets no connector.
-		if i > 0 {
-			lines = append(lines, pad+ui.StyleMuted.Render(ui.GlyphStackConnector))
-			ln++
+		text := ui.StyleMuted.Render(m.prStatusWord(pr.Code) + " · " + m.prCommentsText(pr.Code))
+		marker := ""
+		if len(stack) > 1 {
+			marker = ui.GlyphStackBranchMid
+			if i == len(stack)-1 {
+				marker = ui.GlyphStackBranchEnd
+			}
 		}
-		prefix := ui.StyleMuted.Render(ui.GlyphStackNode) + " "
-		addLink(content, prefix, lipgloss.Width(ui.GlyphStackNode)+1, linkPR, pr.Code, prURL(pr.Repo, pr.Code))
+		addLink(marker, glyph, pr.Code, text, linkPR, prURL(pr.Repo, pr.Code))
 	}
 	return lines
 }

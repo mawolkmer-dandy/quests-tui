@@ -46,11 +46,12 @@ var (
 	GlyphFetching       = "◌" // code linked but not yet synced — "fetching" (amber)
 	GlyphLoading        = "·" // legacy muted loading dot (kept for compatibility)
 
-	// GlyphStackNode marks each PR in an expanded Graphite-style stack; the
-	// vertical connector between stacked PRs uses GlyphStackConnector. Both
-	// render muted (see sync.go focusPRStackLines).
-	GlyphStackNode      = "○" // node mark on a PR line in an expanded stack
-	GlyphStackConnector = "│" // vertical connector between stacked PRs
+	// Graphite-style stack markers, drawn in a left gutter before a PR that
+	// belongs to a stack (2+ linked PRs): every PR but the last uses the tee,
+	// the last uses the corner — a compact file-tree look. A lone PR gets no
+	// marker. Both render muted (see sync.go focusCodeLines).
+	GlyphStackBranchMid = "├" // a PR with another below it in the stack
+	GlyphStackBranchEnd = "└" // the last (deepest) PR in the stack
 )
 
 // IconSet overrides the glyphs above from user config — empty fields keep

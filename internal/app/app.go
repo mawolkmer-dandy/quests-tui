@@ -768,9 +768,10 @@ func (m *Model) wildsEligible() map[string]model.Quest {
 }
 
 // wildsOrderedIDs is the canonical Wilds order: quests the user has manually
-// placed (WildsOrder) first, in that order, then any remaining eligible quests
-// sorted by tier (priority/main up, low/done down) — so a fresh Wilds reads by
-// priority and stays that way until you rearrange it.
+// placed this visit (WildsOrder) first, in that order, then any remaining
+// eligible quests sorted by tier (priority/main up, low/done down). WildsOrder
+// is cleared on every entry (see setWilds), so a fresh trip always reads by
+// priority; in-visit nudges reorder from there but don't persist.
 func (m *Model) wildsOrderedIDs(byID map[string]model.Quest) []string {
 	order := make([]string, 0, len(byID))
 	seen := map[string]bool{}
@@ -818,8 +819,9 @@ func (m *Model) moveWildsQuest(delta int) {
 		return
 	}
 	full[ia], full[ib] = full[ib], full[ia]
+	// Kept in memory for this visit only — not persisted, so re-entering the
+	// Wilds (see setWilds) resets to priority order.
 	m.store.WildsOrder = full
-	m.save()
 }
 
 func indexOfStr(ss []string, s string) int {
@@ -849,6 +851,9 @@ func (m *Model) setWilds(on bool) tea.Cmd {
 	m.scrollOffset = 0
 	if on {
 		m.quickFilter = filterTaken
+		// Re-sort by priority on every entry: manual nudges are per-visit only,
+		// so a fresh trip to the Wilds always reads top-down by priority.
+		m.store.WildsOrder = nil
 		m.subtitle = ui.RandomWildsGreeting()
 	} else {
 		m.subtitle = ui.RandomGreeting()
