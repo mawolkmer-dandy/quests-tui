@@ -200,6 +200,13 @@ type reviewThreadsResponse struct {
 				ReviewThreads struct {
 					Nodes []struct {
 						IsResolved bool `json:"isResolved"`
+						Comments   struct {
+							Nodes []struct {
+								Author struct {
+									TypeName string `json:"__typename"`
+								} `json:"author"`
+							} `json:"nodes"`
+						} `json:"comments"`
 					} `json:"nodes"`
 				} `json:"reviewThreads"`
 			} `json:"pullRequest"`
@@ -281,7 +288,7 @@ func collapseRollup(entries []prRollupEntry) string {
 	return "success"
 }
 
-const reviewThreadsQuery = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}}}}}`
+const reviewThreadsQuery = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{__typename}}}}}}}}`
 
 func fetchPRReviewThreads(owner, repo, num string) (unresolved, total int, ok bool) {
 	out, err := runCmd("gh", "api", "graphql",
@@ -299,11 +306,18 @@ func fetchPRReviewThreads(owner, repo, num string) (unresolved, total int, ok bo
 	}
 	nodes := resp.Data.Repository.PullRequest.ReviewThreads.Nodes
 	for _, n := range nodes {
+		// Skip bot-authored threads (Cursor Bugbot, CodeRabbit, etc.) — they're
+		// informational, not review comments the PR author resolves. Only count
+		// threads a human started, matching what you actually need to act on.
+		if len(n.Comments.Nodes) > 0 && n.Comments.Nodes[0].Author.TypeName == "Bot" {
+			continue
+		}
+		total++
 		if !n.IsResolved {
 			unresolved++
 		}
 	}
-	return unresolved, len(nodes), true
+	return unresolved, total, true
 }
 
 // --- Jira fetch -----------------------------------------------------------
