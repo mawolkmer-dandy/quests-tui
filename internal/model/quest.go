@@ -130,3 +130,17 @@ func (q *Quest) ObjectiveProgress() (done, total int) {
 	}
 	return done, total
 }
+
+// NextObjective returns the display text of the first not-done objective — the
+// quest's "next action" — skipping headings, plain text, and completed
+// objectives. ok is false when the quest has no pending objective.
+func (q *Quest) NextObjective() (text string, ok bool) {
+	for _, l := range q.Body {
+		kind, display := ClassifyBodyLine(l.Text)
+		if kind != BodyObjective || l.Done {
+			continue
+		}
+		return display, true
+	}
+	return "", false
+}

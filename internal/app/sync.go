@@ -650,10 +650,12 @@ func (m *Model) focusLinkCount(q *model.Quest) int {
 	return n
 }
 
-// renderQuestMetaLine renders the integration sub-line for a RowQuestMeta,
-// indented to align under the quest's title, and returns the clickable code
-// spans (absolute screen columns). Jira and PR groups are kept close together
-// (two spaces apart).
+// renderQuestMetaLine renders a RowQuestMeta sub-line, indented to align under
+// the quest's title, and returns the clickable code spans (absolute screen
+// columns). It carries the integration statuses (Jira and PR groups, kept two
+// spaces apart, when integrations are on) followed by the quest's "next action"
+// — its first not-done objective, drawn with the same muted objective glyph as
+// the body. Either part may be absent; an empty line renders nothing.
 func (m *Model) renderQuestMetaLine(row ui.Row, width int) (string, []codeSpan) {
 	q := m.findQuest(row.QuestID)
 	if q == nil {
@@ -667,8 +669,13 @@ func (m *Model) renderQuestMetaLine(row ui.Row, width int) (string, []codeSpan) 
 	// titleOffset): cursor mark (2) + nest + priority slot (4) + glyph (1) +
 	// space (1) = 8 + nest.
 	indent := 8 + nestOffset
-	segs := m.integrationSegments(q)
-	if len(segs) == 0 {
+
+	var segs []integrationSegment
+	if m.integrationsEnabled {
+		segs = m.integrationSegments(q)
+	}
+	nextObj, hasNextObj := q.NextObjective()
+	if len(segs) == 0 && !hasNextObj {
 		return "", nil
 	}
 
@@ -687,6 +694,15 @@ func (m *Model) renderQuestMetaLine(row ui.Row, width int) (string, []codeSpan) 
 		spans = append(spans, codeSpan{x0: x, x1: x + seg.width, url: seg.url})
 		b.WriteString(seg.text)
 		x += seg.width
+	}
+
+	// The next objective trails the statuses (with a wider gap so it reads as a
+	// distinct "next action"), or stands alone when there are no integrations.
+	if hasNextObj {
+		if len(segs) > 0 {
+			b.WriteString("   ")
+		}
+		b.WriteString(ui.StyleMuted.Render(ui.GlyphQuestOpen + " " + nextObj))
 	}
 	return b.String(), spans
 }
