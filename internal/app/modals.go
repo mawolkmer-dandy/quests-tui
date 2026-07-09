@@ -640,21 +640,6 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 				return cmd
 			}
 		}
-		// A just-pasted link was auto-tracked; the next key resolves the offer to
-		// keep it inline instead. "r" references it (un-track, restore the URL);
-		// any other key confirms the track and is then handled normally.
-		if m.pastePrompt != nil {
-			switch msg.String() {
-			case "r":
-				m.referencePendingLinks(q)
-				return nil
-			case "t":
-				m.pastePrompt = nil
-				return nil
-			default:
-				m.pastePrompt = nil
-			}
-		}
 		if msg.Type == tea.KeyEsc {
 			m.commitBodyLine()
 			m.closeModal()
@@ -830,9 +815,9 @@ func (m *Model) renderModal() string {
 		b.WriteString("\n")
 		b.WriteString(ui.StyleMuted.Render("Paste a Jira or GitHub PR URL into a quest's body to link it (multiple of"))
 		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("each allowed). On paste it's tracked — press r to keep it inline as a"))
+		b.WriteString(ui.StyleMuted.Render("each allowed). On paste it's tracked and the URL is shortened inline to"))
 		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("plain reference instead. Click a code to open it; arrow onto a link in"))
+		b.WriteString(ui.StyleMuted.Render("its code, still clickable. Click a code to open it; arrow onto a link in"))
 		b.WriteString("\n")
 		b.WriteString(ui.StyleMuted.Render("the expanded view to open (↵) or remove (" + Keys.Delete.Help().Key + ") it. PR shows " + ui.GlyphPRSuccess + "/" + ui.GlyphPRError + "/" + ui.GlyphPRRunning + "/" + ui.GlyphPRMerged + ","))
 		b.WriteString("\n")
@@ -965,13 +950,6 @@ func (m *Model) renderFocusView() string {
 	right := ui.StyleMuted.Render("F1 help")
 	if m.clipboardToastActive {
 		right = renderClipboardToast()
-	}
-	if m.pastePrompt != nil {
-		noun := "link"
-		if len(m.pastePrompt.codes) > 1 {
-			noun = "links"
-		}
-		right = ui.StyleMain.Render("tracked "+noun) + ui.StyleMuted.Render("  t keep · r reference")
 	}
 	pad := contentWidth - lipgloss.Width(back) - lipgloss.Width(right)
 	if pad < 1 {
@@ -1211,7 +1189,7 @@ func (m *Model) renderFocusContent() string {
 			// While the link cursor owns the caret, the body line isn't the
 			// caret line — focusCodeLines already recorded the focused link's
 			// line, so don't let the body's own cursor overwrite it.
-			rows, caret := m.renderBodyLineWrapped(i, l, !m.onFocusLink() && i == mod.BodyCursor, m.focusTextWidth)
+			rows, caret := m.renderBodyLineWrapped(i, l, !m.onFocusLink() && i == mod.BodyCursor, m.focusTextWidth, ln)
 			for ri, row := range rows {
 				if !m.onFocusLink() && ri == caret {
 					m.focusCaretLine = ln
@@ -1238,7 +1216,7 @@ func (m *Model) renderFocusContent() string {
 		m.focusBodyLineStart = ln
 		for i, l := range p.Body {
 			editing := !mod.InQuestList && i == mod.BodyCursor
-			rows, caret := m.renderBodyLineWrapped(i, l, editing, m.focusTextWidth)
+			rows, caret := m.renderBodyLineWrapped(i, l, editing, m.focusTextWidth, ln)
 			for ri, row := range rows {
 				if ri == caret {
 					m.focusCaretLine = ln

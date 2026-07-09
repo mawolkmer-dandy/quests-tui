@@ -152,23 +152,18 @@ func (m *Model) captureCurrentBodyLink(q *model.Quest) tea.Cmd {
 	}
 
 	value := mod.BodyEditor.Value()
-	stripped, codes := m.captureAndStrip(q, value)
+	shortened, codes := m.captureAndShorten(q, value)
 	if len(codes) == 0 {
 		return nil
 	}
 
-	// Reseed the line + editor with the stripped text, keeping the caret at the
-	// end of what remains (the URL was almost always the tail being typed).
-	(*body)[mod.BodyCursor].Text = stripped
-	ed := m.newBodyEditor(stripped)
+	// Reseed the line + editor with the shortened text (URL → code), keeping the
+	// caret at the end of what remains.
+	(*body)[mod.BodyCursor].Text = shortened
+	ed := m.newBodyEditor(shortened)
 	ed.CursorEnd()
 	mod.BodyEditor = ed
 	m.touchBodyOwner()
-	m.pastePrompt = &pastePrompt{
-		codes:    codes,
-		origText: map[int]string{mod.BodyCursor: value},
-		line:     mod.BodyCursor,
-	}
 	return m.syncNow(codes)
 }
 
@@ -194,20 +189,18 @@ func (m *Model) captureBodyLinesRange(q *model.Quest, start, end int) tea.Cmd {
 	}
 
 	var all []string
-	origText := map[int]string{}
 	for i := start; i <= end; i++ {
 		text := (*body)[i].Text
 		if i == mod.BodyCursor {
 			text = mod.BodyEditor.Value()
 		}
-		stripped, codes := m.captureAndStrip(q, text)
+		shortened, codes := m.captureAndShorten(q, text)
 		if len(codes) == 0 {
 			continue
 		}
-		origText[i] = text
-		(*body)[i].Text = stripped
+		(*body)[i].Text = shortened
 		if i == mod.BodyCursor {
-			ed := m.newBodyEditor(stripped)
+			ed := m.newBodyEditor(shortened)
 			ed.CursorEnd()
 			mod.BodyEditor = ed
 		}
@@ -217,16 +210,17 @@ func (m *Model) captureBodyLinesRange(q *model.Quest, start, end int) tea.Cmd {
 		return nil
 	}
 	m.touchBodyOwner()
-	m.pastePrompt = &pastePrompt{codes: all, origText: origText, line: mod.BodyCursor}
 	return m.syncNow(all)
 }
 
-// captureAndStrip captures every Jira/PR URL in text onto q (first Jira only;
-// every PR, deduped), returns the text with those URLs removed and tidied, and
-// the list of codes that were NEWLY captured this call (so a re-detected,
-// already-linked code doesn't trigger a redundant fetch).
-func (m *Model) captureAndStrip(q *model.Quest, text string) (stripped string, newCodes []string) {
-	if _, refs := model.ShortenLinks(text); len(refs) == 0 {
+// captureAndShorten captures every Jira/PR URL in text onto q (JiraCodes / PRs,
+// each deduped) and returns the text with those URLs REPLACED by their short
+// code (e.g. "#47145" / "EPDCHAIR-5713"), so the link stays inline as a compact,
+// clickable reference. newCodes lists the codes NEWLY captured this call (so a
+// re-detected, already-linked code doesn't trigger a redundant fetch).
+func (m *Model) captureAndShorten(q *model.Quest, text string) (shortened string, newCodes []string) {
+	shortened, refs := model.ShortenLinks(text)
+	if len(refs) == 0 {
 		return text, nil
 	}
 
@@ -244,62 +238,21 @@ func (m *Model) captureAndStrip(q *model.Quest, text string) (stripped string, n
 			newCodes = append(newCodes, ref.Code)
 		}
 	}
-
-	// Remove the raw URLs from the line, tidying the whitespace left behind.
-	return model.StripLinks(text), newCodes
+	return shortened, newCodes
 }
 
-// referencePendingLinks resolves an active pastePrompt as "reference": it
-// un-tracks the just-captured codes and restores each affected body line to the
-// text it had before the URL was stripped, so the raw URL stays inline (a
-// terminal-clickable reference) instead of being tracked. The editor is
-// re-homed onto the primary affected line.
-func (m *Model) referencePendingLinks(q *model.Quest) {
-	p := m.pastePrompt
-	m.pastePrompt = nil
-	if p == nil {
-		return
-	}
-	for _, code := range p.codes {
-		untrackCode(q, code)
-	}
-	body := m.currentBody()
-	if body != nil {
-		for i, text := range p.origText {
-			if i >= 0 && i < len(*body) {
-				(*body)[i].Text = text
-			}
-		}
-		if p.line >= 0 && p.line < len(*body) {
-			ed := m.newBodyEditor((*body)[p.line].Text)
-			ed.CursorEnd()
-			m.modal.BodyEditor = ed
-			m.modal.BodyCursor = p.line
-		}
-	}
-	m.touchBodyOwner()
-}
-
-// untrackCode removes a single captured code from q — a "#"-prefixed code drops
-// from PRs, anything else from JiraCodes.
-func untrackCode(q *model.Quest, code string) {
-	if strings.HasPrefix(code, "#") {
-		out := q.PRs[:0]
-		for _, pr := range q.PRs {
-			if pr.Code != code {
-				out = append(out, pr)
-			}
-		}
-		q.PRs = out
-		return
-	}
-	out := q.JiraCodes[:0]
+// trackedCodeURLs maps each of q's tracked codes (Jira issues and PRs) to the
+// URL it opens — used to make the shortened codes left inline in the body
+// clickable (see renderBodyLineWrapped).
+func (m *Model) trackedCodeURLs(q *model.Quest) map[string]string {
+	out := make(map[string]string, len(q.JiraCodes)+len(q.PRs))
 	for _, c := range q.JiraCodes {
-		if c != code {
-			out = append(out, c)
-		}
+		out[c] = jiraURL(c, m.jiraBaseURL)
 	}
-	q.JiraCodes = out
+	for _, pr := range q.PRs {
+		out[pr.Code] = prURL(pr.Repo, pr.Code)
+	}
+	return out
 }
 
 // openURL opens url in the system browser, fire-and-forget — a failed launch

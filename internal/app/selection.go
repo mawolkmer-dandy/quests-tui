@@ -2,6 +2,7 @@ package app
 
 import (
 	"strings"
+	"unicode"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -452,7 +453,7 @@ func wrapSegments(runes []rune, width int) [][2]int {
 // edited (caret) line, the index within those rows where the caret sits
 // (-1 otherwise) — the caller uses that to keep the caret in view when the
 // focus content scrolls.
-func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, width int) (rows []string, caretRow int) {
+func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, width, startLine int) (rows []string, caretRow int) {
 	mod := m.modal
 	caretRow = -1
 
@@ -557,16 +558,6 @@ func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, wid
 		return rows, cursorSeg
 	}
 
-	// TODO(integrations): render any EXTRA Jira/PR URL on a non-edited body
-	// line shortened to its code (model.ShortenLinks), clickable. Deferred
-	// because shortening `display` shifts every downstream rune offset used by
-	// the cross-line selection range mapping (bodyLineSelRange/strip) and the
-	// focusRowOffset mouse hit-test map — reconciling those against the
-	// pre-shorten raw text needs its own offset-translation layer to avoid
-	// breaking selection and caret placement. The captured code is already
-	// surfaced above the body (see renderFocusContent / focusCodeLines), so
-	// links are still visible and clickable; only inline shortening of extras
-	// is pending.
 	dr := []rune(display)
 	strip := len([]rune(l.Text)) - len(dr)
 	selLo, selHi, hasSel := m.bodyLineSelRange(i, len([]rune(l.Text)))
@@ -585,18 +576,97 @@ func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, wid
 		addRow(strip)
 		return []string{head(0, false)}, -1
 	}
+
+	// Shortened Jira/PR codes left inline (see captureAndShorten) render as
+	// clickable links: color them, and record a focusCodeSpan for each so a
+	// click in the expanded view opens the URL. linkURL[j] is the URL for rune
+	// j, or "" when it isn't part of a tracked code.
+	linkURL := m.bodyCodeLinkURLs(dr)
+	linkStyle := lipgloss.NewStyle().Foreground(ui.ColorSide)
+	headW := 4 + 2*l.Indent
+
 	segs := wrapSegments(dr, effWidth)
 	for si, seg := range segs {
 		var b strings.Builder
-		for j := seg[0]; j < seg[1]; j++ {
+		for j := seg[0]; j < seg[1]; {
+			if url := linkURL[j]; url != "" {
+				runStart := j
+				for j < seg[1] && linkURL[j] == url {
+					st := linkStyle
+					if hasSel && j >= selLo && j < selHi {
+						st = st.Background(ui.ColorSelected)
+					}
+					b.WriteString(st.Render(string(dr[j])))
+					j++
+				}
+				x0 := m.focusLeftMargin + headW + (runStart - seg[0])
+				m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{
+					line: startLine + si, x0: x0, x1: x0 + (j - runStart), url: url,
+				})
+				continue
+			}
 			st := base
 			if hasSel && j >= selLo && j < selHi {
 				st = st.Background(ui.ColorSelected)
 			}
 			b.WriteString(st.Render(string(dr[j])))
+			j++
 		}
 		rows = append(rows, head(si, false)+b.String())
 		addRow(seg[0] + strip)
 	}
 	return rows, -1
+}
+
+// bodyCodeLinkURLs returns a per-rune slice the length of dr where entry j is
+// the URL to open if rune j is part of a tracked Jira/PR code left inline in the
+// body, else "". Only exact tracked codes match (bounded so a code isn't found
+// inside a longer token), so there are no false positives on ordinary text.
+func (m *Model) bodyCodeLinkURLs(dr []rune) []string {
+	urls := make([]string, len(dr))
+	mod := m.modal
+	if mod == nil || mod.Kind != ModalQuestDetail {
+		return urls
+	}
+	q := m.findQuest(mod.QuestID)
+	if q == nil {
+		return urls
+	}
+	for code, url := range m.trackedCodeURLs(q) {
+		cr := []rune(code)
+		n := len(cr)
+		if n == 0 {
+			continue
+		}
+		for i := 0; i+n <= len(dr); i++ {
+			matched := true
+			for k := 0; k < n; k++ {
+				if dr[i+k] != cr[k] {
+					matched = false
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+			// Boundary: don't match a code sitting inside a longer token. A
+			// leading letter/digit only matters for word-initial codes (Jira);
+			// "#"-codes start with punctuation, so "PR#47145" still matches.
+			if i > 0 && unicode.IsLetter(cr[0]) && isWordish(dr[i-1]) {
+				continue
+			}
+			if i+n < len(dr) && isWordish(dr[i+n]) {
+				continue
+			}
+			for k := 0; k < n; k++ {
+				urls[i+k] = url
+			}
+			i += n - 1
+		}
+	}
+	return urls
+}
+
+func isWordish(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }

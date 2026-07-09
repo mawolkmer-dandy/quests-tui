@@ -299,24 +299,8 @@ type Model struct {
 	focusLinkIdx       int
 	focusLinkConfirmID string
 
-	// pastePrompt is set right after a paste/edit auto-tracks one or more links
-	// (see links.go): the links ARE tracked (the fast path is unchanged), and
-	// this offers a one-key switch to "reference" — leaving the URL inline in
-	// the body instead. It's resolved by the next key in the detail modal
-	// (see updateModal): "r" references, anything else confirms the track.
-	pastePrompt *pastePrompt
-
 	debug     bool
 	lastMsgAt time.Time
-}
-
-// pastePrompt records enough to undo an auto-track back to an inline reference:
-// the codes that were newly tracked, and each affected body line's text as it
-// was BEFORE the URL was stripped out (so "reference" restores it verbatim).
-type pastePrompt struct {
-	codes    []string       // newly tracked codes ("#47477" / "EPDCHAIR-5713")
-	origText map[int]string // body line index → text before stripping
-	line     int            // body line to re-home the editor onto on reference
 }
 
 // codeSpan is an integration code's clickable extent in absolute screen
@@ -623,8 +607,7 @@ func (m *Model) closeModal() {
 	// a different, unrelated textinput.
 	m.clearSelection()
 	m.clearFocusLink()
-	m.pastePrompt = nil // any pending paste offer confirms as tracked on leave
-	m.focusScroll = 0   // re-entering a view below re-scrolls to its caret
+	m.focusScroll = 0 // re-entering a view below re-scrolls to its caret
 	if n := len(m.modalStack); n > 0 {
 		m.modal = m.modalStack[n-1]
 		m.modalStack = m.modalStack[:n-1]
