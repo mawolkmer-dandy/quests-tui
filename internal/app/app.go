@@ -891,11 +891,13 @@ func (m *Model) animateFilter(fn func()) tea.Cmd {
 }
 
 // insertQuestMetaRows inserts a non-selectable RowQuestMeta immediately after
-// every RowQuest whose quest has something to show on its sub-line — an
-// integration link (Jira/PR, when integrations are on) or a pending "next
-// objective" — so it renders directly under its quest. The meta row inherits
-// the quest's ID and Nested flag (for indent alignment).
+// every RowQuest whose quest carries a Jira or PR link, so the integration
+// sub-line renders directly under its quest. The meta row inherits the quest's
+// ID and Nested flag (for indent alignment). A no-op when integrations are off.
 func (m *Model) insertQuestMetaRows(rows []ui.Row) []ui.Row {
+	if !m.integrationsEnabled {
+		return rows
+	}
 	out := make([]ui.Row, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, r)
@@ -903,12 +905,7 @@ func (m *Model) insertQuestMetaRows(rows []ui.Row) []ui.Row {
 			continue
 		}
 		q := m.findQuest(r.QuestID)
-		if q == nil {
-			continue
-		}
-		hasIntegration := m.integrationsEnabled && (q.JiraCode != "" || len(q.PRs) > 0)
-		_, hasNextObjective := q.NextObjective()
-		if !hasIntegration && !hasNextObjective {
+		if q == nil || (q.JiraCode == "" && len(q.PRs) == 0) {
 			continue
 		}
 		out = append(out, ui.Row{Kind: ui.RowQuestMeta, QuestID: r.QuestID, ProjectID: r.ProjectID, Nested: r.Nested})

@@ -414,10 +414,16 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor bool, width i
 		if done, total := q.ObjectiveProgress(); total > 0 {
 			progress = StyleMuted.Render(fmt.Sprintf(" %d/%d", done, total))
 		}
+		// The quest's "next action": its first not-done objective, shown inline
+		// right of the count with the same muted objective glyph as the body.
+		next := ""
+		if text, ok := q.NextObjective(); ok {
+			next = StyleMuted.Render(" " + GlyphQuestOpen + " " + text)
+		}
 		// The 4-col slot before the glyph holds the priority arrow (up for
 		// medium/high, a muted down-arrow for low), else stays blank — either
 		// way 4 wide, so glyphs stay column-aligned across the list.
-		return withHint(fmt.Sprintf("%s%s%s%s %s%s%s", cursorMark, nestIndent, priorityIndicator(q.Priority), iconView, title, tag, progress)), hintX
+		return withHint(fmt.Sprintf("%s%s%s%s %s%s%s%s", cursorMark, nestIndent, priorityIndicator(q.Priority), iconView, title, tag, progress, next)), hintX
 
 	case RowSection:
 		label, count := sectionInfo(s, row.Section)
