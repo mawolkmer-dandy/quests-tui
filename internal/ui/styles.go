@@ -42,11 +42,11 @@ var (
 	GlyphJiraDone       = "●" // Jira: done (green)
 	GlyphPRSuccess      = "✓" // PR CI: success (green)
 	GlyphPRError        = "✗" // PR CI: error/failure (red)
-	GlyphPRRunning      = "◌" // PR CI: running (amber)
 	GlyphPRMerged       = "◆" // PR merged (mauve) — outranks CI state
 	GlyphPRClosed       = "⊘" // PR closed unmerged (muted)
-	GlyphFetching       = "◌" // code linked but not yet synced — "fetching" (amber)
 	GlyphLoading        = "·" // legacy muted loading dot (kept for compatibility)
+	// CI-running and fetching states animate — see the spinner frame sets in
+	// internal/app/agents.go (spinnerCI / spinnerFetch).
 
 	// Graphite-style stack markers, drawn in a left gutter before a PR that
 	// belongs to a stack (2+ linked PRs): every PR but the last uses the tee,

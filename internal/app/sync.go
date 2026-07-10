@@ -75,7 +75,7 @@ func (m *Model) onSyncTick() tea.Cmd {
 		return rearm
 	}
 	m.syncing = true
-	return tea.Batch(rearm, runSync(prs, jira))
+	return tea.Batch(rearm, runSync(prs, jira), m.maybeStartSpinner())
 }
 
 // applySyncResult stores a completed pass's results into the caches. It never
@@ -525,13 +525,13 @@ func (m *Model) prCommentsCount(code string) string {
 	return fmt.Sprintf("%d/%d", st.CommentsResolved, st.CommentsTotal)
 }
 
-// jiraGlyph is the filling-circle status glyph for a Jira code: the amber
-// "fetching" dotted circle until its sync lands, then empty/half/full for
+// jiraGlyph is the filling-circle status glyph for a Jira code: an animated
+// amber "fetching" arc until its sync lands, then empty/half/full for
 // todo/in progress/done.
 func (m *Model) jiraGlyph(code string) string {
 	st, ok := m.jiraStatus[code]
 	if !ok {
-		return ui.StyleRunning.Render(ui.GlyphFetching)
+		return ui.StyleRunning.Render(m.spin(spinnerFetch))
 	}
 	switch st.Status {
 	case "done":
@@ -543,13 +543,13 @@ func (m *Model) jiraGlyph(code string) string {
 	}
 }
 
-// prGlyph is the CI status glyph for a PR code: the amber "fetching" dotted
-// circle until synced, then check/cross for success/error and the same amber
-// dotted circle while CI is running.
+// prGlyph is the CI status glyph for a PR code: an animated amber arc while
+// "fetching" (awaiting first sync), a rotating amber circle while CI is
+// running, then check/cross/merged/closed once it settles.
 func (m *Model) prGlyph(code string) (glyph string, synced bool) {
 	st, ok := m.prStatus[code]
 	if !ok {
-		return ui.StyleRunning.Render(ui.GlyphFetching), false
+		return ui.StyleRunning.Render(m.spin(spinnerFetch)), false
 	}
 	switch st.Status {
 	case "merged":
@@ -559,7 +559,7 @@ func (m *Model) prGlyph(code string) (glyph string, synced bool) {
 	case "error":
 		return lipgloss.NewStyle().Foreground(ui.ColorImportant).Render(ui.GlyphPRError), true
 	case "running":
-		return ui.StyleRunning.Render(ui.GlyphPRRunning), true
+		return ui.StyleRunning.Render(m.spin(spinnerCI)), true
 	default: // success
 		return lipgloss.NewStyle().Foreground(ui.ColorHeading).Render(ui.GlyphPRSuccess), true
 	}

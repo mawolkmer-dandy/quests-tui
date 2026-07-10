@@ -430,6 +430,9 @@ func (m *Model) Init() tea.Cmd {
 		if c := m.maybeStartAgentPoll(); c != nil {
 			cmds = append(cmds, c)
 		}
+		if c := m.maybeStartSpinner(); c != nil {
+			cmds = append(cmds, c)
+		}
 	}
 	return tea.Batch(cmds...)
 }

@@ -704,15 +704,17 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		if cmd, handled := m.handleBodyOutlineKey(msg); handled {
-			return cmd
+			// A multiline paste may have captured links (now fetching) — make
+			// sure the spinner is running to animate them.
+			return tea.Batch(cmd, m.maybeStartSpinner())
 		}
 		var cmd tea.Cmd
 		mod.BodyEditor, cmd = mod.BodyEditor.Update(msg)
 		// After an ordinary edit, if the current line now holds a complete
-		// Jira/PR URL, capture it, strip it from the line, and fire an
-		// immediate sync for just the new code(s).
+		// Jira/PR URL, capture it, shorten it inline, and fire an immediate sync
+		// for just the new code(s) — animating the "fetching" state meanwhile.
 		if syncCmd := m.captureCurrentBodyLink(q); syncCmd != nil {
-			return tea.Batch(cmd, syncCmd)
+			return tea.Batch(cmd, syncCmd, m.maybeStartSpinner())
 		}
 		return cmd
 
@@ -863,7 +865,7 @@ func (m *Model) renderModal() string {
 		b.WriteString("\n")
 		b.WriteString(ui.StyleMuted.Render("its code, still clickable. Click a code to open it; arrow onto a link in"))
 		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("the expanded view to open (↵) or remove (" + Keys.Delete.Help().Key + ") it. PR shows " + ui.GlyphPRSuccess + "/" + ui.GlyphPRError + "/" + ui.GlyphPRRunning + "/" + ui.GlyphPRMerged + ","))
+		b.WriteString(ui.StyleMuted.Render("the expanded view to open (↵) or remove (" + Keys.Delete.Help().Key + ") it. PR shows " + ui.GlyphPRSuccess + "/" + ui.GlyphPRError + "/" + spinnerCI[0] + "/" + ui.GlyphPRMerged + ","))
 		b.WriteString("\n")
 		b.WriteString(ui.StyleMuted.Render("+ resolved/total comments; Jira shows " + ui.GlyphJiraTodo + "/" + ui.GlyphJiraInProgress + "/" + ui.GlyphJiraDone + " (todo / wip / done), ~60s."))
 		b.WriteString("\n")

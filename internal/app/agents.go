@@ -153,8 +153,20 @@ func (m *Model) worktreeLabel(worktree string) string {
 	return filepath.Base(worktree)
 }
 
-// spinnerFrames is the braille spinner cycled through for a working agent.
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+// Spinner frame sets, all animated off m.spinnerFrame (one shared ticker).
+// Each integration state gets a visually distinct animation: a working agent
+// is a braille dot-runner, a running PR CI is a rotating filled circle, and a
+// linked-but-unsynced code ("fetching") is a lighter rotating arc.
+var (
+	spinnerAgent = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	spinnerCI    = []string{"◐", "◓", "◑", "◒"}
+	spinnerFetch = []string{"◜", "◝", "◞", "◟"}
+)
+
+// spin returns the current frame of set for the shared spinner clock.
+func (m *Model) spin(set []string) string {
+	return set[m.spinnerFrame%len(set)]
+}
 
 // agentGlyph is the state-colored status icon for an agent/worktree state. The
 // working glyph animates (see spinnerFrame / the spinner ticker).
@@ -163,7 +175,7 @@ func (m *Model) agentGlyph(state string) string {
 	case "blocked":
 		return lipgloss.NewStyle().Foreground(ui.ColorImportant).Render(ui.GlyphAgentBlocked)
 	case "working":
-		return ui.StyleRunning.Render(spinnerFrames[m.spinnerFrame%len(spinnerFrames)])
+		return ui.StyleRunning.Render(m.spin(spinnerAgent))
 	case "idle", "done":
 		return lipgloss.NewStyle().Foreground(ui.ColorHeading).Render(ui.GlyphAgentIdle)
 	case "paused":
@@ -174,12 +186,39 @@ func (m *Model) agentGlyph(state string) string {
 }
 
 // hasWorkingAgent reports whether any pinned worktree currently has a working
-// agent — the spinner ticker runs only while this is true.
+// agent.
 func (m *Model) hasWorkingAgent() bool {
 	for i := range m.store.Quests {
 		for _, wt := range m.store.Quests[i].AgentWorktrees {
 			if m.worktreeState(wt) == "working" {
 				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasAnimatedIntegration reports whether anything on screen needs the spinner
+// clock: a working agent, a PR whose CI is running, or a linked code still
+// awaiting its first sync ("fetching"). The ticker runs only while true.
+func (m *Model) hasAnimatedIntegration() bool {
+	if !m.integrationsEnabled {
+		return false
+	}
+	if m.hasWorkingAgent() {
+		return true
+	}
+	for i := range m.store.Quests {
+		q := &m.store.Quests[i]
+		for _, c := range q.JiraCodes {
+			if _, ok := m.jiraStatus[c]; !ok {
+				return true // fetching
+			}
+		}
+		for _, pr := range q.PRs {
+			st, ok := m.prStatus[pr.Code]
+			if !ok || st.Status == "running" {
+				return true // fetching, or CI running
 			}
 		}
 	}
@@ -192,10 +231,10 @@ func spinnerTick(gen int) tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return spinnerTickMsg{gen: gen} })
 }
 
-// maybeStartSpinner kicks off the spinner ticker if a working agent exists and
-// it isn't already running. Called after every agent-state update.
+// maybeStartSpinner kicks off the spinner ticker if something needs animating
+// and it isn't already running. Called wherever an animated state can begin.
 func (m *Model) maybeStartSpinner() tea.Cmd {
-	if m.spinnerOn || !m.hasWorkingAgent() {
+	if m.spinnerOn || !m.hasAnimatedIntegration() {
 		return nil
 	}
 	m.spinnerOn = true
@@ -203,13 +242,13 @@ func (m *Model) maybeStartSpinner() tea.Cmd {
 	return spinnerTick(m.spinnerGen)
 }
 
-// onSpinnerTick advances the frame and re-arms while work continues; stops
-// (letting the ticker die) once nothing is working.
+// onSpinnerTick advances the frame and re-arms while anything is animating;
+// stops (letting the ticker die) once nothing is.
 func (m *Model) onSpinnerTick(gen int) tea.Cmd {
 	if gen != m.spinnerGen {
 		return nil // stale ticker from an earlier start
 	}
-	if !m.hasWorkingAgent() {
+	if !m.hasAnimatedIntegration() {
 		m.spinnerOn = false
 		return nil
 	}
