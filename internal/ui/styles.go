@@ -54,6 +54,14 @@ var (
 	// marker. Both render muted (see sync.go focusCodeLines).
 	GlyphStackBranchMid = "├" // a PR with another below it in the stack
 	GlyphStackBranchEnd = "└" // the last (deepest) PR in the stack
+
+	// Claude-agent status sparks (see internal/app/agents.go): a filled spark
+	// while working (amber) or done (green), a hollow spark while idle or when
+	// the pinned worktree currently has no tracked session.
+	GlyphAgentWorking = "✦" // agent working (amber)
+	GlyphAgentDone    = "✦" // agent finished (green)
+	GlyphAgentIdle    = "✧" // agent idle (muted)
+	GlyphAgentNone    = "✧" // pinned worktree, no session (muted)
 )
 
 // IconSet overrides the glyphs above from user config — empty fields keep

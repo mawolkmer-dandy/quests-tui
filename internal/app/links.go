@@ -89,6 +89,9 @@ func (m *Model) handleFocusLinkKey(msg tea.KeyMsg, q *model.Quest) (tea.Cmd, boo
 		m.seedBodyEditor(0, 0)
 		return nil, true
 	case msg.Type == tea.KeyEnter:
+		if link.kind == linkAgent {
+			return m.openAgentSession(q), true
+		}
 		return openURL(link.url), true
 	case key.Matches(msg, Keys.Delete):
 		m.focusLinkConfirmID = link.code
@@ -120,6 +123,8 @@ func (m *Model) removeFocusLink(q *model.Quest, link focusLink) {
 			}
 		}
 		q.PRs = out
+	case linkAgent:
+		q.AgentWorktree = ""
 	}
 	m.touchBodyOwner()
 

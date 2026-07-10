@@ -21,6 +21,7 @@ const (
 	ModalCampaignDetail
 	ModalSectionDetail
 	ModalProjectPicker
+	ModalAgentPicker
 	ModalHelp
 	ModalDetailHelp
 )
@@ -626,6 +627,44 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 
+	case ModalAgentPicker:
+		items := mod.filteredPickerItems()
+		switch msg.String() {
+		case "up":
+			if mod.PickerIndex > 0 {
+				mod.PickerIndex--
+			}
+		case "down":
+			if mod.PickerIndex < len(items)-1 {
+				mod.PickerIndex++
+			}
+		case "enter":
+			var cmd tea.Cmd
+			if len(items) > 0 {
+				if target := m.findQuest(mod.TargetQuestID); target != nil {
+					target.AgentWorktree = items[mod.PickerIndex].ID
+					target.UpdatedAt = time.Now()
+					m.save()
+					cmd = refreshAgentsCmd() // reflect the pinned agent's state right away
+				}
+			}
+			m.closeModal()
+			return cmd
+		case "esc":
+			m.closeModal()
+		case "backspace":
+			if r := []rune(mod.PickerFilter); len(r) > 0 {
+				mod.PickerFilter = string(r[:len(r)-1])
+				mod.PickerIndex = 0
+			}
+		default:
+			if msg.Type == tea.KeyRunes {
+				mod.PickerFilter += string(msg.Runes)
+				mod.PickerIndex = 0
+			}
+		}
+		return nil
+
 	case ModalQuestDetail:
 		q := m.findQuest(mod.QuestID)
 		if q == nil {
@@ -643,6 +682,11 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 		if msg.Type == tea.KeyEsc {
 			m.commitBodyLine()
 			m.closeModal()
+			return nil
+		}
+		// Ctrl+G pins a Claude agent (worktree) to this quest.
+		if msg.String() == "ctrl+g" {
+			m.openAgentPicker()
 			return nil
 		}
 		if handled, cmd := m.applyBodySelectionKey(msg); handled {
@@ -866,6 +910,29 @@ func (m *Model) renderModal() string {
 		b.WriteString("\n" + ui.StyleMuted.Render("type to filter · ↑↓ choose · enter confirm · esc cancel"))
 		content = b.String()
 
+	case ModalAgentPicker:
+		var b strings.Builder
+		b.WriteString(ui.StyleTitle.Render("Pin a Claude agent"))
+		b.WriteString("\n")
+		query := mod.PickerFilter
+		if query == "" {
+			query = ui.StyleMuted.Render("type to filter…")
+		}
+		b.WriteString(ui.StyleMuted.Render("› ") + query + "\n\n")
+		items := mod.filteredPickerItems()
+		if len(items) == 0 {
+			b.WriteString(ui.StyleMuted.Render("  (no Claude agents running)") + "\n")
+		}
+		for i, item := range items {
+			line := "  " + item.Label
+			if i == mod.PickerIndex {
+				line = ui.StyleSelectedRow.Render("> " + item.Label)
+			}
+			b.WriteString(line + "\n")
+		}
+		b.WriteString("\n" + ui.StyleMuted.Render("type to filter · ↑↓ choose · enter pin · esc cancel"))
+		content = b.String()
+
 	case ModalDetailHelp:
 		var b strings.Builder
 		b.WriteString(ui.StyleTitle.Render("Quest & campaign details"))
@@ -892,8 +959,9 @@ func (m *Model) renderModal() string {
 		b.WriteString("\n")
 		fmt.Fprintf(&b, "%-11s%s\n", "Paste URL", ui.StyleMuted.Render("a Jira/PR URL is captured instantly and pulled out of the line"))
 		fmt.Fprintf(&b, "%-11s%s\n", "↑ from body", ui.StyleMuted.Render("steps onto the link lines above; ↓ returns to the body"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Enter", ui.StyleMuted.Render("open the focused link in the browser"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+X", ui.StyleMuted.Render("remove the focused link (inline y/n)"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Enter", ui.StyleMuted.Render("open the focused link (browser) or agent session"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+X", ui.StyleMuted.Render("remove the focused link / unpin the agent (inline y/n)"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+G", ui.StyleMuted.Render("pin a running Claude agent (worktree) to this quest"))
 		b.WriteString("\n")
 
 		b.WriteString(ui.StyleSectionHeader.Render("Campaign quest list"))

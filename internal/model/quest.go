@@ -93,6 +93,11 @@ type Quest struct {
 	JiraCodes []string `json:"jiraCodes,omitempty"` // every linked Jira issue, e.g. "EPDCHAIR-5713"
 	PRs       []PRLink `json:"prs,omitempty"`       // every linked GitHub PR
 
+	// AgentWorktree pins a Claude Code worktree (an agent's cwd) to this quest,
+	// so any agent running there shows its live state on the quest and can be
+	// reopened. Set from the agent picker (see internal/app/agents.go).
+	AgentWorktree string `json:"agentWorktree,omitempty"`
+
 	// Legacy single-link fields, kept only so pre-slice data migrates on load
 	// (see store.Load); cleared there so they drop out on the next save.
 	JiraCode string `json:"jiraCode,omitempty"` // deprecated: migrated into JiraCodes

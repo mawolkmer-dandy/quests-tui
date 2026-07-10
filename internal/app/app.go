@@ -299,6 +299,11 @@ type Model struct {
 	focusLinkIdx       int
 	focusLinkConfirmID string
 
+	// agents is the latest `claude agents --json` list, refreshed by the sync
+	// loop (and immediately after pinning). A quest shows the state of agents
+	// whose cwd is its pinned worktree (see agents.go).
+	agents []AgentInfo
+
 	debug     bool
 	lastMsgAt time.Time
 }
@@ -326,6 +331,7 @@ type linkKind int
 const (
 	linkJira linkKind = iota
 	linkPR
+	linkAgent
 )
 
 // focusLink is one navigable link line (the Jira line or a PR line) in the
@@ -446,6 +452,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case syncResultMsg:
 		m.applySyncResult(msg)
+		return m, nil
+
+	case agentsMsg:
+		m.agents = msg.agents
 		return m, nil
 
 	case warningExpireMsg:
@@ -905,7 +915,7 @@ func (m *Model) insertQuestMetaRows(rows []ui.Row) []ui.Row {
 			continue
 		}
 		q := m.findQuest(r.QuestID)
-		if q == nil || (len(q.JiraCodes) == 0 && len(q.PRs) == 0) {
+		if q == nil || (len(q.JiraCodes) == 0 && len(q.PRs) == 0 && q.AgentWorktree == "") {
 			continue
 		}
 		out = append(out, ui.Row{Kind: ui.RowQuestMeta, QuestID: r.QuestID, ProjectID: r.ProjectID, Nested: r.Nested})

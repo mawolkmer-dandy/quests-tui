@@ -51,8 +51,10 @@ const syncFetchTimeout = 15 * time.Second
 type syncTickMsg struct{}
 
 type syncResultMsg struct {
-	prs  []PRStatus
-	jira []JiraStatus
+	prs           []PRStatus
+	jira          []JiraStatus
+	agents        []AgentInfo
+	agentsFetched bool // distinguishes "no agents running" from "fetch failed"
 }
 
 // syncTick schedules the next sync pass, mirroring transTick.
@@ -69,7 +71,7 @@ func (m *Model) onSyncTick() tea.Cmd {
 		return rearm
 	}
 	prs, jira := m.collectSyncTargets()
-	if len(prs) == 0 && len(jira) == 0 {
+	if len(prs) == 0 && len(jira) == 0 && !m.hasAgentLinks() {
 		return rearm
 	}
 	m.syncing = true
@@ -84,6 +86,9 @@ func (m *Model) applySyncResult(msg syncResultMsg) {
 	}
 	for _, st := range msg.jira {
 		m.jiraStatus[st.Code] = st
+	}
+	if msg.agentsFetched {
+		m.agents = msg.agents
 	}
 	m.lastSyncAt = time.Now()
 	m.syncing = false
@@ -171,6 +176,10 @@ func runSync(prs []syncTarget, jira []string) tea.Cmd {
 			if ok {
 				res.jira = append(res.jira, st)
 			}
+		}
+		if agents, ok := fetchAgents(); ok {
+			res.agents = agents
+			res.agentsFetched = true
 		}
 		return res
 	}
@@ -584,6 +593,11 @@ func (m *Model) integrationSegments(q *model.Quest) []integrationSegment {
 		width := lipgloss.Width(pr.Code) + 1 + 1 + lipgloss.Width(count)
 		segs = append(segs, integrationSegment{text: text, width: width, url: prURL(pr.Repo, pr.Code)})
 	}
+	// A pinned agent shows just its state spark inline (opened from the expanded
+	// view, so no click URL here).
+	if q.AgentWorktree != "" {
+		segs = append(segs, integrationSegment{text: agentGlyph(m.questAgentState(q)), width: 1})
+	}
 	return segs
 }
 
@@ -680,13 +694,35 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		}
 		addLink(marker, glyph, pr.Code, text, linkPR, prURL(pr.Repo, pr.Code))
 	}
+
+	// A pinned Claude agent renders on its own line below the links: state spark
+	// + agent name + state word. Enter opens the session, Ctrl+X unpins it. Its
+	// name is free-form (not a fixed-width code), so it skips the code padding.
+	if q.AgentWorktree != "" {
+		li := len(m.focusLinks)
+		state := m.questAgentState(q)
+		label := m.questAgentLabel(q)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAgent, code: label})
+		if m.focusLinkIdx == li {
+			m.focusCaretLine = ln
+		}
+		line := pad + strings.Repeat(" ", gutterW) + agentGlyph(state) + " " +
+			label + "  " + ui.StyleMuted.Render(agentWord(state)) + hintFor(li)
+		lines = append(lines, line)
+		ln++
+	}
 	return lines
 }
 
 // focusLinkCount is how many navigable link lines the expanded quest view
-// currently has (Jira + each PR) — used to bound link-cursor movement.
+// currently has (Jira + each PR + a pinned agent) — used to bound link-cursor
+// movement.
 func (m *Model) focusLinkCount(q *model.Quest) int {
-	return len(q.JiraCodes) + len(m.prStack(q.PRs))
+	n := len(q.JiraCodes) + len(m.prStack(q.PRs))
+	if q.AgentWorktree != "" {
+		n++
+	}
+	return n
 }
 
 // renderQuestMetaLine renders the integration sub-line for a RowQuestMeta,
@@ -722,8 +758,11 @@ func (m *Model) renderQuestMetaLine(row ui.Row, width int) (string, []codeSpan) 
 		}
 		// Only the code text itself is clickable, not the trailing glyph /
 		// counts — but hit-testing the whole segment is close enough and
-		// simpler, so the span covers the segment's code+glyph extent.
-		spans = append(spans, codeSpan{x0: x, x1: x + seg.width, url: seg.url})
+		// simpler, so the span covers the segment's code+glyph extent. Segments
+		// with no URL (the agent spark) aren't clickable here.
+		if seg.url != "" {
+			spans = append(spans, codeSpan{x0: x, x1: x + seg.width, url: seg.url})
+		}
 		b.WriteString(seg.text)
 		x += seg.width
 	}
