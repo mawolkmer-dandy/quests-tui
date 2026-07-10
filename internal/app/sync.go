@@ -593,10 +593,10 @@ func (m *Model) integrationSegments(q *model.Quest) []integrationSegment {
 		width := lipgloss.Width(pr.Code) + 1 + 1 + lipgloss.Width(count)
 		segs = append(segs, integrationSegment{text: text, width: width, url: prURL(pr.Repo, pr.Code)})
 	}
-	// A pinned agent shows just its state spark inline (opened from the expanded
-	// view, so no click URL here).
-	if q.AgentWorktree != "" {
-		segs = append(segs, integrationSegment{text: agentGlyph(m.questAgentState(q)), width: 1})
+	// Each pinned worktree shows just its state icon inline (managed from the
+	// expanded view, so no click URL here).
+	for _, wt := range q.AgentWorktrees {
+		segs = append(segs, integrationSegment{text: agentGlyph(m.worktreeState(wt)), width: 1})
 	}
 	return segs
 }
@@ -644,15 +644,24 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 	ln := startLn
 
 	// hintFor returns the trailing action hint / confirm prompt for the link at
-	// focusLinks index li, when it's the focused cursor target.
-	hintFor := func(li int) string {
+	// focusLinks index li, when it's the focused cursor target. The hint depends
+	// on the link kind: browser links open + remove, the agent affordance adds,
+	// a pinned agent only removes (no open — it's status-only).
+	hintFor := func(li int, kind linkKind) string {
 		if m.focusLinkIdx != li {
 			return ""
 		}
 		if m.focusLinkConfirmID != "" {
 			return "  " + ui.StyleImportant.Render("remove this link? y/n")
 		}
-		return "  " + ui.StyleMuted.Render("↵ open · "+Keys.Delete.Help().Key+" remove")
+		switch kind {
+		case linkAddAgent:
+			return "  " + ui.StyleMuted.Render("↵ add")
+		case linkAgent:
+			return "  " + ui.StyleMuted.Render(Keys.Delete.Help().Key+" remove")
+		default:
+			return "  " + ui.StyleMuted.Render("↵ open · "+Keys.Delete.Help().Key+" remove")
+		}
 	}
 
 	// addLink emits one aligned link line: a fixed-width stack gutter, the
@@ -669,7 +678,7 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		if m.focusLinkIdx == li {
 			m.focusCaretLine = ln
 		}
-		lines = append(lines, pad+ui.StyleMuted.Render(gutter)+glyph+" "+body+hintFor(li))
+		lines = append(lines, pad+ui.StyleMuted.Render(gutter)+glyph+" "+body+hintFor(li, kind))
 		ln++
 	}
 
@@ -695,34 +704,48 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		addLink(marker, glyph, pr.Code, text, linkPR, prURL(pr.Repo, pr.Code))
 	}
 
-	// A pinned Claude agent renders on its own line below the links: state spark
-	// + agent name + state word. Enter opens the session, Ctrl+X unpins it. Its
-	// name is free-form (not a fixed-width code), so it skips the code padding.
-	if q.AgentWorktree != "" {
+	// Pinned Claude agents render herdr-style, flush to the far-left margin
+	// (not indented like the code lines): status icon + agent name + state word.
+	// They're status-only (no open); Ctrl+X unpins. A muted "+ add Claude agent"
+	// affordance always follows — navigable (↵) and clickable to open the picker.
+	for _, wt := range q.AgentWorktrees {
 		li := len(m.focusLinks)
-		state := m.questAgentState(q)
-		label := m.questAgentLabel(q)
-		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAgent, code: label})
+		state := m.worktreeState(wt)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAgent, code: wt})
 		if m.focusLinkIdx == li {
 			m.focusCaretLine = ln
 		}
-		line := pad + strings.Repeat(" ", gutterW) + agentGlyph(state) + " " +
-			label + "  " + ui.StyleMuted.Render(agentWord(state)) + hintFor(li)
+		line := agentGlyph(state) + " " + m.worktreeLabel(wt) + "  " +
+			ui.StyleMuted.Render(agentWord(state)) + hintFor(li, linkAgent)
 		lines = append(lines, line)
+		ln++
+	}
+	{
+		li := len(m.focusLinks)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAddAgent})
+		if m.focusLinkIdx == li {
+			m.focusCaretLine = ln
+		}
+		label := "+ add Claude agent"
+		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{
+			line: ln, x0: m.focusLeftMargin, x1: m.focusLeftMargin + lipgloss.Width(label), url: addAgentSentinel,
+		})
+		lines = append(lines, ui.StyleMuted.Render(label)+hintFor(li, linkAddAgent))
 		ln++
 	}
 	return lines
 }
 
+// addAgentSentinel is a fake span URL marking the "+ add Claude agent" line, so
+// a mouse click there opens the agent picker instead of a browser (see
+// handleFocusMouse).
+const addAgentSentinel = "\x00add-agent"
+
 // focusLinkCount is how many navigable link lines the expanded quest view
-// currently has (Jira + each PR + a pinned agent) — used to bound link-cursor
-// movement.
+// currently has (Jira + each PR + each pinned agent + the always-present
+// "+ add agent" affordance) — used to bound link-cursor movement.
 func (m *Model) focusLinkCount(q *model.Quest) int {
-	n := len(q.JiraCodes) + len(m.prStack(q.PRs))
-	if q.AgentWorktree != "" {
-		n++
-	}
-	return n
+	return len(q.JiraCodes) + len(m.prStack(q.PRs)) + len(q.AgentWorktrees) + 1
 }
 
 // renderQuestMetaLine renders the integration sub-line for a RowQuestMeta,

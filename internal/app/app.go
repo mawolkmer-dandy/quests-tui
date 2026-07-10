@@ -332,6 +332,7 @@ const (
 	linkJira linkKind = iota
 	linkPR
 	linkAgent
+	linkAddAgent // the "+ add Claude agent" affordance line
 )
 
 // focusLink is one navigable link line (the Jira line or a PR line) in the
@@ -915,7 +916,7 @@ func (m *Model) insertQuestMetaRows(rows []ui.Row) []ui.Row {
 			continue
 		}
 		q := m.findQuest(r.QuestID)
-		if q == nil || (len(q.JiraCodes) == 0 && len(q.PRs) == 0 && q.AgentWorktree == "") {
+		if q == nil || (len(q.JiraCodes) == 0 && len(q.PRs) == 0 && len(q.AgentWorktrees) == 0) {
 			continue
 		}
 		out = append(out, ui.Row{Kind: ui.RowQuestMeta, QuestID: r.QuestID, ProjectID: r.ProjectID, Nested: r.Nested})

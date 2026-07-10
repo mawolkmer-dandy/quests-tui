@@ -642,7 +642,10 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 			var cmd tea.Cmd
 			if len(items) > 0 {
 				if target := m.findQuest(mod.TargetQuestID); target != nil {
-					target.AgentWorktree = items[mod.PickerIndex].ID
+					wt := items[mod.PickerIndex].ID
+					if indexOfStr(target.AgentWorktrees, wt) < 0 {
+						target.AgentWorktrees = append(target.AgentWorktrees, wt)
+					}
 					target.UpdatedAt = time.Now()
 					m.save()
 					cmd = refreshAgentsCmd() // reflect the pinned agent's state right away
@@ -682,11 +685,6 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 		if msg.Type == tea.KeyEsc {
 			m.commitBodyLine()
 			m.closeModal()
-			return nil
-		}
-		// Ctrl+G pins a Claude agent (worktree) to this quest.
-		if msg.String() == "ctrl+g" {
-			m.openAgentPicker()
 			return nil
 		}
 		if handled, cmd := m.applyBodySelectionKey(msg); handled {
@@ -959,9 +957,9 @@ func (m *Model) renderModal() string {
 		b.WriteString("\n")
 		fmt.Fprintf(&b, "%-11s%s\n", "Paste URL", ui.StyleMuted.Render("a Jira/PR URL is captured instantly and pulled out of the line"))
 		fmt.Fprintf(&b, "%-11s%s\n", "↑ from body", ui.StyleMuted.Render("steps onto the link lines above; ↓ returns to the body"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Enter", ui.StyleMuted.Render("open the focused link (browser) or agent session"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Enter", ui.StyleMuted.Render("open the focused link in the browser (agents show status only)"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+X", ui.StyleMuted.Render("remove the focused link / unpin the agent (inline y/n)"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+G", ui.StyleMuted.Render("pin a running Claude agent (worktree) to this quest"))
+		fmt.Fprintf(&b, "%-11s%s\n", "+ add agent", ui.StyleMuted.Render("the muted line below the links pins a Claude agent (↵ / click)"))
 		b.WriteString("\n")
 
 		b.WriteString(ui.StyleSectionHeader.Render("Campaign quest list"))
@@ -1150,10 +1148,15 @@ func (m *Model) handleFocusMouse(msg tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 
-	// A click on an integration code (Jira/PR) under the title opens its URL.
+	// A click on an integration code (Jira/PR) opens its URL; a click on the
+	// "+ add Claude agent" affordance opens the picker.
 	if press {
 		for _, sp := range m.focusCodeSpans {
 			if msg.Y == m.focusContentTop+sp.line && msg.X >= sp.x0 && msg.X < sp.x1 {
+				if sp.url == addAgentSentinel {
+					m.openAgentPicker()
+					return nil
+				}
 				return openURL(sp.url)
 			}
 		}

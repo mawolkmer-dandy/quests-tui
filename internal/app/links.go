@@ -89,11 +89,19 @@ func (m *Model) handleFocusLinkKey(msg tea.KeyMsg, q *model.Quest) (tea.Cmd, boo
 		m.seedBodyEditor(0, 0)
 		return nil, true
 	case msg.Type == tea.KeyEnter:
-		if link.kind == linkAgent {
-			return m.openAgentSession(q), true
+		switch link.kind {
+		case linkAddAgent:
+			m.openAgentPicker()
+			return nil, true
+		case linkAgent:
+			return nil, true // status-only, no open
+		default:
+			return openURL(link.url), true
 		}
-		return openURL(link.url), true
 	case key.Matches(msg, Keys.Delete):
+		if link.kind == linkAddAgent {
+			return nil, true // nothing to remove on the affordance line
+		}
 		m.focusLinkConfirmID = link.code
 		return nil, true
 	}
@@ -102,9 +110,10 @@ func (m *Model) handleFocusLinkKey(msg tea.KeyMsg, q *model.Quest) (tea.Cmd, boo
 	return nil, false
 }
 
-// removeFocusLink removes link from q and persists: a PR drops from q.PRs, the
-// Jira clears q.JiraCode. The link cursor is re-homed onto a surviving link, or
-// back to the body when none remain.
+// removeFocusLink removes link from q and persists: a Jira/PR code drops from
+// its slice, an agent worktree unpins. The link cursor is re-homed onto a
+// surviving link (the "+ add agent" line always remains, so there's always at
+// least one).
 func (m *Model) removeFocusLink(q *model.Quest, link focusLink) {
 	switch link.kind {
 	case linkJira:
@@ -124,7 +133,13 @@ func (m *Model) removeFocusLink(q *model.Quest, link focusLink) {
 		}
 		q.PRs = out
 	case linkAgent:
-		q.AgentWorktree = ""
+		out := q.AgentWorktrees[:0]
+		for _, wt := range q.AgentWorktrees {
+			if wt != link.code {
+				out = append(out, wt)
+			}
+		}
+		q.AgentWorktrees = out
 	}
 	m.touchBodyOwner()
 

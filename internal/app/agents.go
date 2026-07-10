@@ -3,31 +3,27 @@ package app
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/mawolkmer-dandy/quests-tui/internal/model"
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
 
 // Claude-agent integration. `claude agents --json` lists currently-tracked
-// sessions with their cwd (usually a git worktree), sessionId, name, and live
-// status/state. A quest pins one worktree (Quest.AgentWorktree); any agent
-// whose cwd is that worktree is "this quest's agent", shown like the Jira/PR
-// integrations and reopenable with `claude --resume`.
+// sessions with their cwd (usually a git worktree), name, and live
+// status/state. A quest pins worktrees (Quest.AgentWorktrees); any agent whose
+// cwd is a pinned worktree shows its live state on the quest, like the Jira/PR
+// integrations.
 
 // AgentInfo is one entry of `claude agents --json`.
 type AgentInfo struct {
 	Cwd       string `json:"cwd"`
 	SessionID string `json:"sessionId"`
 	Name      string `json:"name"`
-	Status    string `json:"status"` // "busy" | "idle"
-	State     string `json:"state"`  // "working" | "done" (background agents only)
+	Status    string `json:"status"` // "busy" | "idle" | "waiting"
+	State     string `json:"state"`  // "working" | "done" | "blocked" | "paused" (background only)
 	Kind      string `json:"kind"`   // "background" | "interactive"
 }
 
@@ -49,9 +45,8 @@ func fetchAgents() (agents []AgentInfo, ok bool) {
 	return agents, true
 }
 
-// refreshAgentsCmd fetches the agent list off the UI goroutine. Used for an
-// immediate refresh right after pinning a worktree, independent of the sync
-// ticker's overlap guard.
+// refreshAgentsCmd fetches the agent list off the UI goroutine, for an
+// immediate refresh right after pinning (independent of the sync ticker).
 func refreshAgentsCmd() tea.Cmd {
 	return func() tea.Msg {
 		agents, ok := fetchAgents()
@@ -66,100 +61,124 @@ func refreshAgentsCmd() tea.Cmd {
 // keeps refreshing agent state even when nothing else needs syncing.
 func (m *Model) hasAgentLinks() bool {
 	for i := range m.store.Quests {
-		if m.store.Quests[i].AgentWorktree != "" {
+		if len(m.store.Quests[i].AgentWorktrees) > 0 {
 			return true
 		}
 	}
 	return false
 }
 
-// questAgents returns the agents whose cwd is the quest's pinned worktree (or a
-// subdirectory of it).
-func (m *Model) questAgents(q *model.Quest) []AgentInfo {
-	if q.AgentWorktree == "" {
-		return nil
-	}
+// worktreeAgents returns the agents whose cwd is exactly worktree. Matching is
+// exact, not prefix-based: a prefix match on the repo root would swallow every
+// worktree under .claude/worktrees/, mislabeling the pin.
+func (m *Model) worktreeAgents(worktree string) []AgentInfo {
 	var out []AgentInfo
 	for _, a := range m.agents {
-		if a.Cwd == q.AgentWorktree || strings.HasPrefix(a.Cwd, q.AgentWorktree+string(filepath.Separator)) {
+		if a.Cwd == worktree {
 			out = append(out, a)
 		}
 	}
 	return out
 }
 
-// agentEffectiveState collapses an agent's status+state into one of
-// "working" / "done" / "idle".
+// agentEffectiveState collapses one agent's status+state into a single label:
+// blocked (needs input) / working / paused / done / idle.
 func agentEffectiveState(a AgentInfo) string {
-	if a.State == "working" || a.Status == "busy" {
+	switch a.State {
+	case "blocked":
+		return "blocked"
+	case "working":
 		return "working"
-	}
-	if a.State == "done" {
+	case "paused":
+		return "paused"
+	case "done":
 		return "done"
+	}
+	switch a.Status {
+	case "waiting":
+		return "blocked"
+	case "busy":
+		return "working"
 	}
 	return "idle"
 }
 
-// questAgentState aggregates the pinned worktree's agents into one state:
-// working if any is working, else idle if any is idle, else done — or "none"
-// when the worktree currently has no tracked agent.
-func (m *Model) questAgentState(q *model.Quest) string {
-	agents := m.questAgents(q)
-	if len(agents) == 0 {
-		return "none"
+// agentStatePriority orders states by how much they want attention, so a
+// worktree with several agents surfaces the most important one.
+func agentStatePriority(state string) int {
+	switch state {
+	case "blocked":
+		return 5
+	case "working":
+		return 4
+	case "idle":
+		return 3
+	case "paused":
+		return 2
+	case "done":
+		return 1
 	}
-	state := "done"
-	for _, a := range agents {
-		switch agentEffectiveState(a) {
-		case "working":
-			return "working"
-		case "idle":
-			state = "idle"
-		}
-	}
-	return state
+	return 0
 }
 
-// questAgentLabel is the display name for the quest's agent line: a working
-// agent's name wins, else the first agent's, else the worktree's folder name
-// (when nothing is running there right now).
-func (m *Model) questAgentLabel(q *model.Quest) string {
-	agents := m.questAgents(q)
-	if len(agents) == 0 {
-		return filepath.Base(q.AgentWorktree)
-	}
-	for _, a := range agents {
-		if agentEffectiveState(a) == "working" && a.Name != "" {
-			return a.Name
+// worktreeState is the single state shown for a pinned worktree: the
+// highest-priority state among its agents, or "none" when nothing runs there.
+func (m *Model) worktreeState(worktree string) string {
+	best, bestPrio := "none", 0
+	for _, a := range m.worktreeAgents(worktree) {
+		s := agentEffectiveState(a)
+		if p := agentStatePriority(s); p > bestPrio {
+			best, bestPrio = s, p
 		}
 	}
-	if agents[0].Name != "" {
-		return agents[0].Name
-	}
-	return filepath.Base(q.AgentWorktree)
+	return best
 }
 
-// agentGlyph is the state-colored spark for an agent state.
+// worktreeLabel is the display name for a pinned worktree's line: the name of
+// its highest-priority agent, else the worktree's folder name.
+func (m *Model) worktreeLabel(worktree string) string {
+	name, bestPrio := "", 0
+	for _, a := range m.worktreeAgents(worktree) {
+		if a.Name == "" {
+			continue
+		}
+		if p := agentStatePriority(agentEffectiveState(a)); p >= bestPrio {
+			name, bestPrio = a.Name, p
+		}
+	}
+	if name != "" {
+		return name
+	}
+	return filepath.Base(worktree)
+}
+
+// agentGlyph is the state-colored status icon for an agent/worktree state.
 func agentGlyph(state string) string {
 	switch state {
+	case "blocked":
+		return lipgloss.NewStyle().Foreground(ui.ColorImportant).Render(ui.GlyphAgentBlocked)
 	case "working":
 		return ui.StyleRunning.Render(ui.GlyphAgentWorking)
-	case "done":
-		return lipgloss.NewStyle().Foreground(ui.ColorHeading).Render(ui.GlyphAgentDone)
-	case "idle":
-		return ui.StyleMuted.Render(ui.GlyphAgentIdle)
-	default:
+	case "idle", "done":
+		return lipgloss.NewStyle().Foreground(ui.ColorHeading).Render(ui.GlyphAgentIdle)
+	case "paused":
+		return ui.StyleMuted.Render(ui.GlyphAgentPaused)
+	default: // none
 		return ui.StyleMuted.Render(ui.GlyphAgentNone)
 	}
 }
 
-// agentWord is the expanded-view status word for an agent state.
+// agentWord is the status word shown beside the icon.
 func agentWord(state string) string {
 	switch state {
+	case "blocked":
+		return "blocked"
 	case "working":
 		return "working"
 	case "done":
 		return "done"
+	case "paused":
+		return "paused"
 	case "idle":
 		return "idle"
 	default:
@@ -167,64 +186,8 @@ func agentWord(state string) string {
 	}
 }
 
-// openAgentSession reopens the quest's pinned session: a live session id is
-// resumed (`claude --resume`), otherwise the most recent conversation in the
-// worktree is continued (`claude --continue`). It opens in a new tmux split
-// when running under tmux, else a new Terminal window.
-func (m *Model) openAgentSession(q *model.Quest) tea.Cmd {
-	if q.AgentWorktree == "" {
-		return nil
-	}
-	cwd := q.AgentWorktree
-	sessionID := ""
-	for _, a := range m.questAgents(q) {
-		if a.SessionID == "" {
-			continue
-		}
-		sessionID = a.SessionID
-		if agentEffectiveState(a) == "working" {
-			break // prefer the actively-working session
-		}
-	}
-	return openClaudeSession(cwd, sessionID)
-}
-
-func openClaudeSession(cwd, sessionID string) tea.Cmd {
-	return func() tea.Msg {
-		claudeBin, err := exec.LookPath("claude")
-		if err != nil {
-			claudeBin = "claude"
-		}
-		args := []string{"--continue"}
-		if sessionID != "" {
-			args = []string{"--resume", sessionID}
-		}
-
-		if os.Getenv("TMUX") != "" {
-			// tmux execs the command directly (no shell), so args pass cleanly.
-			tmuxArgs := append([]string{"split-window", "-h", "-c", cwd, claudeBin}, args...)
-			_ = exec.Command("tmux", tmuxArgs...).Start()
-			return nil
-		}
-
-		// No tmux: open a new Terminal window running the command in the worktree.
-		inner := fmt.Sprintf("cd %s && %s %s", shQuote(cwd), shQuote(claudeBin), strings.Join(args, " "))
-		script := fmt.Sprintf("tell application \"Terminal\" to do script %s", asQuote(inner))
-		_ = exec.Command("osascript", "-e", script, "-e", `tell application "Terminal" to activate`).Start()
-		return nil
-	}
-}
-
-func shQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-func asQuote(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
-}
-
-// openAgentPicker opens the picker to pin a worktree/agent to the focused
-// quest. A no-op outside a quest detail view, or when no agents are running.
+// openAgentPicker opens the picker to pin another worktree/agent to the focused
+// quest. A no-op outside a quest detail view.
 func (m *Model) openAgentPicker() {
 	if m.modal == nil || m.modal.Kind != ModalQuestDetail {
 		return
@@ -233,13 +196,12 @@ func (m *Model) openAgentPicker() {
 	if q == nil {
 		return
 	}
-	// Fetch fresh so the picker is populated even before the sync loop has run
-	// (it only fetches once a link exists). A brief blocking call on an explicit
-	// keypress is fine.
+	// Fetch fresh so the picker is populated even before the sync loop has run.
 	if agents, ok := fetchAgents(); ok {
 		m.agents = agents
 	}
 	m.commitBodyLine()
+	m.clearFocusLink()
 	m.pushModal(&Modal{Kind: ModalAgentPicker, TargetQuestID: q.ID, PickerItems: agentPickerItems(m.agents)})
 }
 
