@@ -153,19 +153,21 @@ func (m *Model) worktreeLabel(worktree string) string {
 	return filepath.Base(worktree)
 }
 
-// Spinner frame sets, all animated off m.spinnerFrame (one shared ticker).
-// Each integration state gets a visually distinct animation: a working agent
-// is a braille dot-runner, a running PR CI is a rotating filled circle, and a
-// linked-but-unsynced code ("fetching") is a lighter rotating arc.
-var (
-	spinnerAgent = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	spinnerCI    = []string{"◐", "◓", "◑", "◒"}
-	spinnerFetch = []string{"◜", "◝", "◞", "◟"}
-)
+// spinnerAgent is the braille dot-runner cycled for a working agent (the one
+// spinner we animate as a glyph). Fetching and CI-running instead pulse their
+// color (see pulseStyle) rather than cycling frames.
+var spinnerAgent = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // spin returns the current frame of set for the shared spinner clock.
 func (m *Model) spin(set []string) string {
 	return set[m.spinnerFrame%len(set)]
+}
+
+// pulseStyle is the amber foreground for a fetching / CI-running icon at the
+// current point in the pulse cycle (see ui.PulseAmber), driven by the shared
+// spinner clock.
+func (m *Model) pulseStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(ui.PulseAmber[m.spinnerFrame%len(ui.PulseAmber)])
 }
 
 // agentGlyph is the state-colored status icon for an agent/worktree state. The

@@ -42,11 +42,11 @@ var (
 	GlyphJiraDone       = "●" // Jira: done (green)
 	GlyphPRSuccess      = "✓" // PR CI: success (green)
 	GlyphPRError        = "✗" // PR CI: error/failure (red)
+	GlyphPRRunning      = "◎" // PR CI: running (amber, pulsing)
 	GlyphPRMerged       = "◆" // PR merged (mauve) — outranks CI state
 	GlyphPRClosed       = "⊘" // PR closed unmerged (muted)
+	GlyphFetching       = "◌" // code linked but not yet synced — "fetching" (amber, pulsing)
 	GlyphLoading        = "·" // legacy muted loading dot (kept for compatibility)
-	// CI-running and fetching states animate — see the spinner frame sets in
-	// internal/app/agents.go (spinnerCI / spinnerFetch).
 
 	// Graphite-style stack markers, drawn in a left gutter before a PR that
 	// belongs to a stack (2+ linked PRs): every PR but the last uses the tee,
@@ -107,8 +107,19 @@ var (
 	ColorImportant      = lipgloss.AdaptiveColor{Light: "#D20F39", Dark: "#F38BA8"} // high priority (red)
 	ColorPriorityMedium = lipgloss.AdaptiveColor{Light: "#DF8E1D", Dark: "#F9E2AF"} // medium priority (yellow)
 	ColorRunning        = lipgloss.AdaptiveColor{Light: "#FE640B", Dark: "#FAB387"} // integration "running" state (amber)
-	ColorMerged         = lipgloss.AdaptiveColor{Light: "#8839EF", Dark: "#CBA6F7"} // merged PR (mauve)
-	ColorSelected       = lipgloss.AdaptiveColor{Light: "#CCD0DA", Dark: "#313244"}
+
+	// PulseAmber is a bright→dim→bright amber ramp, cycled by the spinner clock
+	// (internal/app) to "pulse" the fetching and CI-running status icons.
+	PulseAmber = []lipgloss.AdaptiveColor{
+		{Light: "#FE640B", Dark: "#FAB387"},
+		{Light: "#F27A32", Dark: "#DFA47D"},
+		{Light: "#E69259", Dark: "#C49072"},
+		{Light: "#DBAA80", Dark: "#A97C66"},
+		{Light: "#E69259", Dark: "#C49072"},
+		{Light: "#F27A32", Dark: "#DFA47D"},
+	}
+	ColorMerged   = lipgloss.AdaptiveColor{Light: "#8839EF", Dark: "#CBA6F7"} // merged PR (mauve)
+	ColorSelected = lipgloss.AdaptiveColor{Light: "#CCD0DA", Dark: "#313244"}
 
 	StyleTitle          = lipgloss.NewStyle().Bold(true)
 	StyleMuted          = lipgloss.NewStyle().Faint(true)

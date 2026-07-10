@@ -865,7 +865,7 @@ func (m *Model) renderModal() string {
 		b.WriteString("\n")
 		b.WriteString(ui.StyleMuted.Render("its code, still clickable. Click a code to open it; arrow onto a link in"))
 		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("the expanded view to open (↵) or remove (" + Keys.Delete.Help().Key + ") it. PR shows " + ui.GlyphPRSuccess + "/" + ui.GlyphPRError + "/" + spinnerCI[0] + "/" + ui.GlyphPRMerged + ","))
+		b.WriteString(ui.StyleMuted.Render("the expanded view to open (↵) or remove (" + Keys.Delete.Help().Key + ") it. PR shows " + ui.GlyphPRSuccess + "/" + ui.GlyphPRError + "/" + ui.GlyphPRRunning + "/" + ui.GlyphPRMerged + ","))
 		b.WriteString("\n")
 		b.WriteString(ui.StyleMuted.Render("+ resolved/total comments; Jira shows " + ui.GlyphJiraTodo + "/" + ui.GlyphJiraInProgress + "/" + ui.GlyphJiraDone + " (todo / wip / done), ~60s."))
 		b.WriteString("\n")
