@@ -9,6 +9,65 @@ import (
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
 )
 
+// TestSavePreservesUserData is a data-loss guard: user content that is NOT a
+// deprecated/migrated field — jira links, PR links, pinned agents, body,
+// priority — must survive a full Load → Save → Load round-trip untouched. A
+// regression that drops any of these (a bad migration, a renamed json tag, a
+// stray clear) fails here instead of silently wiping a real store.
+func TestSavePreservesUserData(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.json")
+
+	orig := &Store{
+		Projects: []model.Project{{ID: "p1", Name: "Proj"}},
+		Quests: []model.Quest{{
+			ID:              "q1",
+			Title:           "Has everything",
+			Type:            model.QuestTypeMain,
+			Status:          model.StatusOpen,
+			ProjectID:       "p1",
+			Priority:        model.PriorityHigh,
+			JiraCodes:       []string{"EPDCHAIR-5711", "ES-8858"},
+			PRs:             []model.PRLink{{Code: "#46098", Repo: "orthly/orthlyweb"}, {Code: "#46099", Repo: "orthly/orthlyweb"}},
+			AgentWorkspaces: []string{"wC", "w8"},
+			Body:            []model.BodyLine{{ID: "b1", Text: "note"}},
+		}},
+	}
+	if err := Save(path, orig); err != nil {
+		t.Fatal(err)
+	}
+
+	// Round-trip: load (runs migrations), save, load again.
+	s1, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(path, s1); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	q := s2.Quests[0]
+	if got := q.JiraCodes; len(got) != 2 || got[0] != "EPDCHAIR-5711" || got[1] != "ES-8858" {
+		t.Errorf("JiraCodes lost/changed: %+v", got)
+	}
+	if got := q.PRs; len(got) != 2 || got[0].Code != "#46098" || got[1].Code != "#46099" {
+		t.Errorf("PRs lost/changed: %+v", got)
+	}
+	if got := q.AgentWorkspaces; len(got) != 2 || got[0] != "wC" || got[1] != "w8" {
+		t.Errorf("AgentWorkspaces lost/changed: %+v", got)
+	}
+	if q.Priority != model.PriorityHigh {
+		t.Errorf("Priority lost: %q", q.Priority)
+	}
+	if len(q.Body) != 1 || q.Body[0].Text != "note" {
+		t.Errorf("Body lost/changed: %+v", q.Body)
+	}
+}
+
 // TestLoadMigratesLegacyPR verifies the pre-PRs single-PR fields migrate into
 // the PRs slice on load, and the vestigial fields are cleared so they drop out
 // on the next save.
