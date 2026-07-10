@@ -217,6 +217,42 @@ func (m *Model) onSpinnerTick(gen int) tea.Cmd {
 	return spinnerTick(gen)
 }
 
+// agentPollInterval is the safety-net refresh cadence while a worktree is
+// pinned — short because agents are fully local (no network). The session-file
+// watcher usually updates first; this just guarantees a missed event converges
+// quickly rather than waiting for the slow Jira/PR sync.
+const agentPollInterval = 2 * time.Second
+
+type agentPollTickMsg struct{ gen int }
+
+func agentPollTick(gen int) tea.Cmd {
+	return tea.Tick(agentPollInterval, func(time.Time) tea.Msg { return agentPollTickMsg{gen: gen} })
+}
+
+// maybeStartAgentPoll starts the poll floor if a worktree is pinned and it
+// isn't already running.
+func (m *Model) maybeStartAgentPoll() tea.Cmd {
+	if m.agentPollOn || !m.integrationsEnabled || !m.hasAgentLinks() {
+		return nil
+	}
+	m.agentPollOn = true
+	m.agentPollGen++
+	return agentPollTick(m.agentPollGen)
+}
+
+// onAgentPollTick refreshes and re-arms while any worktree stays pinned; stops
+// once none are (unpinning the last agent lets the timer die).
+func (m *Model) onAgentPollTick(gen int) tea.Cmd {
+	if gen != m.agentPollGen {
+		return nil
+	}
+	if !m.hasAgentLinks() {
+		m.agentPollOn = false
+		return nil
+	}
+	return tea.Batch(refreshAgentsCmd(), agentPollTick(gen))
+}
+
 // agentWord is the status word shown beside the icon.
 func agentWord(state string) string {
 	switch state {

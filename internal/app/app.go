@@ -312,6 +312,13 @@ type Model struct {
 	spinnerGen   int
 	spinnerOn    bool
 
+	// Agent poll: a short-interval refresh floor (see agents.go). The session
+	// watcher gives instant updates but can miss a write (atomic renames on
+	// macOS), so this guarantees state converges within a couple seconds. Runs
+	// only while a worktree is pinned; agentPollGen guards against double-timers.
+	agentPollGen int
+	agentPollOn  bool
+
 	debug     bool
 	lastMsgAt time.Time
 }
@@ -420,6 +427,9 @@ func (m *Model) Init() tea.Cmd {
 		if m.hasAgentLinks() {
 			cmds = append(cmds, refreshAgentsCmd())
 		}
+		if c := m.maybeStartAgentPoll(); c != nil {
+			cmds = append(cmds, c)
+		}
 	}
 	return tea.Batch(cmds...)
 }
@@ -477,6 +487,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerTickMsg:
 		return m, m.onSpinnerTick(msg.gen)
+
+	case agentPollTickMsg:
+		return m, m.onAgentPollTick(msg.gen)
 
 	case agentsDirtyMsg:
 		// A session file changed — re-fetch and keep listening.

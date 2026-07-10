@@ -648,7 +648,9 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 					}
 					target.UpdatedAt = time.Now()
 					m.save()
-					cmd = refreshAgentsCmd() // reflect the pinned agent's state right away
+					// Reflect the pinned agent immediately, and make sure the
+					// poll floor is running now that a worktree is pinned.
+					cmd = tea.Batch(refreshAgentsCmd(), m.maybeStartAgentPoll())
 				}
 			}
 			m.closeModal()
