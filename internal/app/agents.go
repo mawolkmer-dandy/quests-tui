@@ -3,7 +3,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
+	"os/exec"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -12,187 +12,140 @@ import (
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
 
-// Claude-agent integration. `claude agents --json` lists currently-tracked
-// sessions with their cwd (usually a git worktree), name, and live
-// status/state. A quest pins worktrees (Quest.AgentWorktrees); any agent whose
-// cwd is a pinned worktree shows its live state on the quest, like the Jira/PR
-// integrations.
+// herdr-native agent integration. `herdr workspace list` is the source of
+// truth: each workspace carries a user-given label, a live agent_status
+// (accurate — herdr reads the pane's terminal output, not Claude's daemon), and
+// a stable workspace id. A quest pins workspaces by id; the status, name, and
+// "open" all come from herdr. Requires the herdr server to be running — when
+// it isn't, no agent state shows.
 
-// AgentInfo is one entry of `claude agents --json`.
-type AgentInfo struct {
-	Cwd       string `json:"cwd"`
-	SessionID string `json:"sessionId"`
-	Name      string `json:"name"`
-	Status    string `json:"status"` // "busy" | "idle" | "waiting"
-	State     string `json:"state"`  // "working" | "done" | "blocked" | "paused" (background only)
-	Kind      string `json:"kind"`   // "background" | "interactive"
+// HerdrWorkspace is one entry of `herdr workspace list`.
+type HerdrWorkspace struct {
+	ID     string // workspace_id, e.g. "wC"
+	Label  string // user-given name, e.g. "S - questlog"
+	Status string // "idle" | "working" | "blocked" | "unknown"
 }
 
-// agentsMsg carries a refreshed agent list into Update (from refreshAgentsCmd,
-// fired immediately after pinning; the periodic sync updates m.agents too).
-type agentsMsg struct{ agents []AgentInfo }
+// workspacesMsg delivers a refreshed workspace list into Update.
+type workspacesMsg struct{ ws []HerdrWorkspace }
 
-// fetchAgents runs `claude agents --json` and parses the currently-tracked
-// sessions. ok is false when the command fails (claude missing / not logged in)
-// so a transient error doesn't wipe the cached list.
-func fetchAgents() (agents []AgentInfo, ok bool) {
-	out, err := runCmd("claude", "agents", "--json")
+// fetchHerdrWorkspaces runs `herdr workspace list` and parses it. ok is false
+// when herdr isn't installed or its server isn't running.
+func fetchHerdrWorkspaces() (ws []HerdrWorkspace, ok bool) {
+	out, err := runCmd("herdr", "workspace", "list")
 	if err != nil {
 		return nil, false
 	}
-	if err := json.Unmarshal(out, &agents); err != nil {
+	var resp struct {
+		Result struct {
+			Workspaces []struct {
+				WorkspaceID string `json:"workspace_id"`
+				Label       string `json:"label"`
+				AgentStatus string `json:"agent_status"`
+			} `json:"workspaces"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
 		return nil, false
 	}
-	return agents, true
+	for _, w := range resp.Result.Workspaces {
+		ws = append(ws, HerdrWorkspace{ID: w.WorkspaceID, Label: w.Label, Status: w.AgentStatus})
+	}
+	return ws, true
 }
 
-// refreshAgentsCmd fetches the agent list off the UI goroutine, for an
-// immediate refresh right after pinning (independent of the sync ticker).
-func refreshAgentsCmd() tea.Cmd {
+// refreshWorkspacesCmd fetches the workspace list off the UI goroutine.
+func refreshWorkspacesCmd() tea.Cmd {
 	return func() tea.Msg {
-		agents, ok := fetchAgents()
+		ws, ok := fetchHerdrWorkspaces()
 		if !ok {
 			return nil
 		}
-		return agentsMsg{agents: agents}
+		return workspacesMsg{ws: ws}
 	}
 }
 
-// hasAgentLinks reports whether any quest pins a worktree, so the sync loop
-// keeps refreshing agent state even when nothing else needs syncing.
+// hasAgentLinks reports whether any quest pins a herdr workspace.
 func (m *Model) hasAgentLinks() bool {
 	for i := range m.store.Quests {
-		if len(m.store.Quests[i].AgentWorktrees) > 0 {
+		if len(m.store.Quests[i].AgentWorkspaces) > 0 {
 			return true
 		}
 	}
 	return false
 }
 
-// worktreeAgents returns the agents whose cwd is exactly worktree. Matching is
-// exact, not prefix-based: a prefix match on the repo root would swallow every
-// worktree under .claude/worktrees/, mislabeling the pin.
-func (m *Model) worktreeAgents(worktree string) []AgentInfo {
-	var out []AgentInfo
-	for _, a := range m.agents {
-		if a.Cwd == worktree {
-			out = append(out, a)
+// workspace returns the cached herdr workspace with id, if present.
+func (m *Model) workspace(id string) (HerdrWorkspace, bool) {
+	for _, w := range m.workspaces {
+		if w.ID == id {
+			return w, true
 		}
 	}
-	return out
+	return HerdrWorkspace{}, false
 }
 
-// agentEffectiveState collapses one agent's status+state into a single label:
-// blocked (needs input) / working / paused / done / idle.
-func agentEffectiveState(a AgentInfo) string {
-	switch a.State {
-	case "blocked":
-		return "blocked"
-	case "working":
-		return "working"
-	case "paused":
-		return "paused"
-	case "done":
-		return "done"
+// workspaceState is the display state for a pinned workspace: its herdr
+// agent_status, or "none" when herdr doesn't know it (closed / server down).
+func (m *Model) workspaceState(id string) string {
+	if w, ok := m.workspace(id); ok {
+		return w.Status
 	}
-	switch a.Status {
-	case "waiting":
-		return "blocked"
-	case "busy":
-		return "working"
-	}
-	return "idle"
+	return "none"
 }
 
-// agentStatePriority orders states by how much they want attention, so a
-// worktree with several agents surfaces the most important one.
-func agentStatePriority(state string) int {
-	switch state {
-	case "blocked":
-		return 5
-	case "working":
-		return 4
-	case "idle":
-		return 3
-	case "paused":
-		return 2
-	case "done":
-		return 1
+// workspaceLabel is the workspace's herdr label, or its id when unknown.
+func (m *Model) workspaceLabel(id string) string {
+	if w, ok := m.workspace(id); ok && w.Label != "" {
+		return w.Label
 	}
-	return 0
+	return id
 }
 
-// worktreeState is the single state shown for a pinned worktree: the
-// highest-priority state among its agents, or "none" when nothing runs there.
-func (m *Model) worktreeState(worktree string) string {
-	best, bestPrio := "none", 0
-	for _, a := range m.worktreeAgents(worktree) {
-		s := agentEffectiveState(a)
-		if p := agentStatePriority(s); p > bestPrio {
-			best, bestPrio = s, p
-		}
-	}
-	return best
-}
-
-// worktreeLabel is the display name for a pinned worktree's line: the name of
-// its highest-priority agent, else the worktree's folder name.
-func (m *Model) worktreeLabel(worktree string) string {
-	name, bestPrio := "", 0
-	for _, a := range m.worktreeAgents(worktree) {
-		if a.Name == "" {
-			continue
-		}
-		if p := agentStatePriority(agentEffectiveState(a)); p >= bestPrio {
-			name, bestPrio = a.Name, p
-		}
-	}
-	if name != "" {
-		return name
-	}
-	return filepath.Base(worktree)
-}
-
-// spinnerAgent is the braille dot-runner cycled for a working agent (the one
-// spinner we animate as a glyph). Fetching and CI-running instead pulse their
-// color (see pulseStyle) rather than cycling frames.
+// spinnerAgent is the braille dot-runner cycled for a working agent.
 var spinnerAgent = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // spin returns the current frame of set for the shared spinner clock.
-func (m *Model) spin(set []string) string {
-	return set[m.spinnerFrame%len(set)]
-}
+func (m *Model) spin(set []string) string { return set[m.spinnerFrame%len(set)] }
 
 // pulseStyle is the amber foreground for a fetching / CI-running icon at the
-// current point in the pulse cycle (see ui.PulseAmber), driven by the shared
-// spinner clock.
+// current point in the pulse cycle (see ui.PulseAmber).
 func (m *Model) pulseStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(ui.PulseAmber[m.spinnerFrame%len(ui.PulseAmber)])
 }
 
-// agentGlyph is the state-colored status icon for an agent/worktree state. The
-// working glyph animates (see spinnerFrame / the spinner ticker).
-func (m *Model) agentGlyph(state string) string {
-	switch state {
+// agentGlyph is the icon for a herdr agent status: red for blocked, an animated
+// braille spinner for working, green check for idle, muted otherwise.
+func (m *Model) agentGlyph(status string) string {
+	switch status {
 	case "blocked":
 		return lipgloss.NewStyle().Foreground(ui.ColorImportant).Render(ui.GlyphAgentBlocked)
 	case "working":
 		return ui.StyleRunning.Render(m.spin(spinnerAgent))
-	case "idle", "done":
+	case "idle":
 		return lipgloss.NewStyle().Foreground(ui.ColorHeading).Render(ui.GlyphAgentIdle)
-	case "paused":
-		return ui.StyleMuted.Render(ui.GlyphAgentPaused)
-	default: // none
+	default: // "unknown" / "none"
 		return ui.StyleMuted.Render(ui.GlyphAgentNone)
 	}
 }
 
-// hasWorkingAgent reports whether any pinned worktree currently has a working
-// agent.
+// agentWord is the status word shown beside the icon.
+func agentWord(status string) string {
+	switch status {
+	case "none":
+		return "no agent"
+	case "":
+		return "unknown"
+	default:
+		return status // idle / working / blocked / unknown
+	}
+}
+
+// hasWorkingAgent reports whether any pinned workspace is working.
 func (m *Model) hasWorkingAgent() bool {
 	for i := range m.store.Quests {
-		for _, wt := range m.store.Quests[i].AgentWorktrees {
-			if m.worktreeState(wt) == "working" {
+		for _, id := range m.store.Quests[i].AgentWorkspaces {
+			if m.workspaceState(id) == "working" {
 				return true
 			}
 		}
@@ -202,7 +155,7 @@ func (m *Model) hasWorkingAgent() bool {
 
 // hasAnimatedIntegration reports whether anything on screen needs the spinner
 // clock: a working agent, a PR whose CI is running, or a linked code still
-// awaiting its first sync ("fetching"). The ticker runs only while true.
+// awaiting its first sync ("fetching").
 func (m *Model) hasAnimatedIntegration() bool {
 	if !m.integrationsEnabled {
 		return false
@@ -227,14 +180,14 @@ func (m *Model) hasAnimatedIntegration() bool {
 	return false
 }
 
+// --- spinner clock (drives the agent braille + the fetching/CI pulse) --------
+
 type spinnerTickMsg struct{ gen int }
 
 func spinnerTick(gen int) tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return spinnerTickMsg{gen: gen} })
 }
 
-// maybeStartSpinner kicks off the spinner ticker if something needs animating
-// and it isn't already running. Called wherever an animated state can begin.
 func (m *Model) maybeStartSpinner() tea.Cmd {
 	if m.spinnerOn || !m.hasAnimatedIntegration() {
 		return nil
@@ -244,11 +197,9 @@ func (m *Model) maybeStartSpinner() tea.Cmd {
 	return spinnerTick(m.spinnerGen)
 }
 
-// onSpinnerTick advances the frame and re-arms while anything is animating;
-// stops (letting the ticker die) once nothing is.
 func (m *Model) onSpinnerTick(gen int) tea.Cmd {
 	if gen != m.spinnerGen {
-		return nil // stale ticker from an earlier start
+		return nil
 	}
 	if !m.hasAnimatedIntegration() {
 		m.spinnerOn = false
@@ -258,19 +209,20 @@ func (m *Model) onSpinnerTick(gen int) tea.Cmd {
 	return spinnerTick(gen)
 }
 
-// agentPollInterval is the safety-net refresh cadence while a worktree is
-// pinned — short because agents are fully local (no network). The session-file
-// watcher usually updates first; this just guarantees a missed event converges
-// quickly rather than waiting for the slow Jira/PR sync.
-const agentPollInterval = 2 * time.Second
+// --- herdr workspace poll (status refresh floor) -----------------------------
+
+// workspacePollInterval is how often we re-query `herdr workspace list` while a
+// workspace is pinned — short because it's a cheap local socket call and herdr
+// state changes often.
+const workspacePollInterval = 1500 * time.Millisecond
 
 type agentPollTickMsg struct{ gen int }
 
 func agentPollTick(gen int) tea.Cmd {
-	return tea.Tick(agentPollInterval, func(time.Time) tea.Msg { return agentPollTickMsg{gen: gen} })
+	return tea.Tick(workspacePollInterval, func(time.Time) tea.Msg { return agentPollTickMsg{gen: gen} })
 }
 
-// maybeStartAgentPoll starts the poll floor if a worktree is pinned and it
+// maybeStartAgentPoll starts the workspace poll if a workspace is pinned and it
 // isn't already running.
 func (m *Model) maybeStartAgentPoll() tea.Cmd {
 	if m.agentPollOn || !m.integrationsEnabled || !m.hasAgentLinks() {
@@ -278,11 +230,10 @@ func (m *Model) maybeStartAgentPoll() tea.Cmd {
 	}
 	m.agentPollOn = true
 	m.agentPollGen++
-	return agentPollTick(m.agentPollGen)
+	return tea.Batch(refreshWorkspacesCmd(), agentPollTick(m.agentPollGen))
 }
 
-// onAgentPollTick refreshes and re-arms while any worktree stays pinned; stops
-// once none are (unpinning the last agent lets the timer die).
+// onAgentPollTick refreshes and re-arms while any workspace stays pinned.
 func (m *Model) onAgentPollTick(gen int) tea.Cmd {
 	if gen != m.agentPollGen {
 		return nil
@@ -291,28 +242,20 @@ func (m *Model) onAgentPollTick(gen int) tea.Cmd {
 		m.agentPollOn = false
 		return nil
 	}
-	return tea.Batch(refreshAgentsCmd(), agentPollTick(gen))
+	return tea.Batch(refreshWorkspacesCmd(), agentPollTick(gen))
 }
 
-// agentWord is the status word shown beside the icon.
-func agentWord(state string) string {
-	switch state {
-	case "blocked":
-		return "blocked"
-	case "working":
-		return "working"
-	case "done":
-		return "done"
-	case "paused":
-		return "paused"
-	case "idle":
-		return "idle"
-	default:
-		return "no session"
+// openWorkspace focuses a herdr workspace (jumps to its pane), fire-and-forget.
+func openWorkspace(id string) tea.Cmd {
+	return func() tea.Msg {
+		_ = exec.Command("herdr", "workspace", "focus", id).Start()
+		return nil
 	}
 }
 
-// openAgentPicker opens the picker to pin another worktree/agent to the focused
+// --- picker ------------------------------------------------------------------
+
+// openAgentPicker opens the picker to pin a herdr workspace to the focused
 // quest. A no-op outside a quest detail view.
 func (m *Model) openAgentPicker() {
 	if m.modal == nil || m.modal.Kind != ModalQuestDetail {
@@ -322,32 +265,25 @@ func (m *Model) openAgentPicker() {
 	if q == nil {
 		return
 	}
-	// Fetch fresh so the picker is populated even before the sync loop has run.
-	if agents, ok := fetchAgents(); ok {
-		m.agents = agents
+	// Fetch fresh so the picker reflects herdr right now.
+	if ws, ok := fetchHerdrWorkspaces(); ok {
+		m.workspaces = ws
 	}
 	m.commitBodyLine()
 	m.clearFocusLink()
-	m.pushModal(&Modal{Kind: ModalAgentPicker, TargetQuestID: q.ID, PickerItems: agentPickerItems(m.agents)})
+	m.pushModal(&Modal{Kind: ModalAgentPicker, TargetQuestID: q.ID, PickerItems: m.workspacePickerItems()})
 }
 
-// agentPickerItems lists the currently-tracked agents for the picker, one per
-// worktree (deduped by cwd), labelled "<name> (<worktree>) · <state>". The ID
-// is the cwd — what gets pinned to the quest.
-func agentPickerItems(agents []AgentInfo) []pickerItem {
-	seen := map[string]bool{}
+// workspacePickerItems lists herdr workspaces for the picker, labelled
+// "<name> · <status>"; the ID is the workspace id that gets pinned.
+func (m *Model) workspacePickerItems() []pickerItem {
 	var items []pickerItem
-	for _, a := range agents {
-		if a.Cwd == "" || seen[a.Cwd] {
-			continue
+	for _, w := range m.workspaces {
+		label := w.Label
+		if label == "" {
+			label = w.ID
 		}
-		seen[a.Cwd] = true
-		name := a.Name
-		if name == "" {
-			name = filepath.Base(a.Cwd)
-		}
-		label := fmt.Sprintf("%s  (%s) · %s", name, filepath.Base(a.Cwd), agentWord(agentEffectiveState(a)))
-		items = append(items, pickerItem{ID: a.Cwd, Label: label})
+		items = append(items, pickerItem{ID: w.ID, Label: fmt.Sprintf("%s · %s", label, agentWord(w.Status))})
 	}
 	return items
 }

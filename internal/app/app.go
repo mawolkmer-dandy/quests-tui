@@ -114,11 +114,10 @@ func findRowIndex(rows []ui.Row, target cursorTarget) int {
 }
 
 type Model struct {
-	store        *store.Store
-	path         string
-	darkBg       bool
-	watcher      *fsnotify.Watcher // watches the quick-add spool for live ingestion (see quickadd_watch.go)
-	agentWatcher *fsnotify.Watcher // watches Claude's sessions dir for live agent-state changes (see agents_watch.go)
+	store   *store.Store
+	path    string
+	darkBg  bool
+	watcher *fsnotify.Watcher // watches the quick-add spool for live ingestion (see quickadd_watch.go)
 
 	// Undo stack of prior store states (JSON snapshots). recordUndo pushes the
 	// pre-change state on each save; undo (Ctrl+Z) pops and restores. Bounded
@@ -300,10 +299,10 @@ type Model struct {
 	focusLinkIdx       int
 	focusLinkConfirmID string
 
-	// agents is the latest `claude agents --json` list, refreshed by the sync
-	// loop (and immediately after pinning). A quest shows the state of agents
-	// whose cwd is its pinned worktree (see agents.go).
-	agents []AgentInfo
+	// workspaces is the latest `herdr workspace list`, refreshed by the agent
+	// poll (and immediately when the picker opens). A quest shows the state of
+	// its pinned workspaces (see agents.go).
+	workspaces []HerdrWorkspace
 
 	// Working-agent spinner: spinnerFrame advances while any pinned agent is
 	// working, animating its status glyph. The ticker only runs while there's
@@ -312,10 +311,9 @@ type Model struct {
 	spinnerGen   int
 	spinnerOn    bool
 
-	// Agent poll: a short-interval refresh floor (see agents.go). The session
-	// watcher gives instant updates but can miss a write (atomic renames on
-	// macOS), so this guarantees state converges within a couple seconds. Runs
-	// only while a worktree is pinned; agentPollGen guards against double-timers.
+	// Agent poll: re-queries `herdr workspace list` on a short interval while a
+	// workspace is pinned, so pinned agents' state stays live. agentPollGen
+	// guards against double-timers.
 	agentPollGen int
 	agentPollOn  bool
 
@@ -419,14 +417,7 @@ func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.watchQuickAdd()}
 	if m.integrationsEnabled {
 		cmds = append(cmds, syncTick(m.syncInterval))
-		// Watch Claude's sessions dir so agent state updates the instant it
-		// changes; fetch once up front so pinned agents show live immediately.
-		if c := m.watchAgentSessions(); c != nil {
-			cmds = append(cmds, c)
-		}
-		if m.hasAgentLinks() {
-			cmds = append(cmds, refreshAgentsCmd())
-		}
+		// Poll herdr for pinned-agent state (fetches once up front, too).
 		if c := m.maybeStartAgentPoll(); c != nil {
 			cmds = append(cmds, c)
 		}
@@ -484,8 +475,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applySyncResult(msg)
 		return m, m.maybeStartSpinner()
 
-	case agentsMsg:
-		m.agents = msg.agents
+	case workspacesMsg:
+		m.workspaces = msg.ws
 		return m, m.maybeStartSpinner()
 
 	case spinnerTickMsg:
@@ -493,13 +484,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentPollTickMsg:
 		return m, m.onAgentPollTick(msg.gen)
-
-	case agentsDirtyMsg:
-		// A session file changed — re-fetch and keep listening.
-		if m.agentWatcher == nil {
-			return m, refreshAgentsCmd()
-		}
-		return m, tea.Batch(refreshAgentsCmd(), waitForAgentEvent(m.agentWatcher))
 
 	case warningExpireMsg:
 		m.clearWarningIfCurrent(msg.gen)
@@ -958,7 +942,7 @@ func (m *Model) insertQuestMetaRows(rows []ui.Row) []ui.Row {
 			continue
 		}
 		q := m.findQuest(r.QuestID)
-		if q == nil || (len(q.JiraCodes) == 0 && len(q.PRs) == 0 && len(q.AgentWorktrees) == 0) {
+		if q == nil || (len(q.JiraCodes) == 0 && len(q.PRs) == 0 && len(q.AgentWorkspaces) == 0) {
 			continue
 		}
 		out = append(out, ui.Row{Kind: ui.RowQuestMeta, QuestID: r.QuestID, ProjectID: r.ProjectID, Nested: r.Nested})

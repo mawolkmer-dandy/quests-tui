@@ -94,7 +94,7 @@ func (m *Model) handleFocusLinkKey(msg tea.KeyMsg, q *model.Quest) (tea.Cmd, boo
 			m.openAgentPicker()
 			return nil, true
 		case linkAgent:
-			return nil, true // status-only, no open
+			return openWorkspace(link.code), true // focus the herdr workspace
 		default:
 			return openURL(link.url), true
 		}
@@ -133,13 +133,13 @@ func (m *Model) removeFocusLink(q *model.Quest, link focusLink) {
 		}
 		q.PRs = out
 	case linkAgent:
-		out := q.AgentWorktrees[:0]
-		for _, wt := range q.AgentWorktrees {
-			if wt != link.code {
-				out = append(out, wt)
+		out := q.AgentWorkspaces[:0]
+		for _, id := range q.AgentWorkspaces {
+			if id != link.code {
+				out = append(out, id)
 			}
 		}
-		q.AgentWorktrees = out
+		q.AgentWorkspaces = out
 	}
 	m.touchBodyOwner()
 

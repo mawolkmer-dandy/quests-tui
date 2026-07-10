@@ -642,15 +642,15 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 			var cmd tea.Cmd
 			if len(items) > 0 {
 				if target := m.findQuest(mod.TargetQuestID); target != nil {
-					wt := items[mod.PickerIndex].ID
-					if indexOfStr(target.AgentWorktrees, wt) < 0 {
-						target.AgentWorktrees = append(target.AgentWorktrees, wt)
+					id := items[mod.PickerIndex].ID
+					if indexOfStr(target.AgentWorkspaces, id) < 0 {
+						target.AgentWorkspaces = append(target.AgentWorkspaces, id)
 					}
 					target.UpdatedAt = time.Now()
 					m.save()
 					// Reflect the pinned agent immediately, and make sure the
-					// poll floor is running now that a worktree is pinned.
-					cmd = tea.Batch(refreshAgentsCmd(), m.maybeStartAgentPoll())
+					// poll is running now that a workspace is pinned.
+					cmd = tea.Batch(refreshWorkspacesCmd(), m.maybeStartAgentPoll())
 				}
 			}
 			m.closeModal()
@@ -923,7 +923,7 @@ func (m *Model) renderModal() string {
 		b.WriteString(ui.StyleMuted.Render("› ") + query + "\n\n")
 		items := mod.filteredPickerItems()
 		if len(items) == 0 {
-			b.WriteString(ui.StyleMuted.Render("  (no Claude agents running)") + "\n")
+			b.WriteString(ui.StyleMuted.Render("  (no herdr workspaces — is the herdr server running?)") + "\n")
 		}
 		for i, item := range items {
 			line := "  " + item.Label
@@ -961,7 +961,7 @@ func (m *Model) renderModal() string {
 		b.WriteString("\n")
 		fmt.Fprintf(&b, "%-11s%s\n", "Paste URL", ui.StyleMuted.Render("a Jira/PR URL is captured instantly and pulled out of the line"))
 		fmt.Fprintf(&b, "%-11s%s\n", "↑ from body", ui.StyleMuted.Render("steps onto the link lines above; ↓ returns to the body"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Enter", ui.StyleMuted.Render("open the focused link in the browser (agents show status only)"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Enter", ui.StyleMuted.Render("open the focused link (browser) or jump to the agent's herdr pane"))
 		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+X", ui.StyleMuted.Render("remove the focused link / unpin the agent (inline y/n)"))
 		fmt.Fprintf(&b, "%-11s%s\n", "+ add agent", ui.StyleMuted.Render("the muted line below the links pins a Claude agent (↵ / click)"))
 		b.WriteString("\n")

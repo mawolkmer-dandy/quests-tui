@@ -93,14 +93,15 @@ type Quest struct {
 	JiraCodes []string `json:"jiraCodes,omitempty"` // every linked Jira issue, e.g. "EPDCHAIR-5713"
 	PRs       []PRLink `json:"prs,omitempty"`       // every linked GitHub PR
 
-	// AgentWorktrees pins Claude Code worktrees (agent cwds) to this quest, so
-	// any agent running in one shows its live state on the quest. Added from the
-	// "+ add Claude agent" affordance (see internal/app/agents.go).
-	AgentWorktrees []string `json:"agentWorktrees,omitempty"`
+	// AgentWorkspaces pins herdr workspaces (by workspace id, e.g. "wC") to this
+	// quest, so each pinned agent's live herdr state shows on the quest. Added
+	// from the "+ add Claude agent" affordance (see internal/app/agents.go).
+	AgentWorkspaces []string `json:"agentWorkspaces,omitempty"`
 
-	// AgentWorktree is the deprecated single-worktree field, migrated into
-	// AgentWorktrees on load (see store.Load) and cleared.
-	AgentWorktree string `json:"agentWorktree,omitempty"`
+	// Deprecated worktree-pin fields, cleared on load — the agent integration
+	// is now keyed on herdr workspaces, not worktrees.
+	AgentWorktrees []string `json:"agentWorktrees,omitempty"`
+	AgentWorktree  string   `json:"agentWorktree,omitempty"`
 
 	// Legacy single-link fields, kept only so pre-slice data migrates on load
 	// (see store.Load); cleared there so they drop out on the next save.

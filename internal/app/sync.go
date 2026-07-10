@@ -51,10 +51,8 @@ const syncFetchTimeout = 15 * time.Second
 type syncTickMsg struct{}
 
 type syncResultMsg struct {
-	prs           []PRStatus
-	jira          []JiraStatus
-	agents        []AgentInfo
-	agentsFetched bool // distinguishes "no agents running" from "fetch failed"
+	prs  []PRStatus
+	jira []JiraStatus
 }
 
 // syncTick schedules the next sync pass, mirroring transTick.
@@ -71,7 +69,7 @@ func (m *Model) onSyncTick() tea.Cmd {
 		return rearm
 	}
 	prs, jira := m.collectSyncTargets()
-	if len(prs) == 0 && len(jira) == 0 && !m.hasAgentLinks() {
+	if len(prs) == 0 && len(jira) == 0 {
 		return rearm
 	}
 	m.syncing = true
@@ -86,9 +84,6 @@ func (m *Model) applySyncResult(msg syncResultMsg) {
 	}
 	for _, st := range msg.jira {
 		m.jiraStatus[st.Code] = st
-	}
-	if msg.agentsFetched {
-		m.agents = msg.agents
 	}
 	m.lastSyncAt = time.Now()
 	m.syncing = false
@@ -176,10 +171,6 @@ func runSync(prs []syncTarget, jira []string) tea.Cmd {
 			if ok {
 				res.jira = append(res.jira, st)
 			}
-		}
-		if agents, ok := fetchAgents(); ok {
-			res.agents = agents
-			res.agentsFetched = true
 		}
 		return res
 	}
@@ -582,8 +573,8 @@ func (m *Model) integrationSegments(q *model.Quest) []integrationSegment {
 	var segs []integrationSegment
 	// Agent state comes first, as just its icon (managed from the expanded
 	// view, so no click URL here).
-	for _, wt := range q.AgentWorktrees {
-		segs = append(segs, integrationSegment{text: m.agentGlyph(m.worktreeState(wt)), width: 1})
+	for _, id := range q.AgentWorkspaces {
+		segs = append(segs, integrationSegment{text: m.agentGlyph(m.workspaceState(id)), width: 1})
 	}
 	for _, code := range q.JiraCodes {
 		text := ui.StyleMuted.Render(code) + " " + m.jiraGlyph(code)
@@ -657,9 +648,7 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		switch kind {
 		case linkAddAgent:
 			return "  " + ui.StyleMuted.Render("↵ add")
-		case linkAgent:
-			return "  " + ui.StyleMuted.Render(Keys.Delete.Help().Key+" remove")
-		default:
+		default: // linkAgent (open the herdr pane), linkJira/linkPR (open URL)
 			return "  " + ui.StyleMuted.Render("↵ open · "+Keys.Delete.Help().Key+" remove")
 		}
 	}
@@ -682,24 +671,24 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		ln++
 	}
 
-	// Pinned Claude agents come FIRST, aligned with the code lines (indent +
-	// gutter) so their status icon lines up under the Jira/PR glyphs. Each is
-	// status-only (Ctrl+X unpins). When none are pinned, a muted
-	// "+ add Claude agent" affordance takes the slot; once one is pinned it's
-	// gone (unpin to add a different one).
+	// Pinned herdr agents come FIRST, aligned with the code lines (indent +
+	// gutter) so their status icon lines up under the Jira/PR glyphs. Enter
+	// focuses the workspace in herdr; Ctrl+X unpins. When none are pinned, a
+	// muted "+ add Claude agent" affordance takes the slot; once one is pinned
+	// it's gone (unpin to add a different one).
 	agentPrefix := pad + strings.Repeat(" ", gutterW)
-	for _, wt := range q.AgentWorktrees {
+	for _, id := range q.AgentWorkspaces {
 		li := len(m.focusLinks)
-		state := m.worktreeState(wt)
-		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAgent, code: wt})
+		state := m.workspaceState(id)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAgent, code: id})
 		if m.focusLinkIdx == li {
 			m.focusCaretLine = ln
 		}
-		lines = append(lines, agentPrefix+m.agentGlyph(state)+" "+m.worktreeLabel(wt)+"  "+
+		lines = append(lines, agentPrefix+m.agentGlyph(state)+" "+m.workspaceLabel(id)+"  "+
 			ui.StyleMuted.Render(agentWord(state))+hintFor(li, linkAgent))
 		ln++
 	}
-	if len(q.AgentWorktrees) == 0 {
+	if len(q.AgentWorkspaces) == 0 {
 		li := len(m.focusLinks)
 		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAddAgent})
 		if m.focusLinkIdx == li {
@@ -747,8 +736,8 @@ const addAgentSentinel = "\x00add-agent"
 // currently has (each pinned agent OR the "+ add agent" affordance when none,
 // plus Jira + each PR) — used to bound link-cursor movement.
 func (m *Model) focusLinkCount(q *model.Quest) int {
-	n := len(q.JiraCodes) + len(m.prStack(q.PRs)) + len(q.AgentWorktrees)
-	if len(q.AgentWorktrees) == 0 {
+	n := len(q.JiraCodes) + len(m.prStack(q.PRs)) + len(q.AgentWorkspaces)
+	if len(q.AgentWorkspaces) == 0 {
 		n++ // the "+ add Claude agent" affordance (only shown when none pinned)
 	}
 	return n

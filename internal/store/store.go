@@ -90,10 +90,9 @@ func Load(path string) (*Store, error) {
 		}
 		s.Quests[i].JiraCode = ""
 
-		// Migrate the old single agent-worktree field into the slice, likewise.
-		if len(s.Quests[i].AgentWorktrees) == 0 && s.Quests[i].AgentWorktree != "" {
-			s.Quests[i].AgentWorktrees = []string{s.Quests[i].AgentWorktree}
-		}
+		// The agent integration moved from worktrees to herdr workspaces; drop
+		// any old worktree pins (no reliable worktree→workspace mapping).
+		s.Quests[i].AgentWorktrees = nil
 		s.Quests[i].AgentWorktree = ""
 	}
 	return &s, nil
