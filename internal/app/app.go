@@ -114,10 +114,11 @@ func findRowIndex(rows []ui.Row, target cursorTarget) int {
 }
 
 type Model struct {
-	store   *store.Store
-	path    string
-	darkBg  bool
-	watcher *fsnotify.Watcher // watches the quick-add spool for live ingestion (see quickadd_watch.go)
+	store        *store.Store
+	path         string
+	darkBg       bool
+	watcher      *fsnotify.Watcher // watches the quick-add spool for live ingestion (see quickadd_watch.go)
+	agentWatcher *fsnotify.Watcher // watches Claude's sessions dir for live agent-state changes (see agents_watch.go)
 
 	// Undo stack of prior store states (JSON snapshots). recordUndo pushes the
 	// pre-change state on each save; undo (Ctrl+Z) pops and restores. Bounded
@@ -404,6 +405,14 @@ func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.watchQuickAdd()}
 	if m.integrationsEnabled {
 		cmds = append(cmds, syncTick(m.syncInterval))
+		// Watch Claude's sessions dir so agent state updates the instant it
+		// changes; fetch once up front so pinned agents show live immediately.
+		if c := m.watchAgentSessions(); c != nil {
+			cmds = append(cmds, c)
+		}
+		if m.hasAgentLinks() {
+			cmds = append(cmds, refreshAgentsCmd())
+		}
 	}
 	return tea.Batch(cmds...)
 }
@@ -458,6 +467,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case agentsMsg:
 		m.agents = msg.agents
 		return m, nil
+
+	case agentsDirtyMsg:
+		// A session file changed — re-fetch and keep listening.
+		if m.agentWatcher == nil {
+			return m, refreshAgentsCmd()
+		}
+		return m, tea.Batch(refreshAgentsCmd(), waitForAgentEvent(m.agentWatcher))
 
 	case warningExpireMsg:
 		m.clearWarningIfCurrent(msg.gen)
