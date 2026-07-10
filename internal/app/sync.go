@@ -580,6 +580,11 @@ type integrationSegment struct {
 // view only.
 func (m *Model) integrationSegments(q *model.Quest) []integrationSegment {
 	var segs []integrationSegment
+	// Agent state comes first, as just its icon (managed from the expanded
+	// view, so no click URL here).
+	for _, wt := range q.AgentWorktrees {
+		segs = append(segs, integrationSegment{text: m.agentGlyph(m.worktreeState(wt)), width: 1})
+	}
 	for _, code := range q.JiraCodes {
 		text := ui.StyleMuted.Render(code) + " " + m.jiraGlyph(code)
 		width := lipgloss.Width(code) + 1 + 1
@@ -592,11 +597,6 @@ func (m *Model) integrationSegments(q *model.Quest) []integrationSegment {
 		text := ui.StyleMuted.Render(pr.Code) + " " + glyph + ui.StyleMuted.Render(count)
 		width := lipgloss.Width(pr.Code) + 1 + 1 + lipgloss.Width(count)
 		segs = append(segs, integrationSegment{text: text, width: width, url: prURL(pr.Repo, pr.Code)})
-	}
-	// Each pinned worktree shows just its state icon inline (managed from the
-	// expanded view, so no click URL here).
-	for _, wt := range q.AgentWorktrees {
-		segs = append(segs, integrationSegment{text: agentGlyph(m.worktreeState(wt)), width: 1})
 	}
 	return segs
 }
@@ -682,6 +682,38 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		ln++
 	}
 
+	// Pinned Claude agents come FIRST, aligned with the code lines (indent +
+	// gutter) so their status icon lines up under the Jira/PR glyphs. Each is
+	// status-only (Ctrl+X unpins). When none are pinned, a muted
+	// "+ add Claude agent" affordance takes the slot; once one is pinned it's
+	// gone (unpin to add a different one).
+	agentPrefix := pad + strings.Repeat(" ", gutterW)
+	for _, wt := range q.AgentWorktrees {
+		li := len(m.focusLinks)
+		state := m.worktreeState(wt)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAgent, code: wt})
+		if m.focusLinkIdx == li {
+			m.focusCaretLine = ln
+		}
+		lines = append(lines, agentPrefix+m.agentGlyph(state)+" "+m.worktreeLabel(wt)+"  "+
+			ui.StyleMuted.Render(agentWord(state))+hintFor(li, linkAgent))
+		ln++
+	}
+	if len(q.AgentWorktrees) == 0 {
+		li := len(m.focusLinks)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAddAgent})
+		if m.focusLinkIdx == li {
+			m.focusCaretLine = ln
+		}
+		label := "+ add Claude agent"
+		x0 := m.focusLeftMargin + indent + gutterW
+		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{
+			line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: addAgentSentinel,
+		})
+		lines = append(lines, agentPrefix+ui.StyleMuted.Render(label)+hintFor(li, linkAddAgent))
+		ln++
+	}
+
 	for _, code := range q.JiraCodes {
 		text := ui.StyleMuted.Render(m.jiraStatusWord(code))
 		addLink("", m.jiraGlyph(code), code, text, linkJira, jiraURL(code, m.jiraBaseURL))
@@ -703,36 +735,6 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		}
 		addLink(marker, glyph, pr.Code, text, linkPR, prURL(pr.Repo, pr.Code))
 	}
-
-	// Pinned Claude agents render herdr-style, flush to the far-left margin
-	// (not indented like the code lines): status icon + agent name + state word.
-	// They're status-only (no open); Ctrl+X unpins. A muted "+ add Claude agent"
-	// affordance always follows — navigable (↵) and clickable to open the picker.
-	for _, wt := range q.AgentWorktrees {
-		li := len(m.focusLinks)
-		state := m.worktreeState(wt)
-		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAgent, code: wt})
-		if m.focusLinkIdx == li {
-			m.focusCaretLine = ln
-		}
-		line := agentGlyph(state) + " " + m.worktreeLabel(wt) + "  " +
-			ui.StyleMuted.Render(agentWord(state)) + hintFor(li, linkAgent)
-		lines = append(lines, line)
-		ln++
-	}
-	{
-		li := len(m.focusLinks)
-		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAddAgent})
-		if m.focusLinkIdx == li {
-			m.focusCaretLine = ln
-		}
-		label := "+ add Claude agent"
-		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{
-			line: ln, x0: m.focusLeftMargin, x1: m.focusLeftMargin + lipgloss.Width(label), url: addAgentSentinel,
-		})
-		lines = append(lines, ui.StyleMuted.Render(label)+hintFor(li, linkAddAgent))
-		ln++
-	}
 	return lines
 }
 
@@ -742,10 +744,14 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 const addAgentSentinel = "\x00add-agent"
 
 // focusLinkCount is how many navigable link lines the expanded quest view
-// currently has (Jira + each PR + each pinned agent + the always-present
-// "+ add agent" affordance) — used to bound link-cursor movement.
+// currently has (each pinned agent OR the "+ add agent" affordance when none,
+// plus Jira + each PR) — used to bound link-cursor movement.
 func (m *Model) focusLinkCount(q *model.Quest) int {
-	return len(q.JiraCodes) + len(m.prStack(q.PRs)) + len(q.AgentWorktrees) + 1
+	n := len(q.JiraCodes) + len(m.prStack(q.PRs)) + len(q.AgentWorktrees)
+	if len(q.AgentWorktrees) == 0 {
+		n++ // the "+ add Claude agent" affordance (only shown when none pinned)
+	}
+	return n
 }
 
 // renderQuestMetaLine renders the integration sub-line for a RowQuestMeta,

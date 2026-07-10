@@ -305,6 +305,13 @@ type Model struct {
 	// whose cwd is its pinned worktree (see agents.go).
 	agents []AgentInfo
 
+	// Working-agent spinner: spinnerFrame advances while any pinned agent is
+	// working, animating its status glyph. The ticker only runs while there's
+	// something to animate; spinnerGen guards against double-tickers.
+	spinnerFrame int
+	spinnerGen   int
+	spinnerOn    bool
+
 	debug     bool
 	lastMsgAt time.Time
 }
@@ -462,11 +469,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case syncResultMsg:
 		m.applySyncResult(msg)
-		return m, nil
+		return m, m.maybeStartSpinner()
 
 	case agentsMsg:
 		m.agents = msg.agents
-		return m, nil
+		return m, m.maybeStartSpinner()
+
+	case spinnerTickMsg:
+		return m, m.onSpinnerTick(msg.gen)
 
 	case agentsDirtyMsg:
 		// A session file changed — re-fetch and keep listening.

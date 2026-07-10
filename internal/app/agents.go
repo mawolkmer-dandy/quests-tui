@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -152,13 +153,17 @@ func (m *Model) worktreeLabel(worktree string) string {
 	return filepath.Base(worktree)
 }
 
-// agentGlyph is the state-colored status icon for an agent/worktree state.
-func agentGlyph(state string) string {
+// spinnerFrames is the braille spinner cycled through for a working agent.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// agentGlyph is the state-colored status icon for an agent/worktree state. The
+// working glyph animates (see spinnerFrame / the spinner ticker).
+func (m *Model) agentGlyph(state string) string {
 	switch state {
 	case "blocked":
 		return lipgloss.NewStyle().Foreground(ui.ColorImportant).Render(ui.GlyphAgentBlocked)
 	case "working":
-		return ui.StyleRunning.Render(ui.GlyphAgentWorking)
+		return ui.StyleRunning.Render(spinnerFrames[m.spinnerFrame%len(spinnerFrames)])
 	case "idle", "done":
 		return lipgloss.NewStyle().Foreground(ui.ColorHeading).Render(ui.GlyphAgentIdle)
 	case "paused":
@@ -166,6 +171,50 @@ func agentGlyph(state string) string {
 	default: // none
 		return ui.StyleMuted.Render(ui.GlyphAgentNone)
 	}
+}
+
+// hasWorkingAgent reports whether any pinned worktree currently has a working
+// agent — the spinner ticker runs only while this is true.
+func (m *Model) hasWorkingAgent() bool {
+	for i := range m.store.Quests {
+		for _, wt := range m.store.Quests[i].AgentWorktrees {
+			if m.worktreeState(wt) == "working" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type spinnerTickMsg struct{ gen int }
+
+func spinnerTick(gen int) tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return spinnerTickMsg{gen: gen} })
+}
+
+// maybeStartSpinner kicks off the spinner ticker if a working agent exists and
+// it isn't already running. Called after every agent-state update.
+func (m *Model) maybeStartSpinner() tea.Cmd {
+	if m.spinnerOn || !m.hasWorkingAgent() {
+		return nil
+	}
+	m.spinnerOn = true
+	m.spinnerGen++
+	return spinnerTick(m.spinnerGen)
+}
+
+// onSpinnerTick advances the frame and re-arms while work continues; stops
+// (letting the ticker die) once nothing is working.
+func (m *Model) onSpinnerTick(gen int) tea.Cmd {
+	if gen != m.spinnerGen {
+		return nil // stale ticker from an earlier start
+	}
+	if !m.hasWorkingAgent() {
+		m.spinnerOn = false
+		return nil
+	}
+	m.spinnerFrame++
+	return spinnerTick(gen)
 }
 
 // agentWord is the status word shown beside the icon.
