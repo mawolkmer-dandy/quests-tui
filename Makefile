@@ -5,13 +5,26 @@ BINARY := quests
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build install run clean check
+.PHONY: build install dev run clean check
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/quests
 
 install:
 	go install -ldflags "$(LDFLAGS)" ./cmd/quests
+
+# `make dev` installs the current source as a short `qd` command on your PATH
+# (Homebrew's bin dir is already on PATH), kept separate from the released
+# `quests` so a dev build never shadows or clobbers the brew install. Run `qd`
+# from anywhere; re-run `make dev` after changes. `qd --version` shows the git
+# describe stamp so you can tell it apart from the released `quests`.
+DEV_NAME := qd
+DEV_DIR := $(shell brew --prefix 2>/dev/null)/bin
+
+dev:
+	@test -d "$(DEV_DIR)" || { echo "brew bin dir not found ($(DEV_DIR)); set DEV_DIR=..."; exit 1; }
+	go build -ldflags "$(LDFLAGS)" -o "$(DEV_DIR)/$(DEV_NAME)" ./cmd/quests
+	@echo "dev build → $(DEV_DIR)/$(DEV_NAME)   (run it anywhere with: $(DEV_NAME))"
 
 run: build
 	./$(BINARY)
