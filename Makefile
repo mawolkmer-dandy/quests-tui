@@ -13,12 +13,13 @@ build:
 install:
 	go install -ldflags "$(LDFLAGS)" ./cmd/quests
 
-# `make dev` installs the current source as a short `qd` command on your PATH
+# `make dev` installs the current source as a `quests-dev` command on your PATH
 # (Homebrew's bin dir is already on PATH), kept separate from the released
-# `quests` so a dev build never shadows or clobbers the brew install. Run `qd`
-# from anywhere; re-run `make dev` after changes. `qd --version` shows the git
-# describe stamp so you can tell it apart from the released `quests`.
-DEV_NAME := qd
+# `quests` so a dev build never shadows or clobbers the brew install. Anyone
+# working on Quests can `make dev` then run `quests-dev` from anywhere; re-run
+# `make dev` after changes. `quests-dev --version` shows the git describe stamp
+# so you can tell it apart from the released `quests`.
+DEV_NAME := quests-dev
 DEV_DIR := $(shell brew --prefix 2>/dev/null)/bin
 
 dev:
