@@ -98,6 +98,10 @@ type Quest struct {
 	// from the "+ add Claude agent" affordance (see internal/app/agents.go).
 	AgentWorkspaces []string `json:"agentWorkspaces,omitempty"`
 
+	// Runes are LaunchDarkly flag keys attached to this quest; each shows its
+	// live rollout state (on / partial / off) on the quest (see app/runes.go).
+	Runes []string `json:"runes,omitempty"`
+
 	// Deprecated worktree-pin fields, cleared on load — the agent integration
 	// is now keyed on herdr workspaces, not worktrees.
 	AgentWorktrees []string `json:"agentWorktrees,omitempty"`

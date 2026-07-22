@@ -19,6 +19,9 @@ type Store struct {
 	// quest ID — independent of the per-campaign order in the Tavern. Quests
 	// not listed here fall in after, sorted by tier. Stale IDs are ignored.
 	WildsOrder []string `json:"wildsOrder,omitempty"`
+	// Runes is the watched LaunchDarkly flag keys shown in the Tavern's Runes
+	// list — flags you're monitoring, not necessarily tied to one quest.
+	Runes []string `json:"runes,omitempty"`
 }
 
 // DefaultDir is where Quests keeps its data file, config, and backups:

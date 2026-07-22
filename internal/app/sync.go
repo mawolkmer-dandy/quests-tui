@@ -51,8 +51,9 @@ const syncFetchTimeout = 15 * time.Second
 type syncTickMsg struct{}
 
 type syncResultMsg struct {
-	prs  []PRStatus
-	jira []JiraStatus
+	prs   []PRStatus
+	jira  []JiraStatus
+	runes []RuneStatus
 }
 
 // syncTick schedules the next sync pass, mirroring transTick.
@@ -69,11 +70,12 @@ func (m *Model) onSyncTick() tea.Cmd {
 		return rearm
 	}
 	prs, jira := m.collectSyncTargets()
-	if len(prs) == 0 && len(jira) == 0 {
+	runes := m.collectRuneKeys()
+	if len(prs) == 0 && len(jira) == 0 && len(runes) == 0 {
 		return rearm
 	}
 	m.syncing = true
-	return tea.Batch(rearm, runSync(prs, jira), m.maybeStartSpinner())
+	return tea.Batch(rearm, runSync(prs, jira, runes, m.ldProject, m.ldEnv), m.maybeStartSpinner())
 }
 
 // applySyncResult stores a completed pass's results into the caches. It never
@@ -84,6 +86,9 @@ func (m *Model) applySyncResult(msg syncResultMsg) {
 	}
 	for _, st := range msg.jira {
 		m.jiraStatus[st.Code] = st
+	}
+	for _, st := range msg.runes {
+		m.runeStatus[st.Key] = st
 	}
 	m.lastSyncAt = time.Now()
 	m.syncing = false
@@ -150,14 +155,14 @@ func (m *Model) syncNow(codes []string) tea.Cmd {
 		return nil
 	}
 	m.syncing = true
-	return runSync(prs, jira)
+	return runSync(prs, jira, nil, m.ldProject, m.ldEnv)
 }
 
 // runSync fetches every target's status off the UI goroutine and returns a
 // single syncResultMsg. Errors on individual fetches drop that code from the
 // result (leaving its cache untouched in the Update handler) rather than
 // failing the whole pass.
-func runSync(prs []syncTarget, jira []string) tea.Cmd {
+func runSync(prs []syncTarget, jira []string, runes []string, ldProject, ldEnv string) tea.Cmd {
 	return func() tea.Msg {
 		var res syncResultMsg
 		for _, t := range prs {
@@ -170,6 +175,12 @@ func runSync(prs []syncTarget, jira []string) tea.Cmd {
 			st, ok := fetchJiraStatus(code)
 			if ok {
 				res.jira = append(res.jira, st)
+			}
+		}
+		for _, key := range runes {
+			st, ok := fetchRuneStatus(ldProject, ldEnv, key)
+			if ok {
+				res.runes = append(res.runes, st)
 			}
 		}
 		return res
@@ -588,6 +599,10 @@ func (m *Model) integrationSegments(q *model.Quest) []integrationSegment {
 		text := ui.StyleMuted.Render(pr.Code) + " " + glyph + ui.StyleMuted.Render(count)
 		width := lipgloss.Width(pr.Code) + 1 + 1 + lipgloss.Width(count)
 		segs = append(segs, integrationSegment{text: text, width: width, url: prURL(pr.Repo, pr.Code)})
+	}
+	// Attached runes (LaunchDarkly flags) — just the state icon inline.
+	for _, key := range q.Runes {
+		segs = append(segs, integrationSegment{text: m.runeGlyph(key), width: 1})
 	}
 	return segs
 }

@@ -58,6 +58,11 @@ type Behavior struct {
 	// JiraBaseURL is the Jira instance base for building clickable browse
 	// links from an issue key.
 	JiraBaseURL string `toml:"jira_base_url"`
+	// LDProject is the LaunchDarkly project key that watched runes (feature
+	// flags) are looked up in via `ldcli`.
+	LDProject string `toml:"ld_project"`
+	// LDEnv is the LaunchDarkly environment whose targeting state a rune shows.
+	LDEnv string `toml:"ld_env"`
 }
 
 // Colors are hex values ("#E2B714"); each has a light- and dark-terminal
@@ -120,6 +125,8 @@ func Default() Config {
 			IntegrationsEnabled: true,
 			SyncIntervalSecs:    60,
 			JiraBaseURL:         "https://meetdandy.atlassian.net",
+			LDProject:           "default",
+			LDEnv:               "production",
 		},
 		Colors: Colors{
 			MainLight:           "#DF8E1D",

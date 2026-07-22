@@ -267,8 +267,11 @@ type Model struct {
 	integrationsEnabled bool
 	syncInterval        time.Duration
 	jiraBaseURL         string
+	ldProject           string // LaunchDarkly project for rune (flag) lookups
+	ldEnv               string // LaunchDarkly environment a rune's state is read in
 	prStatus            map[string]PRStatus
 	jiraStatus          map[string]JiraStatus
+	runeStatus          map[string]RuneStatus
 	syncing             bool
 	lastSyncAt          time.Time
 
@@ -372,6 +375,8 @@ type Options struct {
 	IntegrationsEnabled bool
 	SyncInterval        time.Duration
 	JiraBaseURL         string
+	LDProject           string // LaunchDarkly project for rune (flag) lookups
+	LDEnv               string // LaunchDarkly environment for rune state
 }
 
 func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
@@ -394,8 +399,11 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 		integrationsEnabled: opts.IntegrationsEnabled,
 		syncInterval:        opts.SyncInterval,
 		jiraBaseURL:         opts.JiraBaseURL,
+		ldProject:           opts.LDProject,
+		ldEnv:               opts.LDEnv,
 		prStatus:            map[string]PRStatus{},
 		jiraStatus:          map[string]JiraStatus{},
+		runeStatus:          map[string]RuneStatus{},
 		focusLinkIdx:        noSelection,
 	}
 	if rows := m.visibleRows(); len(rows) > 0 {
@@ -942,7 +950,7 @@ func (m *Model) insertQuestMetaRows(rows []ui.Row) []ui.Row {
 			continue
 		}
 		q := m.findQuest(r.QuestID)
-		if q == nil || (len(q.JiraCodes) == 0 && len(q.PRs) == 0 && len(q.AgentWorkspaces) == 0) {
+		if q == nil || (len(q.JiraCodes) == 0 && len(q.PRs) == 0 && len(q.AgentWorkspaces) == 0 && len(q.Runes) == 0) {
 			continue
 		}
 		out = append(out, ui.Row{Kind: ui.RowQuestMeta, QuestID: r.QuestID, ProjectID: r.ProjectID, Nested: r.Nested})

@@ -20,6 +20,7 @@ func TestSavePreservesUserData(t *testing.T) {
 
 	orig := &Store{
 		Projects: []model.Project{{ID: "p1", Name: "Proj"}},
+		Runes:    []string{"watched_flag_a", "watched_flag_b"},
 		Quests: []model.Quest{{
 			ID:              "q1",
 			Title:           "Has everything",
@@ -30,6 +31,7 @@ func TestSavePreservesUserData(t *testing.T) {
 			JiraCodes:       []string{"EPDCHAIR-5711", "ES-8858"},
 			PRs:             []model.PRLink{{Code: "#46098", Repo: "orthly/orthlyweb"}, {Code: "#46099", Repo: "orthly/orthlyweb"}},
 			AgentWorkspaces: []string{"wC", "w8"},
+			Runes:           []string{"scanneros_scan_stream_sync"},
 			Body:            []model.BodyLine{{ID: "b1", Text: "note"}},
 		}},
 	}
@@ -65,6 +67,12 @@ func TestSavePreservesUserData(t *testing.T) {
 	}
 	if len(q.Body) != 1 || q.Body[0].Text != "note" {
 		t.Errorf("Body lost/changed: %+v", q.Body)
+	}
+	if got := q.Runes; len(got) != 1 || got[0] != "scanneros_scan_stream_sync" {
+		t.Errorf("quest Runes lost/changed: %+v", got)
+	}
+	if got := s2.Runes; len(got) != 2 || got[0] != "watched_flag_a" || got[1] != "watched_flag_b" {
+		t.Errorf("store Runes lost/changed: %+v", got)
 	}
 }
 

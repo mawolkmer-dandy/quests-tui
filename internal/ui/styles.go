@@ -55,6 +55,13 @@ var (
 	GlyphStackBranchMid = "├" // a PR with another below it in the stack
 	GlyphStackBranchEnd = "└" // the last (deepest) PR in the stack
 
+	// LaunchDarkly "rune" (feature-flag) status icons (see internal/app/runes.go):
+	// a lit circle when the flag is on, a half circle for a targeted/partial
+	// rollout, a hollow circle when off.
+	GlyphRuneOn      = "●" // flag on (green)
+	GlyphRunePartial = "◐" // targeted / partial rollout (amber)
+	GlyphRuneOff     = "○" // flag off (muted)
+
 	// Claude-agent status icons (see internal/app/agents.go), traffic-light
 	// colored: blocked/waiting-for-input is red and demands attention, working
 	// is amber, idle/done are a green check, paused is a muted bar.

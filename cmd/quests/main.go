@@ -168,6 +168,8 @@ func main() {
 		IntegrationsEnabled: cfg.Behavior.IntegrationsEnabled,
 		SyncInterval:        time.Duration(syncSecs) * time.Second,
 		JiraBaseURL:         cfg.Behavior.JiraBaseURL,
+		LDProject:           cfg.Behavior.LDProject,
+		LDEnv:               cfg.Behavior.LDEnv,
 	})
 
 	if os.Getenv("QUESTS_DEBUG") != "" {
