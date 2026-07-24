@@ -11,11 +11,16 @@ import (
 // (shortening any remaining URLs to their code inline).
 var (
 	// jiraURLRE matches a Jira browse URL on any host, capturing the issue
-	// key (e.g. "EPDCHAIR-5713").
-	jiraURLRE = regexp.MustCompile(`https?://[^/\s]+/browse/([A-Z][A-Z0-9]+-\d+)`)
+	// key (e.g. "EPDCHAIR-5713"). A trailing path/query is consumed too so the
+	// whole URL is stripped, not just up to the key.
+	jiraURLRE = regexp.MustCompile(`https?://[^/\s]+/browse/([A-Z][A-Z0-9]+-\d+)\S*`)
 	// prURLRE matches a GitHub pull-request URL, capturing "owner/repo" and
-	// the PR number.
-	prURLRE = regexp.MustCompile(`https?://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)`)
+	// the PR number (trailing path/query consumed).
+	prURLRE = regexp.MustCompile(`https?://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)\S*`)
+	// ldURLRE matches a LaunchDarkly flag URL, capturing the flag key
+	// (e.g. "scanneros_impressions_smokescreen_lsr_enabled"); the trailing
+	// "/targeting?env=..." is consumed so the entire URL is stripped.
+	ldURLRE = regexp.MustCompile(`https?://app\.launchdarkly\.com/projects/[^/\s]+/flags/([A-Za-z0-9_.-]+)\S*`)
 )
 
 // LinkRef is one detected link and its short code — the code being what the
@@ -72,13 +77,23 @@ func DetectPRs(text string) []PRRef {
 	return refs
 }
 
-// StripLinks removes every Jira browse URL and GitHub PR URL from text and
-// tidies the doubled / edge whitespace their removal leaves behind, returning
-// the cleaned text. Used by the paste-time capture path to pull a pasted URL
-// out of the line once its code has been captured.
+// DetectLDFlags returns every LaunchDarkly flag key in text, in reading order.
+func DetectLDFlags(text string) []string {
+	var keys []string
+	for _, m := range ldURLRE.FindAllStringSubmatch(text, -1) {
+		keys = append(keys, m[1])
+	}
+	return keys
+}
+
+// StripLinks removes every Jira browse, GitHub PR, and LaunchDarkly flag URL
+// from text and tidies the doubled / edge whitespace their removal leaves
+// behind, returning the cleaned text. Used by the paste-time capture path to
+// pull a pasted URL out of the line once it's been captured onto the quest.
 func StripLinks(text string) string {
 	text = jiraURLRE.ReplaceAllString(text, "")
 	text = prURLRE.ReplaceAllString(text, "")
+	text = ldURLRE.ReplaceAllString(text, "")
 	text = collapseSpacesRE.ReplaceAllString(text, " ")
 	return strings.TrimSpace(text)
 }

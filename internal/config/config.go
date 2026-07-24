@@ -31,10 +31,6 @@ type Behavior struct {
 	// LowPriorityToBottom sinks low-priority quests to the bottom of their
 	// list, just above completed ones.
 	LowPriorityToBottom bool `toml:"low_priority_to_bottom"`
-	// QuestboardCollapsed starts the Questboard section collapsed.
-	QuestboardCollapsed bool `toml:"questboard_collapsed"`
-	// VaultCollapsed starts the Vault section collapsed.
-	VaultCollapsed bool `toml:"vault_collapsed"`
 	// ShowHints shows the inline action hints ("→ open (tab)"); toggleable
 	// at runtime either way.
 	ShowHints bool `toml:"show_hints"`
@@ -115,8 +111,6 @@ func Default() Config {
 			MainToTop:           true,
 			PriorityToTop:       true,
 			LowPriorityToBottom: true,
-			QuestboardCollapsed: true,
-			VaultCollapsed:      true,
 			ShowHints:           true,
 			Animations:          true,
 			Greeting:            "",
@@ -210,9 +204,6 @@ done_to_bottom = true          # sink completed quests to the bottom
 main_to_top = true             # float main quests to the top
 priority_to_top = true         # float medium/high priority quests to the top
 low_priority_to_bottom = true  # sink low-priority quests (just above done)
-# Start the Questboard and Vault sections collapsed.
-questboard_collapsed = true
-vault_collapsed = true
 # Show the inline action hints ("→ open (tab)"); toggleable at runtime too.
 show_hints = true
 # Play the environment-change animation (startup, Tavern⇄Wilds, filtering).

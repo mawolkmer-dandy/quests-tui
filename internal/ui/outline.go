@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -26,6 +27,17 @@ const (
 	// It's deliberately absent from Selectable() so cursor nav and the mouse
 	// skip it, keeping one selectable row per screen line.
 	RowQuestMeta
+	// RowRune is one watched LaunchDarkly flag in the Tavern's Runes section;
+	// RowNewRune is the "+ watch a rune" affordance below them.
+	RowRune
+	RowNewRune
+	// RowDayHeader is a non-selectable date divider in the Vault's timeline
+	// (Label holds the day). RowVaultCampaign is a retired campaign shown as a
+	// single muted inline row at the top of the Vault. RowRuneQuest is a
+	// collapsible quest header in the Runes section (its runes are its children).
+	RowDayHeader
+	RowVaultCampaign
+	RowRuneQuest
 )
 
 // Row is one visible line of the outline. Quest rows under a project don't
@@ -43,6 +55,7 @@ type Row struct {
 	Collapsed      bool
 	ShowProjectTag bool
 	Nested         bool
+	RuneKey        string // for RowRune: the LaunchDarkly flag key
 }
 
 // Selectable reports whether a row can ever be the cursor target — spacers
@@ -50,7 +63,7 @@ type Row struct {
 // all button (see RowLabel in RenderRow), so it's selectable too.
 func (r Row) Selectable() bool {
 	switch r.Kind {
-	case RowProject, RowQuest, RowSection, RowNewProject, RowNewQuest, RowLabel:
+	case RowProject, RowQuest, RowSection, RowNewProject, RowNewQuest, RowLabel, RowRune, RowNewRune, RowVaultCampaign, RowRuneQuest:
 		return true
 	}
 	return false
@@ -126,18 +139,19 @@ func questPriority(q model.Quest) int {
 	}
 }
 
-// priorityIndicator renders the 4-col slot left of a quest's glyph for its
-// priority level, blank when none — kept a fixed width so glyphs stay aligned.
+// priorityIndicator renders the 2-col slot left of a quest's glyph for its
+// priority level (arrow + space), blank when none — kept a fixed width so
+// glyphs stay aligned.
 func priorityIndicator(p model.Priority) string {
 	switch p {
 	case model.PriorityMedium:
-		return "  " + StylePriorityMedium.Render(GlyphImportant) + " "
+		return StylePriorityMedium.Render(GlyphImportant) + " "
 	case model.PriorityHigh:
-		return "  " + StyleImportant.Render(GlyphImportant) + " "
+		return StyleImportant.Render(GlyphImportant) + " "
 	case model.PriorityLow:
-		return "  " + StyleMuted.Render(GlyphPriorityLow) + " "
+		return StyleMuted.Render(GlyphPriorityLow) + " "
 	default:
-		return "    "
+		return "  "
 	}
 }
 
@@ -238,54 +252,223 @@ func CountArchived(s *store.Store) int {
 // out of sync with a mutation.
 func BuildRows(s *store.Store, collapsedProjects, collapsedSections map[string]bool) []Row {
 	var rows []Row
+	rows = append(rows, inboxRows(s, collapsedSections)...)
+	rows = append(rows, campaignRows(s, collapsedProjects)...)
+	rows = append(rows, runesRows(s, collapsedProjects, collapsedSections)...)
+	rows = append(rows, vaultRows(s, collapsedProjects, collapsedSections)...)
+	return addSpacers(rows)
+}
 
-	// allowNewQuest is false for archived campaigns nested in the Vault —
-	// quests only enter the Vault via Ctrl+V, never created there directly.
-	appendProject := func(p model.Project, nested, allowNewQuest bool) {
-		collapsed := collapsedProjects[p.ID]
-		rows = append(rows, Row{Kind: RowProject, ProjectID: p.ID, Collapsed: collapsed, Nested: nested})
-		if collapsed {
-			return
-		}
-		for _, q := range questsForProject(s, p.ID) {
-			rows = append(rows, Row{Kind: RowQuest, ProjectID: p.ID, QuestID: q.ID, Nested: nested})
-		}
-		if allowNewQuest {
-			rows = append(rows, Row{Kind: RowNewQuest, ProjectID: p.ID, Nested: nested})
-		}
+// BuildCampaignColumn is the two-column Tavern's campaigns column (the right
+// side): the Campaigns label followed by every campaign and its quests. Each
+// campaign is separated by a spacer for breathing room inside its box.
+func BuildCampaignColumn(s *store.Store, collapsedProjects map[string]bool) []Row {
+	return addSpacers(campaignRows(s, collapsedProjects))
+}
+
+// BuildRailColumn is the two-column Tavern's left rail: Questboard, then Runes,
+// then the Vault — three sections concatenated (each begins with its
+// RowSection header). The renderer splits on those headers into separate boxes;
+// no spacers, so it can lay them out and pin the Vault itself.
+func BuildRailColumn(s *store.Store, collapsedProjects, collapsedSections map[string]bool) []Row {
+	var rows []Row
+	rows = append(rows, inboxRows(s, collapsedSections)...)
+	rows = append(rows, runesRows(s, collapsedProjects, collapsedSections)...)
+	rows = append(rows, vaultRows(s, collapsedProjects, collapsedSections)...)
+	return rows
+}
+
+// appendProject appends a campaign header and, unless collapsed, its quests
+// (and a "+ New Quest" affordance when allowNewQuest). allowNewQuest is false
+// for archived campaigns nested in the Vault — quests only enter the Vault via
+// Ctrl+V, never created there directly.
+func appendProject(s *store.Store, rows []Row, p model.Project, collapsedProjects map[string]bool, nested, allowNewQuest bool) []Row {
+	collapsed := collapsedProjects[p.ID]
+	rows = append(rows, Row{Kind: RowProject, ProjectID: p.ID, Collapsed: collapsed, Nested: nested})
+	if collapsed {
+		return rows
 	}
-
-	inboxCollapsed := collapsedSections["inbox"]
-	rows = append(rows, Row{Kind: RowSection, Section: "inbox", Collapsed: inboxCollapsed})
-	if !inboxCollapsed {
-		for _, q := range questsForInbox(s) {
-			rows = append(rows, Row{Kind: RowQuest, QuestID: q.ID})
-		}
-		rows = append(rows, Row{Kind: RowNewQuest})
+	for _, q := range questsForProject(s, p.ID) {
+		rows = append(rows, Row{Kind: RowQuest, ProjectID: p.ID, QuestID: q.ID, Nested: nested})
 	}
+	if allowNewQuest {
+		rows = append(rows, Row{Kind: RowNewQuest, ProjectID: p.ID, Nested: nested})
+	}
+	return rows
+}
 
-	rows = append(rows, Row{Kind: RowLabel, Label: "Campaigns", Collapsed: allCampaignsCollapsed(s, collapsedProjects)})
+func inboxRows(s *store.Store, collapsedSections map[string]bool) []Row {
+	collapsed := collapsedSections["inbox"]
+	rows := []Row{{Kind: RowSection, Section: "inbox", Collapsed: collapsed}}
+	if collapsed {
+		return rows
+	}
+	for _, q := range questsForInbox(s) {
+		rows = append(rows, Row{Kind: RowQuest, QuestID: q.ID})
+	}
+	return append(rows, Row{Kind: RowNewQuest})
+}
+
+func campaignRows(s *store.Store, collapsedProjects map[string]bool) []Row {
+	rows := []Row{{Kind: RowLabel, Label: "Campaigns", Collapsed: allCampaignsCollapsed(s, collapsedProjects)}}
 	for _, p := range s.Projects {
 		if !p.Archived {
-			appendProject(p, false, true)
+			rows = appendProject(s, rows, p, collapsedProjects, false, true)
 		}
 	}
-	rows = append(rows, Row{Kind: RowNewProject})
+	return append(rows, Row{Kind: RowNewProject})
+}
 
-	vaultCollapsed := collapsedSections["someday"]
-	rows = append(rows, Row{Kind: RowSection, Section: "someday", Collapsed: vaultCollapsed})
-	if !vaultCollapsed {
-		for _, q := range questsForSomeday(s) {
+// runesRows draws the Runes section from every un-vaulted quest's attached
+// flags (no manual watch list) — grouped under a collapsible quest header.
+// Vaulted quests drop out (their flags aren't worth watching anymore). Each
+// quest group's collapse state is keyed by quest ID in collapsedProjects
+// (quest IDs never collide with project IDs).
+func runesRows(s *store.Store, collapsedProjects, collapsedSections map[string]bool) []Row {
+	collapsed := collapsedSections["runes"]
+	rows := []Row{{Kind: RowSection, Section: "runes", Collapsed: collapsed}}
+	if collapsed {
+		return rows
+	}
+	first := true
+	for i := range s.Quests {
+		q := &s.Quests[i]
+		if len(q.Runes) == 0 || questVaulted(s, q) {
+			continue
+		}
+		if !first {
+			rows = append(rows, Row{Kind: RowSpacer})
+		}
+		first = false
+		qCollapsed := collapsedProjects[q.ID]
+		rows = append(rows, Row{Kind: RowRuneQuest, Label: q.Title, QuestID: q.ID, Collapsed: qCollapsed})
+		if qCollapsed {
+			continue
+		}
+		for _, key := range q.Runes {
+			rows = append(rows, Row{Kind: RowRune, RuneKey: key, QuestID: q.ID})
+		}
+	}
+	return rows
+}
+
+// questVaulted reports whether a quest is parked in the Vault directly or via
+// an archived campaign.
+func questVaulted(s *store.Store, q *model.Quest) bool {
+	if q.Vaulted {
+		return true
+	}
+	if q.ProjectID != "" {
+		if p := findProject(s, q.ProjectID); p != nil && p.Archived {
+			return true
+		}
+	}
+	return false
+}
+
+// CountRunes is the number of rune rows shown in the Tavern (attached runes
+// across un-vaulted quests).
+func CountRunes(s *store.Store) int {
+	n := 0
+	for i := range s.Quests {
+		if q := &s.Quests[i]; !questVaulted(s, q) {
+			n += len(q.Runes)
+		}
+	}
+	return n
+}
+
+func vaultRows(s *store.Store, collapsedProjects, collapsedSections map[string]bool) []Row {
+	collapsed := collapsedSections["someday"]
+	rows := []Row{{Kind: RowSection, Section: "someday", Collapsed: collapsed}}
+	if collapsed {
+		return rows
+	}
+	// Retired campaigns first, as muted inline rows.
+	for _, p := range s.Projects {
+		if p.Archived {
+			rows = append(rows, Row{Kind: RowVaultCampaign, ProjectID: p.ID})
+		}
+	}
+	// Then parked quests as a timeline, newest day first, each day a divider.
+	for i, g := range groupVaultByDay(questsForSomeday(s)) {
+		if i > 0 || len(rows) > 1 {
+			rows = append(rows, Row{Kind: RowSpacer})
+		}
+		rows = append(rows, Row{Kind: RowDayHeader, Label: g.label})
+		for _, q := range g.quests {
 			rows = append(rows, Row{Kind: RowQuest, ProjectID: q.ProjectID, QuestID: q.ID, ShowProjectTag: q.ProjectID != ""})
 		}
-		for _, p := range s.Projects {
-			if p.Archived {
-				appendProject(p, true, false)
-			}
-		}
 	}
+	return rows
+}
 
-	return addSpacers(rows)
+// vaultDay groups quests parked on the same calendar day.
+type vaultDay struct {
+	label  string
+	key    string
+	quests []model.Quest
+}
+
+// vaultMoment is when a quest entered the Vault — its VaultedAt, falling back to
+// CompletedAt then UpdatedAt for quests parked before VaultedAt was recorded.
+func vaultMoment(q model.Quest) time.Time {
+	if q.VaultedAt != nil {
+		return *q.VaultedAt
+	}
+	if q.CompletedAt != nil {
+		return *q.CompletedAt
+	}
+	return q.UpdatedAt
+}
+
+// groupVaultByDay buckets quests by the day they were vaulted, newest day
+// first, and labels each day relative to today (Today / Yesterday / date).
+func groupVaultByDay(quests []model.Quest) []vaultDay {
+	sorted := make([]model.Quest, len(quests))
+	copy(sorted, quests)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return vaultMoment(sorted[i]).After(vaultMoment(sorted[j]))
+	})
+
+	var days []vaultDay
+	byKey := map[string]int{}
+	now := time.Now()
+	for _, q := range sorted {
+		t := vaultMoment(q)
+		key := t.Format("2006-01-02")
+		idx, ok := byKey[key]
+		if !ok {
+			idx = len(days)
+			byKey[key] = idx
+			days = append(days, vaultDay{label: relativeDay(t, now), key: key})
+		}
+		days[idx].quests = append(days[idx].quests, q)
+	}
+	return days
+}
+
+// relativeDay labels t as Today / Yesterday, or a "Mon, Jan 2" date otherwise.
+func relativeDay(t, now time.Time) string {
+	d := daysBetween(t, now)
+	switch d {
+	case 0:
+		return "Today"
+	case 1:
+		return "Yesterday"
+	}
+	if t.Year() == now.Year() {
+		return t.Format("Mon, Jan 2")
+	}
+	return t.Format("Mon, Jan 2 2006")
+}
+
+func daysBetween(t, now time.Time) int {
+	ty, tm, td := t.Date()
+	ny, nm, nd := now.Date()
+	a := time.Date(ty, tm, td, 0, 0, 0, 0, time.Local)
+	b := time.Date(ny, nm, nd, 0, 0, 0, 0, time.Local)
+	return int(b.Sub(a).Hours() / 24)
 }
 
 // addSpacers inserts a blank, non-selectable row before each top-level
@@ -333,6 +516,8 @@ func sectionInfo(s *store.Store, section string) (string, int) {
 		return "Questboard", CountInbox(s)
 	case "someday":
 		return "Vault", CountSomeday(s) + CountArchived(s)
+	case "runes":
+		return "Runes", CountRunes(s)
 	}
 	return section, 0
 }
@@ -378,7 +563,7 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor bool, width i
 		}
 		name := titleView
 		if name == "" {
-			name = StyleTitle.Render(p.Name)
+			name = StyleName.Render(p.Name)
 		}
 		done, total := projectProgress(s, p.ID)
 		progress := StyleMuted.Render(fmt.Sprintf("%s %d/%d", model.ProgressBucket(done, total), done, total))
@@ -401,7 +586,7 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor bool, width i
 			if q.Status == model.StatusDone {
 				title = StyleDone.Render(q.Title)
 			} else {
-				title = StyleTitle.Render(q.Title)
+				title = StyleName.Render(q.Title)
 			}
 		}
 		tag := ""
@@ -414,19 +599,19 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor bool, width i
 		if done, total := q.ObjectiveProgress(); total > 0 {
 			progress = StyleMuted.Render(fmt.Sprintf(" %d/%d", done, total))
 		}
-		// The quest's "next action": its first not-done objective, shown inline
-		// right of the count with the same muted objective glyph as the body.
-		next := ""
-		if text, ok := q.NextObjective(); ok {
-			next = StyleMuted.Render(" " + GlyphQuestOpen + " " + text)
-		}
 		// The 4-col slot before the glyph holds the priority arrow (up for
 		// medium/high, a muted down-arrow for low), else stays blank — either
 		// way 4 wide, so glyphs stay column-aligned across the list.
-		return withHint(fmt.Sprintf("%s%s%s%s %s%s%s%s", cursorMark, nestIndent, priorityIndicator(q.Priority), iconView, title, tag, progress, next)), hintX
+		return withHint(fmt.Sprintf("%s%s%s%s %s%s%s", cursorMark, nestIndent, priorityIndicator(q.Priority), iconView, title, tag, progress)), hintX
 
 	case RowSection:
 		label, count := sectionInfo(s, row.Section)
+		// The Vault reads like an old strongbox: an aged/rusted label with a
+		// heavy-door block ornament, rather than a plain live section header.
+		if row.Section == "someday" {
+			framed := StyleVaultFrame.Render(fmt.Sprintf("▓ %s (%d)", label, count))
+			return withHint(fmt.Sprintf("%s%s %s", cursorMark, caret(row.Collapsed), framed)), hintX
+		}
 		return withHint(StyleSectionHeader.Render(fmt.Sprintf("%s%s %s (%d)", cursorMark, caret(row.Collapsed), label, count))), hintX
 
 	case RowNewProject:
@@ -435,8 +620,45 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor bool, width i
 	case RowNewQuest:
 		return fmt.Sprintf("%s%s    %s", cursorMark, nestIndent, StyleMuted.Render("+ New Quest")), -1
 
+	case RowRune:
+		// titleView is the app-rendered "glyph key  state" content (the live
+		// rollout state lives in the app, not here) — indented under its
+		// quest header.
+		return withHint(fmt.Sprintf("%s  %s", cursorMark, titleView)), hintX
+
+	case RowNewRune:
+		return fmt.Sprintf("%s  %s", cursorMark, StyleMuted.Render("⚹ watch a rune")), -1
+
+	case RowRuneQuest:
+		// A collapsible quest header in the Runes section — white name (bold when
+		// selected), like a campaign but for the flag groups.
+		name := row.Label
+		if isCursor {
+			name = StyleTitle.Render(name)
+		} else {
+			name = StyleName.Render(name)
+		}
+		return withHint(fmt.Sprintf("%s%s %s", cursorMark, caret(row.Collapsed), name)), hintX
+
+	case RowDayHeader:
+		return StyleMuted.Render(row.Label), -1
+
+	case RowVaultCampaign:
+		p := findProject(s, row.ProjectID)
+		if p == nil {
+			return "", -1
+		}
+		name := titleView
+		if name == "" {
+			name = StyleMuted.Render(p.Name)
+		}
+		return withHint(fmt.Sprintf("%s%s %s", cursorMark, StyleMuted.Render("⌂"), name)), hintX
+
 	case RowLabel:
-		return withHint(cursorMark + StyleSectionHeader.Render(row.Label)), hintX
+		banner := StyleOrnament.Render(GlyphFlourishL) + " " +
+			StyleSectionHeader.Render(row.Label) + " " +
+			StyleOrnament.Render(GlyphFlourishR)
+		return withHint(cursorMark + banner), hintX
 
 	case RowSpacer:
 		return "", -1

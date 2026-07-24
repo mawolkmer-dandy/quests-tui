@@ -44,6 +44,25 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.animateFilter(func() { m.cycleQuickFilter(-1) })
 	case m.wilds && key.Matches(msg, Keys.Right):
 		return m.animateFilter(func() { m.cycleQuickFilter(1) })
+	// Two-column Tavern: jump to a section (Ctrl+B/R/E) or switch columns with
+	// Left/Right once the caret is at the title's edge (otherwise the arrow
+	// keeps editing text).
+	case m.twoColumn() && msg.String() == "ctrl+b":
+		m.jumpToSection("inbox")
+		return nil
+	case m.twoColumn() && msg.String() == "ctrl+r":
+		m.jumpToSection("runes")
+		return nil
+	case m.twoColumn() && msg.String() == "ctrl+e":
+		m.jumpToSection("campaigns")
+		return nil
+	// The rail is the left column, campaigns the right: Left→rail, Right→campaigns.
+	case m.twoColumn() && key.Matches(msg, Keys.Left) && m.caretAtStart():
+		m.switchColumn(true)
+		return nil
+	case m.twoColumn() && key.Matches(msg, Keys.Right) && m.caretAtEnd():
+		m.switchColumn(false)
+		return nil
 	case key.Matches(msg, Keys.Up):
 		m.moveCursor(-1)
 		return nil
@@ -82,6 +101,9 @@ func (m *Model) handleRowKey(msg tea.KeyMsg) tea.Cmd {
 				m.removeCurrentRow(func() { m.deleteQuestByID(id) })
 			case ui.RowProject:
 				m.removeCurrentRow(func() { m.deleteProjectByID(id) })
+			case ui.RowRune:
+				qid := target.questID
+				m.removeCurrentRow(func() { m.detachRuneFromQuest(qid, id) })
 			}
 		}
 		return nil
@@ -338,7 +360,11 @@ func (m *Model) toggleReveal() {
 		m.collapsedProjects[m.cursor.projectID] = !m.collapsedProjects[m.cursor.projectID]
 	case ui.RowSection:
 		m.collapsedSections[m.cursor.section] = !m.collapsedSections[m.cursor.section]
+	case ui.RowRuneQuest:
+		// Rune-quest groups reuse collapsedProjects keyed by quest ID.
+		m.collapsedProjects[m.cursor.questID] = !m.collapsedProjects[m.cursor.questID]
 	}
+	m.invalidateRender()
 }
 
 // handleReveal is Tab: opens a focused, full-screen detail view for a
@@ -361,6 +387,10 @@ func (m *Model) handleReveal() tea.Cmd {
 			m.pushModal(questDetailModal(q))
 		}
 	case ui.RowSection:
+		// Runes have no focused page — Tab does nothing (Enter still toggles).
+		if m.cursor.section == "runes" {
+			return nil
+		}
 		m.commitEdit()
 		section := m.cursor.section
 		m.pushModal(sectionDetailModal(section))
@@ -405,8 +435,14 @@ func (m *Model) handleEnter() tea.Cmd {
 		q := m.newQuestUnder(row.ProjectID, model.StatusOpen)
 		m.setCursor(ui.Row{Kind: ui.RowQuest, ProjectID: q.ProjectID, QuestID: q.ID})
 
-	case ui.RowProject, ui.RowSection:
+	case ui.RowProject, ui.RowSection, ui.RowRuneQuest:
 		m.toggleReveal()
+
+	case ui.RowRune:
+		return openURL(ldFlagURL(m.ldProject, m.ldEnv, row.RuneKey))
+
+	case ui.RowNewRune:
+		m.openRunePicker("")
 
 	case ui.RowLabel:
 		m.toggleAllCampaigns()
@@ -577,9 +613,19 @@ func (m *Model) toggleVault() {
 			return
 		}
 		q.Vaulted = !q.Vaulted
-		q.UpdatedAt = time.Now()
+		now := time.Now()
+		q.UpdatedAt = now
+		if q.Vaulted {
+			// Anything parked in the Vault is considered finished with — mark it
+			// done and stamp when it went in (drives the Vault's day timeline).
+			q.Status = model.StatusDone
+			q.CompletedAt = &now
+			q.VaultedAt = &now
+		} else {
+			q.VaultedAt = nil
+		}
 		m.save()
-	case ui.RowProject:
+	case ui.RowProject, ui.RowVaultCampaign:
 		p := m.findProject(m.cursor.projectID)
 		if p == nil {
 			return
@@ -676,6 +722,8 @@ func (m *Model) openConfirmDelete() {
 			return
 		}
 		m.confirmDeleteID = m.cursor.projectID
+	case ui.RowRune:
+		m.confirmDeleteID = m.cursor.runeKey
 	}
 }
 
@@ -717,7 +765,7 @@ func titleOffset(row ui.Row, nestOffset int) int {
 	if row.Kind == ui.RowProject {
 		return 4 + nestOffset
 	}
-	return 8 + nestOffset
+	return 6 + nestOffset // cursor(2) + priority(2) + glyph(1) + space(1)
 }
 
 func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
@@ -740,6 +788,13 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		delta := 1
 		if msg.Button == tea.MouseButtonWheelUp {
 			delta = -1
+		}
+		// In the two-column Tavern the wheel scrolls whichever section it's over
+		// (its own scroll view), moving the cursor only when that section holds
+		// it. Elsewhere it moves the cursor as before.
+		if m.twoColumn() {
+			m.wheelSection(m.sectionAtPoint(msg), delta)
+			return nil
 		}
 		m.moveCursor(delta)
 		return nil
@@ -771,6 +826,12 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 
+	// Two-column Tavern clicks are mapped by the per-column line→row tables the
+	// renderer built (boxes shift lines, so plain arithmetic won't do).
+	if m.twoColumn() {
+		return m.handleTwoColumnClick(msg)
+	}
+
 	relY := msg.Y - m.rowsScreenTop
 	if relY < 0 {
 		return nil // clicked the logo/blank area above the rows
@@ -779,13 +840,24 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	if idx < 0 || idx >= len(rows) {
 		return nil
 	}
+	return m.clickRowAt(rows, idx, msg, m.leftMargin)
+}
+
+// clickRowAt handles a left-press on the row at idx of rows: opening a meta
+// line's code, moving the cursor, firing a clicked hint, or the per-kind
+// default (toggle collapse/done, open a rune, add). colX is the column's
+// content left edge — relX is measured from it, matching how hint/code spans
+// were recorded.
+func (m *Model) clickRowAt(rows []ui.Row, idx int, msg tea.MouseMsg, colX int) tea.Cmd {
+	if idx < 0 || idx >= len(rows) {
+		return nil
+	}
 	row := rows[idx]
 	if row.Kind == ui.RowSpacer {
 		return nil
 	}
-	// A click on an integration code in a quest's meta sub-line opens its
-	// URL. Meta rows aren't selectable, so this is handled before any cursor
-	// move (which would otherwise reject them).
+	// A click on an integration code in a quest's meta sub-line opens its URL.
+	// Meta rows aren't selectable, so this is handled before any cursor move.
 	if row.Kind == ui.RowQuestMeta {
 		for _, sp := range m.codeSpans[idx] {
 			if msg.X >= sp.x0 && msg.X < sp.x1 {
@@ -794,7 +866,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		}
 		return nil
 	}
-	relX := msg.X - m.leftMargin
+	relX := msg.X - colX
 	nestOffset := 0
 	if row.Nested {
 		nestOffset = 2
@@ -817,6 +889,8 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	}
 
 	switch row.Kind {
+	case ui.RowLabel:
+		return m.handleEnter() // the Campaigns banner toggles collapse-all
 	case ui.RowProject, ui.RowSection:
 		if relX <= 3+nestOffset {
 			m.toggleReveal()
@@ -824,11 +898,13 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 			m.beginTextSelection(m.editor, relX-titleOffset(row, nestOffset))
 		}
 	case ui.RowQuest:
-		if relX >= 5+nestOffset && relX <= 7+nestOffset {
+		if relX >= 4+nestOffset && relX <= 5+nestOffset {
 			return m.toggleDone()
 		}
 		m.beginTextSelection(m.editor, relX-titleOffset(row, nestOffset))
-	case ui.RowNewProject, ui.RowNewQuest:
+	case ui.RowRune:
+		return openURL(ldFlagURL(m.ldProject, m.ldEnv, row.RuneKey))
+	case ui.RowNewProject, ui.RowNewQuest, ui.RowNewRune:
 		return m.handleEnter()
 	}
 	return nil

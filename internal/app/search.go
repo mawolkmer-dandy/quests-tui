@@ -69,6 +69,7 @@ func (m *Model) openSearch() {
 	}
 	m.commitEdit()
 	m.searchOpen = true
+	m.railFocus = false // search collapses to one column; return to the left column on close
 	m.searchFocus = focusText
 	m.searchInput = newSearchInput()
 	m.fPriority, m.fStatus, m.fType = fpAny, fsAny, ftAny

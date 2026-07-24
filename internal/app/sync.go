@@ -92,6 +92,7 @@ func (m *Model) applySyncResult(msg syncResultMsg) {
 	}
 	m.lastSyncAt = time.Now()
 	m.syncing = false
+	m.invalidateRender() // integration statuses changed → refresh cached content
 }
 
 // collectSyncTargets gathers the distinct PRs and Jira issues linked across
@@ -102,6 +103,9 @@ func (m *Model) collectSyncTargets() (prs []syncTarget, jira []string) {
 	seenJira := map[string]bool{}
 	for i := range m.store.Quests {
 		q := &m.store.Quests[i]
+		if m.isVaulted(q) {
+			continue // vaulted quests are silent — keep their links, don't fetch
+		}
 		for _, pr := range q.PRs {
 			if pr.Code != "" && pr.Repo != "" && !seenPR[pr.Code] {
 				seenPR[pr.Code] = true
@@ -661,9 +665,16 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 			return "  " + ui.StyleImportant.Render("remove this link? y/n")
 		}
 		switch kind {
+		case linkToggleConn:
+			if q.ConnectionsCollapsed {
+				return "  " + ui.StyleMuted.Render("↵ show")
+			}
+			return "  " + ui.StyleMuted.Render("↵ hide")
 		case linkAddAgent:
 			return "  " + ui.StyleMuted.Render("↵ add")
-		default: // linkAgent (open the herdr pane), linkJira/linkPR (open URL)
+		case linkAddRune:
+			return "  " + ui.StyleMuted.Render("↵ attach")
+		default: // linkAgent/linkJira/linkPR/linkRune — open + remove
 			return "  " + ui.StyleMuted.Render("↵ open · "+Keys.Delete.Help().Key+" remove")
 		}
 	}
@@ -676,7 +687,9 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		gutter := marker + strings.Repeat(" ", gutterW-lipgloss.Width(marker))
 		x := m.focusLeftMargin + indent + gutterW + lipgloss.Width(glyph) + 1
 		codePadded := code + strings.Repeat(" ", codeW-lipgloss.Width(code))
-		body := ui.StyleMuted.Render(codePadded) + "  " + text
+		// The code (Jira/PR id) reads white like the NPC label and rune keys;
+		// only the trailing status word is muted.
+		body := ui.StyleName.Render(codePadded) + "  " + text
 		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: url})
 		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: kind, code: code, url: url})
 		if m.focusLinkIdx == li {
@@ -686,60 +699,140 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		ln++
 	}
 
-	// Pinned herdr agents come FIRST, aligned with the code lines (indent +
-	// gutter) so their status icon lines up under the Jira/PR glyphs. Enter
-	// focuses the workspace in herdr; Ctrl+X unpins. When none are pinned, a
-	// muted "+ add Claude agent" affordance takes the slot; once one is pinned
-	// it's gone (unpin to add a different one).
 	agentPrefix := pad + strings.Repeat(" ", gutterW)
-	for _, id := range q.AgentWorkspaces {
-		li := len(m.focusLinks)
-		state := m.workspaceState(id)
-		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAgent, code: id})
-		if m.focusLinkIdx == li {
-			m.focusCaretLine = ln
-		}
-		lines = append(lines, agentPrefix+m.agentGlyph(state)+" "+m.workspaceLabel(id)+"  "+
-			ui.StyleMuted.Render(agentWord(state))+hintFor(li, linkAgent))
-		ln++
+	silent := m.isVaulted(q)
+
+	// Master "Connections" header — Enter/click collapses to just the body.
+	toggleLi := len(m.focusLinks)
+	m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkToggleConn})
+	if m.focusLinkIdx == toggleLi {
+		m.focusCaretLine = ln
 	}
-	if len(q.AgentWorkspaces) == 0 {
-		li := len(m.focusLinks)
-		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAddAgent})
-		if m.focusLinkIdx == li {
-			m.focusCaretLine = ln
-		}
-		label := "+ add Claude agent"
-		x0 := m.focusLeftMargin + indent + gutterW
-		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{
-			line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: addAgentSentinel,
-		})
-		lines = append(lines, agentPrefix+ui.StyleMuted.Render(label)+hintFor(li, linkAddAgent))
+	caret := ui.GlyphExpanded
+	if q.ConnectionsCollapsed {
+		caret = ui.GlyphCollapsed
+	}
+	title := caret + " Sigils"
+	if q.ConnectionsCollapsed {
+		title += fmt.Sprintf(" (%d)", connectionCount(q))
+	}
+	if silent {
+		title += ui.StyleMuted.Render("  · vaulted (silent)")
+	}
+	tx0 := m.focusLeftMargin + indent
+	m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: tx0, x1: tx0 + lipgloss.Width(title), url: toggleConnSentinel})
+	lines = append(lines, pad+ui.StyleSectionHeader.Render(title)+hintFor(toggleLi, linkToggleConn))
+	ln++
+
+	// sectionHeader emits a blank spacer then a muted "emblem Name" line
+	// (non-navigable), so each section has a little breathing room above it.
+	sectionHeader := func(glyph, name string) {
+		lines = append(lines, "", agentPrefix+ui.StyleMuted.Render(glyph+" "+name))
+		ln += 2
+	}
+	// pasteHint emits a muted "add by pasting a link" affordance (non-navigable —
+	// every connection is added by pasting its URL into the body). Only shown
+	// for an empty section; once there's a connection the hint drops away.
+	pasteHint := func(what string) {
+		lines = append(lines, agentPrefix+strings.Repeat(" ", 2)+ui.StyleMuted.Render("+ paste a "+what+" link"))
 		ln++
 	}
 
-	for _, code := range q.JiraCodes {
-		text := ui.StyleMuted.Render(m.jiraStatusWord(code))
-		addLink("", m.jiraGlyph(code), code, text, linkJira, jiraURL(code, m.jiraBaseURL))
-	}
-
-	for i, node := range stack {
-		pr := node.link
-		glyph, _ := m.prGlyph(pr.Code)
-		text := ui.StyleMuted.Render(m.prStatusWord(pr.Code) + " · " + m.prCommentsText(pr.Code))
-		// Only PRs in a real stack get a tree marker. A component's members
-		// are contiguous, so the current node is the last of its stack when the
-		// next node starts a new component (depth 0) or the slice ends.
-		marker := ""
-		if node.stacked {
-			marker = ui.GlyphStackBranchMid
-			if i == len(stack)-1 || stack[i+1].depth == 0 {
-				marker = ui.GlyphStackBranchEnd
+	if !q.ConnectionsCollapsed {
+		// NPCs (pinned agents).
+		sectionHeader(ui.GlyphConnNPC, "NPCs")
+		for _, id := range q.AgentWorkspaces {
+			li := len(m.focusLinks)
+			state := m.workspaceState(id)
+			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAgent, code: id})
+			if m.focusLinkIdx == li {
+				m.focusCaretLine = ln
 			}
+			lines = append(lines, agentPrefix+m.agentGlyph(state)+" "+m.workspaceLabel(id)+"  "+
+				ui.StyleMuted.Render(agentWord(state))+hintFor(li, linkAgent))
+			ln++
 		}
-		addLink(marker, glyph, pr.Code, text, linkPR, prURL(pr.Repo, pr.Code))
+		if len(q.AgentWorkspaces) == 0 {
+			li := len(m.focusLinks)
+			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAddAgent})
+			if m.focusLinkIdx == li {
+				m.focusCaretLine = ln
+			}
+			label := "+ select a Herdr agent"
+			x0 := m.focusLeftMargin + indent + gutterW + 2 // align with the paste-link affordances
+			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: addAgentSentinel})
+			lines = append(lines, agentPrefix+"  "+ui.StyleMuted.Render(label)+hintFor(li, linkAddAgent))
+			ln++
+		}
+
+		// Scrolls (Jira).
+		sectionHeader(ui.GlyphConnScroll, "Scrolls")
+		for _, code := range q.JiraCodes {
+			text := ui.StyleMuted.Render(m.jiraStatusWord(code))
+			addLink("", m.jiraGlyph(code), code, text, linkJira, jiraURL(code, m.jiraBaseURL))
+		}
+		if len(q.JiraCodes) == 0 {
+			pasteHint("Jira")
+		}
+
+		// Trails (GitHub PRs).
+		sectionHeader(ui.GlyphConnTrail, "Trails")
+		for i, node := range stack {
+			pr := node.link
+			glyph, _ := m.prGlyph(pr.Code)
+			text := ui.StyleMuted.Render(m.prStatusWord(pr.Code) + " · " + m.prCommentsText(pr.Code))
+			marker := ""
+			if node.stacked {
+				marker = ui.GlyphStackBranchMid
+				if i == len(stack)-1 || stack[i+1].depth == 0 {
+					marker = ui.GlyphStackBranchEnd
+				}
+			}
+			addLink(marker, glyph, pr.Code, text, linkPR, prURL(pr.Repo, pr.Code))
+		}
+		if len(stack) == 0 {
+			pasteHint("GitHub")
+		}
+
+		// Runes (LaunchDarkly flags) — added by pasting an LD link, same as the
+		// others (no picker).
+		sectionHeader(ui.GlyphConnRune, "Runes")
+		for _, key := range q.Runes {
+			li := len(m.focusLinks)
+			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkRune, code: key, url: ldFlagURL(m.ldProject, m.ldEnv, key)})
+			if m.focusLinkIdx == li {
+				m.focusCaretLine = ln
+			}
+			lines = append(lines, agentPrefix+m.runeGlyph(key)+" "+key+"  "+
+				ui.StyleMuted.Render(m.runeWord(key))+hintFor(li, linkRune))
+			ln++
+		}
+		if len(q.Runes) == 0 {
+			pasteHint("LaunchDarkly")
+		}
 	}
+
+	// Body separator.
+	sepW := m.focusTextWidth
+	if sepW < 10 {
+		sepW = 10
+	}
+	if sepW > 60 {
+		sepW = 60
+	}
+	lines = append(lines, pad+ui.StyleMuted.Render(strings.Repeat("─", sepW)))
+	ln++
 	return lines
+}
+
+// toggleConnSentinel marks the "Connections" header line so a click there
+// collapses/expands the connections (see handleFocusMouse).
+const toggleConnSentinel = "\x00toggle-conn"
+
+// connectionCount is the total number of connections on a quest (NPCs +
+// Scrolls + Trails + Runes).
+func connectionCount(q *model.Quest) int {
+	return len(q.AgentWorkspaces) + len(q.JiraCodes) + len(q.PRs) + len(q.Runes)
 }
 
 // addAgentSentinel is a fake span URL marking the "+ add Claude agent" line, so
@@ -748,12 +841,18 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 const addAgentSentinel = "\x00add-agent"
 
 // focusLinkCount is how many navigable link lines the expanded quest view
-// currently has (each pinned agent OR the "+ add agent" affordance when none,
-// plus Jira + each PR) — used to bound link-cursor movement.
+// currently has — the "Connections" master toggle, plus (when expanded) each
+// NPC (or the "+ add" affordance), each Scroll, each Trail, each Rune, and the
+// "attach a rune" affordance. Section headers and the paste hints aren't
+// navigable. Used to bound link-cursor movement.
 func (m *Model) focusLinkCount(q *model.Quest) int {
-	n := len(q.JiraCodes) + len(m.prStack(q.PRs)) + len(q.AgentWorkspaces)
+	n := 1 // the Connections toggle
+	if q.ConnectionsCollapsed {
+		return n
+	}
+	n += len(q.JiraCodes) + len(m.prStack(q.PRs)) + len(q.AgentWorkspaces) + len(q.Runes)
 	if len(q.AgentWorkspaces) == 0 {
-		n++ // the "+ add Claude agent" affordance (only shown when none pinned)
+		n++ // the "+ add an NPC" affordance (only when none pinned)
 	}
 	return n
 }
@@ -762,7 +861,7 @@ func (m *Model) focusLinkCount(q *model.Quest) int {
 // indented to align under the quest's title, and returns the clickable code
 // spans (absolute screen columns). Jira and PR groups are kept close together
 // (two spaces apart).
-func (m *Model) renderQuestMetaLine(row ui.Row, width int) (string, []codeSpan) {
+func (m *Model) renderQuestMetaLine(row ui.Row, width, xBase int) (string, []codeSpan) {
 	q := m.findQuest(row.QuestID)
 	if q == nil {
 		return "", nil
@@ -782,7 +881,7 @@ func (m *Model) renderQuestMetaLine(row ui.Row, width int) (string, []codeSpan) 
 
 	var b strings.Builder
 	b.WriteString(strings.Repeat(" ", indent))
-	x := m.leftMargin + indent
+	x := xBase + indent
 	var spans []codeSpan
 	for i, seg := range segs {
 		if i > 0 {

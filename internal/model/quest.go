@@ -85,6 +85,7 @@ type Quest struct {
 	CreatedAt   time.Time   `json:"createdAt"`
 	UpdatedAt   time.Time   `json:"updatedAt"`
 	CompletedAt *time.Time  `json:"completedAt,omitempty"`
+	VaultedAt   *time.Time  `json:"vaultedAt,omitempty"` // when the quest was moved to the Vault; drives the Vault's day timeline
 
 	// Integration links, captured from URLs pasted into the body (see
 	// internal/model/links.go and internal/app/links.go). JiraCodes holds every
@@ -101,6 +102,10 @@ type Quest struct {
 	// Runes are LaunchDarkly flag keys attached to this quest; each shows its
 	// live rollout state (on / partial / off) on the quest (see app/runes.go).
 	Runes []string `json:"runes,omitempty"`
+
+	// ConnectionsCollapsed hides this quest's connections section in its detail
+	// view (body only) — a per-quest preference.
+	ConnectionsCollapsed bool `json:"connectionsCollapsed,omitempty"`
 
 	// Deprecated worktree-pin fields, cleared on load — the agent integration
 	// is now keyed on herdr workspaces, not worktrees.

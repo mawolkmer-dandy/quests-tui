@@ -90,17 +90,24 @@ func (m *Model) handleFocusLinkKey(msg tea.KeyMsg, q *model.Quest) (tea.Cmd, boo
 		return nil, true
 	case msg.Type == tea.KeyEnter:
 		switch link.kind {
+		case linkToggleConn:
+			q.ConnectionsCollapsed = !q.ConnectionsCollapsed
+			m.save()
+			return nil, true
 		case linkAddAgent:
 			m.openAgentPicker()
+			return nil, true
+		case linkAddRune:
+			m.openRunePicker(q.ID)
 			return nil, true
 		case linkAgent:
 			return openWorkspace(link.code), true // focus the herdr workspace
 		default:
-			return openURL(link.url), true
+			return openURL(link.url), true // linkJira/linkPR/linkRune → browser
 		}
 	case key.Matches(msg, Keys.Delete):
-		if link.kind == linkAddAgent {
-			return nil, true // nothing to remove on the affordance line
+		if link.kind == linkAddAgent || link.kind == linkAddRune || link.kind == linkToggleConn {
+			return nil, true // nothing to remove on an affordance / header line
 		}
 		m.focusLinkConfirmID = link.code
 		return nil, true
@@ -140,6 +147,14 @@ func (m *Model) removeFocusLink(q *model.Quest, link focusLink) {
 			}
 		}
 		q.AgentWorkspaces = out
+	case linkRune:
+		out := q.Runes[:0]
+		for _, k := range q.Runes {
+			if k != link.code {
+				out = append(out, k)
+			}
+		}
+		q.Runes = out
 	}
 	m.touchBodyOwner()
 
@@ -172,19 +187,32 @@ func (m *Model) captureCurrentBodyLink(q *model.Quest) tea.Cmd {
 	}
 
 	value := mod.BodyEditor.Value()
-	shortened, codes := m.captureAndShorten(q, value)
-	if len(codes) == 0 {
+	stripped, codes, runes := m.captureAndStrip(q, value)
+	if len(codes) == 0 && len(runes) == 0 {
 		return nil
 	}
 
-	// Reseed the line + editor with the shortened text (URL → code), keeping the
-	// caret at the end of what remains.
-	(*body)[mod.BodyCursor].Text = shortened
-	ed := m.newBodyEditor(shortened)
+	// Reseed the line + editor with the URL removed entirely, keeping the caret
+	// at the end of what remains.
+	(*body)[mod.BodyCursor].Text = stripped
+	ed := m.newBodyEditor(stripped)
 	ed.CursorEnd()
 	mod.BodyEditor = ed
 	m.touchBodyOwner()
-	return m.syncNow(codes)
+	return m.captureSync(codes, runes)
+}
+
+// captureSync fetches the just-captured PR/Jira codes and refreshes the
+// just-captured runes, animating the "fetching" state meanwhile.
+func (m *Model) captureSync(codes, runes []string) tea.Cmd {
+	var cmds []tea.Cmd
+	if len(codes) > 0 {
+		cmds = append(cmds, m.syncNow(codes))
+	}
+	if len(runes) > 0 {
+		cmds = append(cmds, refreshRunesCmd(m.ldProject, m.ldEnv, runes), m.maybeStartSpinner())
+	}
+	return tea.Batch(cmds...)
 }
 
 // captureBodyLinesRange captures links across body lines [start, end] only
@@ -208,40 +236,41 @@ func (m *Model) captureBodyLinesRange(q *model.Quest, start, end int) tea.Cmd {
 		end = len(*body) - 1
 	}
 
-	var all []string
+	var allCodes, allRunes []string
 	for i := start; i <= end; i++ {
 		text := (*body)[i].Text
 		if i == mod.BodyCursor {
 			text = mod.BodyEditor.Value()
 		}
-		shortened, codes := m.captureAndShorten(q, text)
-		if len(codes) == 0 {
+		stripped, codes, runes := m.captureAndStrip(q, text)
+		if len(codes) == 0 && len(runes) == 0 {
 			continue
 		}
-		(*body)[i].Text = shortened
+		(*body)[i].Text = stripped
 		if i == mod.BodyCursor {
-			ed := m.newBodyEditor(shortened)
+			ed := m.newBodyEditor(stripped)
 			ed.CursorEnd()
 			mod.BodyEditor = ed
 		}
-		all = append(all, codes...)
+		allCodes = append(allCodes, codes...)
+		allRunes = append(allRunes, runes...)
 	}
-	if len(all) == 0 {
+	if len(allCodes) == 0 && len(allRunes) == 0 {
 		return nil
 	}
 	m.touchBodyOwner()
-	return m.syncNow(all)
+	return m.captureSync(allCodes, allRunes)
 }
 
-// captureAndShorten captures every Jira/PR URL in text onto q (JiraCodes / PRs,
-// each deduped) and returns the text with those URLs REPLACED by their short
-// code (e.g. "#47145" / "EPDCHAIR-5713"), so the link stays inline as a compact,
-// clickable reference. newCodes lists the codes NEWLY captured this call (so a
-// re-detected, already-linked code doesn't trigger a redundant fetch).
-func (m *Model) captureAndShorten(q *model.Quest, text string) (shortened string, newCodes []string) {
-	shortened, refs := model.ShortenLinks(text)
-	if len(refs) == 0 {
-		return text, nil
+// captureAndStrip captures every Jira/PR/LaunchDarkly URL in text onto q
+// (JiraCodes / PRs / Runes, each deduped) and returns the text with those URLs
+// REMOVED entirely — a pasted link is pulled into the quest's connections, not
+// left inline. newCodes/newRunes list what was NEWLY captured this call (so a
+// re-detected, already-linked reference doesn't trigger a redundant fetch).
+func (m *Model) captureAndStrip(q *model.Quest, text string) (stripped string, newCodes, newRunes []string) {
+	stripped = model.StripLinks(text)
+	if stripped == text {
+		return text, nil, nil // no links found
 	}
 
 	for _, code := range model.DetectJiras(text) {
@@ -258,7 +287,13 @@ func (m *Model) captureAndShorten(q *model.Quest, text string) (shortened string
 			newCodes = append(newCodes, ref.Code)
 		}
 	}
-	return shortened, newCodes
+	for _, key := range model.DetectLDFlags(text) {
+		if indexOfStr(q.Runes, key) < 0 {
+			q.Runes = append(q.Runes, key)
+			newRunes = append(newRunes, key)
+		}
+	}
+	return stripped, newCodes, newRunes
 }
 
 // trackedCodeURLs maps each of q's tracked codes (Jira issues and PRs) to the

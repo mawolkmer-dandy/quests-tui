@@ -85,6 +85,7 @@ func (m *Model) beginTransition(oldLines []string, kind transKind) tea.Cmd {
 	m.transKind = kind
 	m.transFast = kind == kindFilter
 	m.transFrame = 0
+	m.transOldTwoColumn = false // set by the caller (setWilds) when leaving the Tavern
 	// Startup has no previous view to burn away — reveal straight in.
 	if kind == kindStartup {
 		m.transPhase = transReveal
@@ -292,6 +293,60 @@ func (m *Model) transitionSubtitle() string {
 }
 
 func (m *Model) transitioning() bool { return m.transPhase != transNone }
+
+// tavernRevealFrac is how much of each Tavern section's content to show during
+// a transition: 0 while the old view dissolves/pauses (boxes sit empty), then
+// ramping 0→1 as the text reveals — the same reveal curve the single-column
+// list uses, applied per section.
+func (m *Model) tavernRevealFrac() float64 {
+	if !m.transitioning() {
+		return 1
+	}
+	if m.transPhase == transReveal {
+		return frac(max0(m.transFrame-m.listLead()), m.listFrames())
+	}
+	return 0
+}
+
+// animatedHeaderLines is the header (mode toggle + subtitle) with the
+// letter-lighting / typing animation applied — used by the Tavern's reveal.
+func (m *Model) animatedHeaderLines(width int) []string {
+	litTav, litWild := m.animatedModeLetters()
+	return []string{
+		m.renderModeLine(width, litTav, litWild),
+		ui.CenterText(ui.StyleMuted.Render(m.transitionSubtitle()), width),
+	}
+}
+
+// tavernDissolveReveal is the inverse of the reveal curve: 1 while the dissolve
+// starts, ramping to 0 as the old Tavern empties out (0 during the pause).
+func (m *Model) tavernDissolveReveal() float64 {
+	if m.transPhase == transDissolve {
+		return 1 - frac(m.transFrame, m.dissolvePhaseFrames())
+	}
+	return 0 // pause
+}
+
+// viewTavernTransition renders the two-column Tavern mid-transition (animated
+// header + a per-section reveal fraction), reusing the resting layout code.
+func (m *Model) viewTavernTransition(reveal float64) string {
+	contentWidth := m.tavernWidth()
+	m.leftMargin = (m.width - contentWidth) / 2
+	if m.leftMargin < 0 {
+		m.leftMargin = 0
+	}
+	margin := strings.Repeat(" ", m.leftMargin)
+
+	rawFooter := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Right).Render(m.renderFooter())
+	footer := indentLines(rawFooter, margin)
+	availableHeight := m.height - lipgloss.Height(footer)
+	if availableHeight < 1 {
+		availableHeight = 1
+	}
+	logoLines := m.animatedHeaderLines(contentWidth)
+	logoHeight := len(logoLines) + 3
+	return m.viewTwoColumn(contentWidth, margin, footer, logoLines, logoHeight, availableHeight, reveal)
+}
 
 // modeSpan is a TAVERN/WILDS header label's clickable extent.
 type modeSpan struct {

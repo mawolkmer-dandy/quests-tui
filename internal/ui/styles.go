@@ -32,6 +32,16 @@ var (
 	GlyphCollapsed = "▸"
 	GlyphCursor    = "› "
 
+	// Tavern ornaments (two-column layout). Campaign banners get a small
+	// fleur/flourish; the Vault is framed with green foliage sprigs so the old
+	// rusted strongbox looks overgrown. All are narrow dingbats (not emoji) so
+	// they hold one column and don't force a wide fallback.
+	GlyphOrnament  = "❖" // campaign banner flourish
+	GlyphFlourishL = "❦" // left banner sprig
+	GlyphFlourishR = "❧" // right banner sprig
+	GlyphFoliage   = "❧" // vault foliage sprig
+	GlyphVine      = "✦" // small accent star
+
 	// Integration status glyphs (see internal/app/sync.go rendering). Each is
 	// a single narrow char, matching the glyph discipline above. Jira status
 	// is a filling circle (empty → half → full); a PR shows a check/cross for
@@ -61,6 +71,15 @@ var (
 	GlyphRuneOn      = "●" // flag on (green)
 	GlyphRunePartial = "◐" // targeted / partial rollout (amber)
 	GlyphRuneOff     = "○" // flag off (muted)
+
+	// Connection type emblems — one glyph per connection kind, shown inline
+	// after a quest's title (colored by status) and as each section's header in
+	// the detail view. NPC = a pinned Claude agent, Scrolls = Jira specs,
+	// Trails = GitHub PRs, Runes = LaunchDarkly flags.
+	GlyphConnNPC    = "♟" // NPC — a pinned agent
+	GlyphConnScroll = "✎" // Scrolls — a Jira spec
+	GlyphConnTrail  = "⤳" // Trails — a GitHub PR
+	GlyphConnRune   = "✦" // Runes — a LaunchDarkly flag
 
 	// Claude-agent status icons (see internal/app/agents.go), traffic-light
 	// colored: blocked/waiting-for-input is red and demands attention, working
@@ -128,7 +147,21 @@ var (
 	ColorMerged   = lipgloss.AdaptiveColor{Light: "#8839EF", Dark: "#CBA6F7"} // merged PR (mauve)
 	ColorSelected = lipgloss.AdaptiveColor{Light: "#CCD0DA", Dark: "#313244"}
 
-	StyleTitle          = lipgloss.NewStyle().Bold(true)
+	// ColorRust ages the Vault's frame — a weathered iron/rust brown, so the
+	// Vault reads like an old strongbox rather than another live section.
+	ColorRust = lipgloss.AdaptiveColor{Light: "#B4703A", Dark: "#A9764F"}
+
+	// Per-section accent colors (two-column Tavern). Runes are purple, the
+	// campaigns list is a neutral gray; Questboard reuses the warm accent and
+	// the Vault its rust. Each shows muted normally and full only when its
+	// section holds the cursor.
+	ColorRune     = lipgloss.AdaptiveColor{Light: "#8839EF", Dark: "#CBA6F7"}
+	ColorCampaign = lipgloss.AdaptiveColor{Light: "#6C6F85", Dark: "#9399B2"}
+
+	StyleTitle = lipgloss.NewStyle().Bold(true)
+	// StyleName is a non-bold quest/campaign name (the resting state); only the
+	// selected row's name is bold (StyleTitle, via cursorTitleStyle).
+	StyleName           = lipgloss.NewStyle()
 	StyleMuted          = lipgloss.NewStyle().Faint(true)
 	StyleDone           = lipgloss.NewStyle().Faint(true)
 	StyleMain           = lipgloss.NewStyle().Foreground(ColorAccent)
@@ -147,6 +180,18 @@ var (
 	StyleHeading       = lipgloss.NewStyle().Bold(true).Foreground(ColorHeading)
 	StyleSectionHeader = lipgloss.NewStyle().Bold(true)
 	StyleFooter        = lipgloss.NewStyle().Faint(true).Padding(0, 1)
+
+	// Two-column Tavern chrome: the rail box frame (warm accent), the Vault's
+	// aged/rusted frame, and the "glow" on a taken-up (active) quest so it
+	// stands out as the thing you're currently on.
+	StyleRailFrame   = lipgloss.NewStyle().Foreground(ColorAccent)
+	StyleVaultFrame  = lipgloss.NewStyle().Faint(true).Foreground(ColorRust)
+	StyleActiveQuest = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+
+	// Ornament styles: warm accent flourishes on campaign banners, green
+	// foliage around the Vault.
+	StyleOrnament = lipgloss.NewStyle().Foreground(ColorAccent)
+	StyleFoliage  = lipgloss.NewStyle().Foreground(ColorHeading)
 )
 
 // Theme overrides the accent colors from user config — empty fields keep

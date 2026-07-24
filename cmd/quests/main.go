@@ -160,8 +160,6 @@ func main() {
 	}
 
 	m := app.New(s, dataPath, darkBg, app.Options{
-		QuestboardCollapsed: cfg.Behavior.QuestboardCollapsed,
-		VaultCollapsed:      cfg.Behavior.VaultCollapsed,
 		ShowHints:           cfg.Behavior.ShowHints,
 		Animations:          cfg.Behavior.Animations,
 		Greeting:            cfg.Behavior.Greeting,

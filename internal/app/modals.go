@@ -22,6 +22,7 @@ const (
 	ModalSectionDetail
 	ModalProjectPicker
 	ModalAgentPicker
+	ModalRunePicker
 	ModalHelp
 	ModalDetailHelp
 )
@@ -61,6 +62,14 @@ type Modal struct {
 	PickerIndex   int
 	PickerFilter  string // fuzzy-search query typed into the picker
 	SourceRowIdx  int    // the moved quest's row index in the source list, to relocate the cursor after the move
+
+	// ModalRunePicker: SearchQuery is the query last sent to LaunchDarkly
+	// (PickerItems holds its results). While PickerFilter (what's typed now)
+	// differs from SearchQuery, Enter runs a new search; once they match, Enter
+	// attaches the highlighted flag. RuneSearching is true while a search is in
+	// flight.
+	SearchQuery   string
+	RuneSearching bool
 
 	// ModalSectionDetail: which section ("inbox" | "someday") this page shows.
 	Section string
@@ -347,6 +356,27 @@ func (m *Model) moveBodyCursor(delta int) bool {
 	return true
 }
 
+// moveBodyLine swaps the current body line with its neighbor above (delta<0) or
+// below (delta>0), keeping the cursor on the moved line — the editor's
+// Alt+↑/↓ "move line" shortcut. A no-op at the top/bottom edge.
+func (m *Model) moveBodyLine(delta int) {
+	mod := m.modal
+	body := m.currentBody()
+	if body == nil {
+		return
+	}
+	m.commitBodyLine() // fold the in-progress edit into the line before swapping
+	i := mod.BodyCursor
+	j := i + delta
+	if i < 0 || i >= len(*body) || j < 0 || j >= len(*body) {
+		return
+	}
+	(*body)[i], (*body)[j] = (*body)[j], (*body)[i]
+	mod.BodyCursor = j
+	m.touchBodyOwner()
+	m.seedBodyEditor(j, len([]rune((*body)[j].Text)))
+}
+
 // seedBodyEditor points the editor at body line idx with the cursor at col,
 // clearing any selection.
 func (m *Model) seedBodyEditor(idx, col int) {
@@ -372,6 +402,13 @@ func (m *Model) handleBodyOutlineKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	}
 
 	switch {
+	case msg.String() == "alt+up":
+		m.moveBodyLine(-1)
+		return nil, true
+	case msg.String() == "alt+down":
+		m.moveBodyLine(1)
+		return nil, true
+
 	case msg.Type == tea.KeyEnter:
 		raw := []rune(mod.BodyEditor.Value())
 		pos := mod.BodyEditor.Position()
@@ -670,6 +707,46 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 
+	case ModalRunePicker:
+		switch msg.String() {
+		case "up":
+			if mod.PickerIndex > 0 {
+				mod.PickerIndex--
+			}
+		case "down":
+			if mod.PickerIndex < len(mod.PickerItems)-1 {
+				mod.PickerIndex++
+			}
+		case "enter":
+			// Enter searches while the typed query differs from the last one
+			// sent to LD; once results are showing for that query, Enter
+			// attaches the highlighted flag.
+			if mod.PickerFilter != mod.SearchQuery {
+				mod.SearchQuery = mod.PickerFilter
+				mod.RuneSearching = true
+				mod.PickerIndex = 0
+				return runeSearchCmd(m.ldProject, mod.PickerFilter)
+			}
+			if len(mod.PickerItems) == 0 {
+				return nil
+			}
+			key := mod.PickerItems[mod.PickerIndex].ID
+			m.attachRune(mod.TargetQuestID, key)
+			m.closeModal()
+			return tea.Batch(refreshRunesCmd(m.ldProject, m.ldEnv, []string{key}), m.maybeStartSpinner())
+		case "esc":
+			m.closeModal()
+		case "backspace":
+			if r := []rune(mod.PickerFilter); len(r) > 0 {
+				mod.PickerFilter = string(r[:len(r)-1])
+			}
+		default:
+			if msg.Type == tea.KeyRunes {
+				mod.PickerFilter += string(msg.Runes)
+			}
+		}
+		return nil
+
 	case ModalQuestDetail:
 		q := m.findQuest(mod.QuestID)
 		if q == nil {
@@ -837,6 +914,15 @@ func (m *Model) renderModal() string {
 		fmt.Fprintf(&b, "%-11s%s\n", "Take up", ui.StyleMuted.Render("mark a quest active (Ctrl+A) to bring it Wilds"))
 		b.WriteString("\n")
 
+		b.WriteString(ui.StyleSectionHeader.Render("Getting around the Tavern"))
+		b.WriteString("\n")
+		fmt.Fprintf(&b, "%-11s%s\n", "Layout", ui.StyleMuted.Render("Questboard, Runes & Vault in the left rail; campaigns fill the right"))
+		fmt.Fprintf(&b, "%-11s%s\n", "←/→", ui.StyleMuted.Render("switch to the rail / to campaigns (when the caret is at the title's edge)"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+B", ui.StyleMuted.Render("jump to the Questboard"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+R", ui.StyleMuted.Render("jump to the Runes"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+E", ui.StyleMuted.Render("jump back to the Campaigns"))
+		b.WriteString("\n")
+
 		b.WriteString(ui.StyleSectionHeader.Render("Data"))
 		b.WriteString("\n")
 		dataPath, err := store.DefaultPath()
@@ -933,6 +1019,38 @@ func (m *Model) renderModal() string {
 			b.WriteString(line + "\n")
 		}
 		b.WriteString("\n" + ui.StyleMuted.Render("type to filter · ↑↓ choose · enter pin · esc cancel"))
+		content = b.String()
+
+	case ModalRunePicker:
+		var b strings.Builder
+		b.WriteString(ui.StyleTitle.Render("Attach a rune"))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("search LaunchDarkly flags by key or name"))
+		b.WriteString("\n")
+		query := mod.PickerFilter
+		if query == "" {
+			query = ui.StyleMuted.Render("type a flag key…")
+		}
+		b.WriteString(ui.StyleMuted.Render("› ") + query + "\n\n")
+		switch {
+		case mod.RuneSearching:
+			b.WriteString(ui.StyleMuted.Render("  searching…") + "\n")
+		case mod.PickerFilter == "" && mod.SearchQuery == "":
+			b.WriteString(ui.StyleMuted.Render("  start typing, then enter to search") + "\n")
+		case mod.PickerFilter != mod.SearchQuery:
+			b.WriteString(ui.StyleMuted.Render("  press enter to search") + "\n")
+		case len(mod.PickerItems) == 0:
+			b.WriteString(ui.StyleMuted.Render("  (no flags match)") + "\n")
+		default:
+			for i, item := range mod.PickerItems {
+				line := "  " + item.Label
+				if i == mod.PickerIndex {
+					line = ui.StyleSelectedRow.Render("> " + item.Label)
+				}
+				b.WriteString(line + "\n")
+			}
+		}
+		b.WriteString("\n" + ui.StyleMuted.Render("type · enter search/attach · ↑↓ choose · esc cancel"))
 		content = b.String()
 
 	case ModalDetailHelp:
@@ -1159,6 +1277,19 @@ func (m *Model) handleFocusMouse(msg tea.MouseMsg) tea.Cmd {
 			if msg.Y == m.focusContentTop+sp.line && msg.X >= sp.x0 && msg.X < sp.x1 {
 				if sp.url == addAgentSentinel {
 					m.openAgentPicker()
+					return nil
+				}
+				if sp.url == addRuneSentinel {
+					if q := m.findQuest(mod.QuestID); q != nil {
+						m.openRunePicker(q.ID)
+					}
+					return nil
+				}
+				if sp.url == toggleConnSentinel {
+					if q := m.findQuest(mod.QuestID); q != nil {
+						q.ConnectionsCollapsed = !q.ConnectionsCollapsed
+						m.save()
+					}
 					return nil
 				}
 				return openURL(sp.url)
