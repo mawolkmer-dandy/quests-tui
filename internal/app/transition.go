@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
@@ -33,11 +33,11 @@ const (
 )
 
 const (
-	listFramesSlow  = 9
+	listFramesSlow  = 7
 	listFramesFast  = 5
 	headerFramesN   = 10
 	subFramesN      = 15 // subtitle typewriter (a touch slower)
-	leadBeat        = 4  // beat after the subtitle finishes before the list starts
+	leadBeat        = 3  // beat after the subtitle finishes before the list starts
 	pauseFramesSlow = 3
 	pauseFramesFast = 1
 	burnTrail       = 3 // trailing columns dimmed (burning) before they vanish
@@ -240,15 +240,36 @@ func (m *Model) dissolveLines() []string {
 }
 
 // revealLines fills the new rows back in top-down, starting only after the
-// listLead frames (so the header/subtitle come in first).
+// listLead frames (so the header/subtitle come in first). Each row slides in
+// from a small right-offset that eases to zero, staggered so they cascade
+// (matching the lab's "List reveal") rather than popping in whole.
 func (m *Model) revealLines() []string {
 	all := m.currentRowLines()
-	f := frac(max0(m.transFrame-m.listLead()), m.listFrames())
-	n := int(f * float64(len(all)))
-	if n > len(all) {
-		n = len(all)
+	if len(all) == 0 {
+		return nil
 	}
-	return all[:n]
+	prog := frac(max0(m.transFrame-m.listLead()), m.listFrames())
+	const (
+		slideCols   = 4
+		slideWindow = 0.45 // fraction of the reveal each row spends sliding in
+	)
+	var out []string
+	for i, line := range all {
+		// (i+1)/(len+1) so even the FIRST row starts after a beat (nothing is
+		// on screen at prog 0 — it too slides in), while the last still finishes
+		// by prog=1.
+		start := (float64(i+1) / float64(len(all)+1)) * (1 - slideWindow)
+		if prog < start {
+			break // not revealed yet
+		}
+		p := (prog - start) / slideWindow
+		if p > 1 {
+			p = 1
+		}
+		indent := int(float64(slideCols)*(1-p) + 0.5)
+		out = append(out, strings.Repeat(" ", indent)+line)
+	}
+	return out
 }
 
 func max0(n int) int {

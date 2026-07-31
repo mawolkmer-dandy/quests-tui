@@ -14,9 +14,25 @@ import (
 
 type Config struct {
 	Behavior Behavior `toml:"behavior"`
-	Colors   Colors   `toml:"colors"`
-	Icons    Icons    `toml:"icons"`
+	Layout   Layout   `toml:"layout"`
 	Keys     Keys     `toml:"keys"`
+	Sound    Sound    `toml:"sound"`
+}
+
+// Sound configures the per-event sound clips (macOS `afplay`). Empty paths
+// fall back to bundled clips shipped inside the binary, so enabling it works
+// out of the box; set a path to use your own file for any event.
+type Sound struct {
+	// Enabled turns all sound on/off.
+	Enabled bool `toml:"enabled"`
+	// Each field overrides one event's clip (empty = bundled default).
+	QuestDone     string `toml:"quest_done"`     // a quest marked done
+	ObjectiveDone string `toml:"objective_done"` // an objective checked off
+	QuestActive   string `toml:"quest_active"`   // a quest taken up (active)
+	EnterTavern   string `toml:"enter_tavern"`   // entering the Tavern (also on launch)
+	EnterWilds    string `toml:"enter_wilds"`    // setting out to the Wilds
+	AddConnection string `toml:"add_connection"` // a Jira/PR/rune/agent linked to a quest
+	OpenNPC       string `toml:"open_npc"`       // the agent picker opens
 }
 
 type Behavior struct {
@@ -61,31 +77,20 @@ type Behavior struct {
 	LDEnv string `toml:"ld_env"`
 }
 
-// Colors are hex values ("#E2B714"); each has a light- and dark-terminal
-// variant.
-type Colors struct {
-	MainLight           string `toml:"main_light"`
-	MainDark            string `toml:"main_dark"`
-	SideLight           string `toml:"side_light"`
-	SideDark            string `toml:"side_dark"`
-	HeadingLight        string `toml:"heading_light"`
-	HeadingDark         string `toml:"heading_dark"`
-	ImportantLight      string `toml:"important_light"` // high priority (red)
-	ImportantDark       string `toml:"important_dark"`
-	PriorityMediumLight string `toml:"priority_medium_light"` // medium priority (yellow)
-	PriorityMediumDark  string `toml:"priority_medium_dark"`
-}
-
-type Icons struct {
-	QuestOpen   string `toml:"quest_open"`
-	QuestActive string `toml:"quest_active"`
-	QuestDone   string `toml:"quest_done"`
-	NoticeMain  string `toml:"notice_main"`
-	NoticeSide  string `toml:"notice_side"`
-	Important   string `toml:"important"`    // medium/high priority up-arrow
-	PriorityLow string `toml:"priority_low"` // low priority down-arrow
-	Expanded    string `toml:"expanded"`
-	Collapsed   string `toml:"collapsed"`
+// Layout persists the two-column Tavern's user-resized proportions and
+// section collapse state across restarts — grab a border to resize, click a
+// chevron to collapse; both are written automatically as they change, you
+// normally never edit this by hand.
+type Layout struct {
+	// RailWidthRatio is the left rail's fraction of the Tavern's content
+	// width; the campaigns column takes the remainder (minus the fixed gap).
+	RailWidthRatio float64 `toml:"rail_width_ratio"`
+	// RailBoxRatios are the three rail boxes' (Questboard, Runes, Vault)
+	// relative height weights, in that order.
+	RailBoxRatios [3]float64 `toml:"rail_box_ratios"`
+	// CollapsedSections lists which of "inbox" (Questboard) / "runes" /
+	// "someday" (Vault) are currently collapsed. Absent = expanded.
+	CollapsedSections []string `toml:"collapsed_sections"`
 }
 
 // Keys rebind the Ctrl/F-key shortcuts, in bubbletea key syntax ("ctrl+d",
@@ -122,28 +127,9 @@ func Default() Config {
 			LDProject:           "default",
 			LDEnv:               "production",
 		},
-		Colors: Colors{
-			MainLight:           "#DF8E1D",
-			MainDark:            "#E2B714",
-			SideLight:           "#1E66F5",
-			SideDark:            "#89B4FA",
-			HeadingLight:        "#40A02B",
-			HeadingDark:         "#A6E3A1",
-			ImportantLight:      "#D20F39",
-			ImportantDark:       "#F38BA8",
-			PriorityMediumLight: "#DF8E1D",
-			PriorityMediumDark:  "#F9E2AF",
-		},
-		Icons: Icons{
-			QuestOpen:   "◇",
-			QuestActive: "⬖",
-			QuestDone:   "◆",
-			NoticeMain:  "!",
-			NoticeSide:  "?",
-			Important:   "↑",
-			PriorityLow: "↓",
-			Expanded:    "▾",
-			Collapsed:   "▸",
+		Layout: Layout{
+			RailWidthRatio: 0.34,
+			RailBoxRatios:  [3]float64{1.0 / 3, 1.0 / 3, 1.0 / 3},
 		},
 		Keys: Keys{
 			ToggleActive:    "ctrl+a",
@@ -156,6 +142,9 @@ func Default() Config {
 			Search:          "ctrl+f",
 			Help:            "f1",
 			ToggleHints:     "ctrl+k",
+		},
+		Sound: Sound{
+			Enabled: true, // bundled sounds play out of the box; set false to silence
 		},
 	}
 }
@@ -177,6 +166,35 @@ func Load(path string) (Config, error) {
 		return Default(), fmt.Errorf("config %s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// Save atomically writes cfg to path as TOML (temp file + rename, same
+// crash-safety pattern as store.Save). Unlike WriteSample (a fixed commented
+// template for a fresh install), this serializes the live Config — currently
+// only a resize-drag release calls this. Note: BurntSushi/toml has no
+// round-trip-with-comments support, so this replaces the WHOLE file,
+// including any hand-edited comments elsewhere in it — an accepted tradeoff
+// given the file is already machine-writable in one place (WriteSample) and
+// resizing is the only thing that ever calls Save.
+func Save(path string, cfg Config) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".config-*.toml.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := toml.NewEncoder(tmp).Encode(cfg); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // WriteSample writes the fully-commented default config to path, creating
@@ -224,36 +242,15 @@ integrations_enabled = true
 sync_interval_secs = 60
 jira_base_url = "https://meetdandy.atlassian.net"
 
-[colors]
-# Hex colors; *_light applies on light terminal themes, *_dark on dark.
-# main: main quests (gold) · side: side quests (blue) · heading: "# " lines
-# · important: the high-priority arrow (red) · priority_medium: the
-# medium-priority arrow (yellow). Low priority uses the muted foreground.
-main_light = "#DF8E1D"
-main_dark = "#E2B714"
-side_light = "#1E66F5"
-side_dark = "#89B4FA"
-heading_light = "#40A02B"
-heading_dark = "#A6E3A1"
-important_light = "#D20F39"
-important_dark = "#F38BA8"
-priority_medium_light = "#DF8E1D"
-priority_medium_dark = "#F9E2AF"
-
-[icons]
-# Single-character glyphs. quest_* is the shape by progress; notice_* marks
-# untriaged Questboard quests; important is the medium/high priority up-arrow
-# and priority_low the low-priority down-arrow, shown left of a quest;
-# expanded/collapsed are the fold carets.
-quest_open = "◇"
-quest_active = "⬖"
-quest_done = "◆"
-notice_main = "!"
-notice_side = "?"
-important = "↑"
-priority_low = "↓"
-expanded = "▾"
-collapsed = "▸"
+[layout]
+# The two-column Tavern's rail/campaigns width split, the three rail boxes'
+# (Questboard/Runes/Vault) height split, and which of them are collapsed —
+# all written here automatically as you drag a border or click a chevron.
+# Note that this rewrites this whole file, so any comments you've added
+# elsewhere won't survive a change.
+rail_width_ratio = 0.34
+rail_box_ratios = [0.333, 0.333, 0.333]
+collapsed_sections = []
 
 [keys]
 # Rebind shortcuts using bubbletea key syntax ("ctrl+d", "f1"). Arrows,
@@ -274,4 +271,17 @@ delete = "ctrl+x"
 search = "ctrl+f"
 help = "f1"
 toggle_hints = "ctrl+k"
+
+[sound]
+# Per-event sound clips (macOS, via afplay). On by default using bundled
+# clips; set enabled = false to silence. Point any event at your own file
+# (mp3/wav/aiff/m4a) to override it — empty = the bundled clip.
+enabled = true
+quest_done = ""      # a quest marked done
+objective_done = ""  # an objective checked off
+quest_active = ""    # a quest taken up (active)
+enter_tavern = ""    # entering the Tavern (also plays on launch)
+enter_wilds = ""     # setting out to the Wilds
+add_connection = ""  # a Jira/PR/rune/agent linked to a quest
+open_npc = ""        # the agent picker opens
 `

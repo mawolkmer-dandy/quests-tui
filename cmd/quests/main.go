@@ -10,11 +10,12 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/app"
 	"github.com/mawolkmer-dandy/quests-tui/internal/config"
+	"github.com/mawolkmer-dandy/quests-tui/internal/lab"
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
 	"github.com/mawolkmer-dandy/quests-tui/internal/quickadd"
 	"github.com/mawolkmer-dandy/quests-tui/internal/store"
@@ -41,6 +42,7 @@ func main() {
 	}
 
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	openLab := flag.Bool("lab", false, "open the animation lab — a gallery for designing/tuning interactions")
 	initConfig := flag.Bool("init-config", false, "write a fresh ~/.config/quests/config.toml with every setting at its default (commented), then exit")
 	force := flag.Bool("force", false, "with --init-config, overwrite an existing config file")
 	importThings := flag.Bool("import-things", false, "import a local Things 3 database into Quests, then exit")
@@ -55,6 +57,14 @@ func main() {
 
 	if *showVersion {
 		fmt.Println("quests", version)
+		return
+	}
+
+	if *openLab {
+		ui.Init(lipgloss.HasDarkBackground(os.Stdin, os.Stdout))
+		if err := lab.Run(); err != nil {
+			fatal(err)
+		}
 		return
 	}
 
@@ -106,28 +116,21 @@ func main() {
 	// Bubble Tea's own input reader for that reply, which is read as garbage
 	// keystrokes and stalls the whole UI. lipgloss caches the result, so
 	// every later AdaptiveColor use just reads this cached value.
-	darkBg := lipgloss.HasDarkBackground()
+	darkBg := lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
 
 	dataPath := filepath.Join(dir, "data.json")
+
+	// Resolve every accent color against the terminal's actual background —
+	// icons/colors are a fixed, hardcoded look now (no config surface for
+	// them), but light/dark adaptation is still real terminal-detected
+	// behavior, not a customization knob.
+	ui.Init(darkBg)
 
 	cfg, err := config.Load(config.Path(dir))
 	if err != nil {
 		// A broken config falls back to defaults; say so rather than dying.
 		fmt.Fprintln(os.Stderr, "quests: ignoring invalid config:", err)
 	}
-	ui.ApplyTheme(ui.Theme{
-		MainLight: cfg.Colors.MainLight, MainDark: cfg.Colors.MainDark,
-		SideLight: cfg.Colors.SideLight, SideDark: cfg.Colors.SideDark,
-		HeadingLight: cfg.Colors.HeadingLight, HeadingDark: cfg.Colors.HeadingDark,
-		ImportantLight: cfg.Colors.ImportantLight, ImportantDark: cfg.Colors.ImportantDark,
-		PriorityMediumLight: cfg.Colors.PriorityMediumLight, PriorityMediumDark: cfg.Colors.PriorityMediumDark,
-	})
-	ui.ApplyIcons(ui.IconSet{
-		QuestOpen: cfg.Icons.QuestOpen, QuestActive: cfg.Icons.QuestActive, QuestDone: cfg.Icons.QuestDone,
-		NoticeMain: cfg.Icons.NoticeMain, NoticeSide: cfg.Icons.NoticeSide,
-		Important: cfg.Icons.Important, PriorityLow: cfg.Icons.PriorityLow,
-		Expanded: cfg.Icons.Expanded, Collapsed: cfg.Icons.Collapsed,
-	})
 	ui.DoneToBottom = cfg.Behavior.DoneToBottom
 	ui.MoveMainToTop = cfg.Behavior.MainToTop
 	ui.MovePriorityToTop = cfg.Behavior.PriorityToTop
@@ -168,6 +171,11 @@ func main() {
 		JiraBaseURL:         cfg.Behavior.JiraBaseURL,
 		LDProject:           cfg.Behavior.LDProject,
 		LDEnv:               cfg.Behavior.LDEnv,
+		CfgPath:             config.Path(dir),
+		RailWidthRatio:      cfg.Layout.RailWidthRatio,
+		RailBoxRatios:       cfg.Layout.RailBoxRatios,
+		CollapsedSections:   cfg.Layout.CollapsedSections,
+		Sound:               cfg.Sound,
 	})
 
 	if os.Getenv("QUESTS_DEBUG") != "" {
@@ -179,10 +187,11 @@ func main() {
 		m.SetDebug(true)
 	}
 
-	// All-motion (not just cell-motion) mouse reporting is needed for hover
-	// tips ("→ open (tab)", the Vault's "read only") — those need to know
-	// where the mouse is even when no button is pressed.
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion())
+	// Alt-screen and all-motion mouse reporting (needed for hover tips —
+	// "→ open (tab)", the Vault's "read only" — which need to know where the
+	// mouse is even when no button is pressed) are declared per-frame on the
+	// View itself now (see Model.View), not as ProgramOptions.
+	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		fatal(err)
 	}

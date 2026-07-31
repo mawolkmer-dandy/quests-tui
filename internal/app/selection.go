@@ -4,10 +4,10 @@ import (
 	"strings"
 	"unicode"
 
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
@@ -70,7 +70,7 @@ func (m *Model) selectionBounds(ti *textinput.Model) (start, end int, ok bool) {
 // Returns (true, cmd) if msg was fully handled here and must not be
 // forwarded to ti.Update; cmd shows the "copied to clipboard" toast when a
 // selection just grew.
-func (m *Model) applySelectionKey(ti *textinput.Model, msg tea.KeyMsg) (bool, tea.Cmd) {
+func (m *Model) applySelectionKey(ti *textinput.Model, msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	runes := []rune(ti.Value())
 
 	switch msg.String() {
@@ -101,7 +101,7 @@ func (m *Model) applySelectionKey(ti *textinput.Model, msg tea.KeyMsg) (bool, te
 	// Backspace/Delete are fully consumed by removing the selection; a
 	// typed rune or Enter still proceeds (inserting / splitting at the
 	// now-collapsed cursor), so typing over a selection replaces it.
-	return msg.Type == tea.KeyBackspace || msg.Type == tea.KeyDelete, nil
+	return msg.Code == tea.KeyBackspace || msg.Code == tea.KeyDelete, nil
 }
 
 func (m *Model) extendSelection(ti *textinput.Model, newPos int) tea.Cmd {
@@ -126,9 +126,12 @@ func (m *Model) copySelection(ti *textinput.Model) tea.Cmd {
 	return m.showClipboardToast()
 }
 
-func isTypingKey(msg tea.KeyMsg) bool {
-	switch msg.Type {
-	case tea.KeyRunes, tea.KeySpace, tea.KeyBackspace, tea.KeyDelete, tea.KeyEnter:
+func isTypingKey(msg tea.KeyPressMsg) bool {
+	if msg.Text != "" {
+		return true
+	}
+	switch msg.Code {
+	case tea.KeySpace, tea.KeyBackspace, tea.KeyDelete, tea.KeyEnter:
 		return true
 	}
 	return false
@@ -224,7 +227,7 @@ func (m *Model) multilineSelActive() bool {
 // applyBodySelectionKey is applySelectionKey for a focus view's body
 // outline — same Shift+Left/Right/Home/End handling, plus Shift+Up/Down to
 // grow the selection across lines.
-func (m *Model) applyBodySelectionKey(msg tea.KeyMsg) (bool, tea.Cmd) {
+func (m *Model) applyBodySelectionKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	mod := m.modal
 	runes := []rune(mod.BodyEditor.Value())
 
@@ -245,7 +248,7 @@ func (m *Model) applyBodySelectionKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 
 	if m.multilineSelActive() {
 		switch {
-		case msg.Type == tea.KeyBackspace, msg.Type == tea.KeyDelete:
+		case msg.Code == tea.KeyBackspace, msg.Code == tea.KeyDelete:
 			// Delete the whole cross-line selection, not a single char.
 			m.deleteBodySelection()
 			return true, nil
@@ -470,11 +473,7 @@ func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, wid
 
 	lead := "  "
 	if kind == model.BodyObjective {
-		check := ui.GlyphQuestOpen
-		if l.Done {
-			check = ui.GlyphQuestDone
-		}
-		lead = ui.StyleMuted.Render(check) + " "
+		lead = ui.ObjectiveCheckbox(l.Done) + " "
 	}
 
 	addRow := func(rawOffset int) {
@@ -505,11 +504,7 @@ func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, wid
 		liveKind, _ := model.ClassifyBodyLine(string(raw))
 		lead = "  "
 		if liveKind == model.BodyObjective {
-			g := ui.GlyphQuestOpen
-			if l.Done {
-				g = ui.GlyphQuestDone
-			}
-			lead = ui.StyleMuted.Render(g) + " "
+			lead = ui.ObjectiveCheckbox(l.Done) + " "
 		}
 		base := lipgloss.NewStyle()
 		switch {

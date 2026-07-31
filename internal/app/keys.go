@@ -3,7 +3,7 @@ package app
 import (
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
+	"charm.land/bubbles/v2/key"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/config"
 )
@@ -45,6 +45,7 @@ type KeyMap struct {
 	Search          key.Binding
 	Help            key.Binding
 	ToggleHints     key.Binding
+	MuteSound       key.Binding
 	Quit            key.Binding
 }
 
@@ -70,6 +71,7 @@ var Keys = KeyMap{
 	Search:          key.NewBinding(key.WithKeys("ctrl+f"), key.WithHelp("Ctrl+F", "search")),
 	Help:            key.NewBinding(key.WithKeys("f1"), key.WithHelp("F1", "help")),
 	ToggleHints:     key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("Ctrl+K", "hide / show hover tips")),
+	MuteSound:       key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("Ctrl+S", "mute / unmute sound")),
 	Quit:            key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("Ctrl+C", "quit")),
 }
 
@@ -120,10 +122,12 @@ func (k KeyMap) ShortHelp() []key.Binding {
 	return []key.Binding{k.Help}
 }
 
+// FullHelp lists only the command chords for the help modal — the structural
+// navigation/editing keys (arrows, Shift+arrows, Tab, Enter, Backspace) are
+// intentionally omitted, they're standard and were just padding out the list.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Up, k.Down, k.Left, k.Right, k.MoveUp, k.MoveDown, k.Tab, k.Enter, k.Backspace},
 		{k.ToggleActive, k.ToggleDone, k.ToggleImportant, k.ToggleVault, k.ToggleType, k.MoveProject},
-		{k.Delete, k.Undo, k.SetOut, k.Search, k.Help, k.ToggleHints, k.Quit},
+		{k.Delete, k.Undo, k.SetOut, k.Search, k.Help, k.ToggleHints, k.MuteSound, k.Quit},
 	}
 }

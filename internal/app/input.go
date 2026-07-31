@@ -4,16 +4,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
 	"github.com/mawolkmer-dandy/quests-tui/internal/store"
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
 
-func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	// While the search bar is open, it owns its keys (typing, facet cycling,
 	// close); everything else falls through to the normal handling below so
 	// you can still navigate and act on the filtered results.
@@ -38,23 +38,34 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case key.Matches(msg, Keys.SetOut):
 		return m.setWilds(!m.wilds)
-	case msg.Type == tea.KeyEsc && m.wilds:
+	case msg.Code == tea.KeyEsc && m.wilds:
 		return m.setWilds(false)
-	case m.wilds && key.Matches(msg, Keys.Left):
-		return m.animateFilter(func() { m.cycleQuickFilter(-1) })
-	case m.wilds && key.Matches(msg, Keys.Right):
-		return m.animateFilter(func() { m.cycleQuickFilter(1) })
-	// Two-column Tavern: jump to a section (Ctrl+B/R/E) or switch columns with
-	// Left/Right once the caret is at the title's edge (otherwise the arrow
-	// keeps editing text).
-	case m.twoColumn() && msg.String() == "ctrl+b":
+	// Two-column Tavern: jump to a section (Ctrl+1..4, in the rail's visual
+	// order — Questboard/Runes/Vault top-to-bottom, then Campaigns) or switch
+	// columns with Left/Right once the caret is at the title's edge (otherwise
+	// the arrow keeps editing text).
+	case m.twoColumn() && msg.String() == "ctrl+1":
 		m.jumpToSection("inbox")
 		return nil
-	case m.twoColumn() && msg.String() == "ctrl+r":
+	case m.twoColumn() && msg.String() == "ctrl+2":
 		m.jumpToSection("runes")
 		return nil
-	case m.twoColumn() && msg.String() == "ctrl+e":
+	case m.twoColumn() && msg.String() == "ctrl+3":
+		m.jumpToSection("someday")
+		return nil
+	case m.twoColumn() && msg.String() == "ctrl+4":
 		m.jumpToSection("campaigns")
+		return nil
+	// Ctrl+Shift+1..3 collapse/expand a rail section in place (Campaigns isn't a
+	// collapsible box, so there's no Ctrl+Shift+4).
+	case m.twoColumn() && msg.String() == "ctrl+shift+1":
+		m.toggleSectionCollapse("inbox")
+		return nil
+	case m.twoColumn() && msg.String() == "ctrl+shift+2":
+		m.toggleSectionCollapse("runes")
+		return nil
+	case m.twoColumn() && msg.String() == "ctrl+shift+3":
+		m.toggleSectionCollapse("someday")
 		return nil
 	// The rail is the left column, campaigns the right: Left→rail, Right→campaigns.
 	case m.twoColumn() && key.Matches(msg, Keys.Left) && m.caretAtStart():
@@ -69,13 +80,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, Keys.Down):
 		m.moveCursor(1)
 		return nil
-	case msg.Type == tea.KeyPgUp, msg.Type == tea.KeyPgDown:
+	case msg.Code == tea.KeyPgUp, msg.Code == tea.KeyPgDown:
 		half := m.height / 2
 		if half < 1 {
 			half = 1
 		}
 		delta := 1
-		if msg.Type == tea.KeyPgUp {
+		if msg.Code == tea.KeyPgUp {
 			delta = -1
 		}
 		for i := 0; i < half; i++ {
@@ -90,7 +101,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 // targets — shared by the main outline and a focused campaign's quest list
 // (see updateModal's ModalCampaignDetail case), so Tab/Enter/Ctrl+D/Ctrl+X/
 // etc. behave identically in both places.
-func (m *Model) handleRowKey(msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleRowKey(msg tea.KeyPressMsg) tea.Cmd {
 	if m.confirmDeleteID != "" {
 		target := m.cursor
 		id := m.confirmDeleteID
@@ -120,7 +131,7 @@ func (m *Model) handleRowKey(msg tea.KeyMsg) tea.Cmd {
 		return m.handleReveal()
 	case key.Matches(msg, Keys.Enter):
 		return m.handleEnter()
-	case msg.Type == tea.KeyBackspace:
+	case msg.Code == tea.KeyBackspace:
 		return m.handleBackspace(msg)
 	case key.Matches(msg, Keys.ToggleActive):
 		return m.toggleActive()
@@ -187,6 +198,10 @@ func (m *Model) moveCursor(delta int) {
 	if !rows[next].Selectable() {
 		return
 	}
+	// Drop a fading ghost where the cursor was, then move it instantly — a
+	// trail behind the cursor, no easing delay. cursorScreen{X,Y} still holds
+	// the last-rendered (old) cell here.
+	m.spawnCursorTrail(m.cursorScreenX, m.cursorScreenY)
 	m.setCursor(rows[next])
 }
 
@@ -360,6 +375,7 @@ func (m *Model) toggleReveal() {
 		m.collapsedProjects[m.cursor.projectID] = !m.collapsedProjects[m.cursor.projectID]
 	case ui.RowSection:
 		m.collapsedSections[m.cursor.section] = !m.collapsedSections[m.cursor.section]
+		m.saveLayoutConfig()
 	case ui.RowRuneQuest:
 		// Rune-quest groups reuse collapsedProjects keyed by quest ID.
 		m.collapsedProjects[m.cursor.questID] = !m.collapsedProjects[m.cursor.questID]
@@ -367,9 +383,10 @@ func (m *Model) toggleReveal() {
 	m.invalidateRender()
 }
 
-// handleReveal is Tab: opens a focused, full-screen detail view for a
-// campaign, a quest, or a section (Questboard/Vault). The "Campaigns" label
-// has nothing to open (Enter toggles-all instead), so Tab is a no-op there.
+// handleReveal is Tab / a section-name click: opens a focused, full-screen
+// detail view for a campaign, a quest, or a section. Every section
+// (Questboard / Runes / Campaigns / Vault) has one; the "Campaigns" label opens
+// the campaigns section view.
 func (m *Model) handleReveal() tea.Cmd {
 	switch m.cursor.kind {
 	case ui.RowProject:
@@ -386,16 +403,15 @@ func (m *Model) handleReveal() tea.Cmd {
 		if q := m.findQuest(m.cursor.questID); q != nil {
 			m.pushModal(questDetailModal(q))
 		}
-	case ui.RowSection:
-		// Runes have no focused page — Tab does nothing (Enter still toggles).
-		if m.cursor.section == "runes" {
-			return nil
-		}
+	case ui.RowSection, ui.RowLabel:
 		m.commitEdit()
 		section := m.cursor.section
+		if m.cursor.kind == ui.RowLabel { // the "Campaigns" banner
+			section = "campaigns"
+		}
 		m.pushModal(sectionDetailModal(section))
-		if rows := sectionRows(m.store, section); len(rows) > 0 {
-			m.setCursor(rows[0])
+		if r, ok := nearestSelectableRow(m.sectionRows(section), 0); ok {
+			m.setCursor(r)
 		} else {
 			m.editor = nil
 		}
@@ -439,7 +455,7 @@ func (m *Model) handleEnter() tea.Cmd {
 		m.toggleReveal()
 
 	case ui.RowRune:
-		return openURL(ldFlagURL(m.ldProject, m.ldEnv, row.RuneKey))
+		return m.openConnection(connection{kind: linkRune, code: row.RuneKey, url: ldFlagURL(m.ldProject, m.ldEnv, row.RuneKey)})
 
 	case ui.RowNewRune:
 		m.openRunePicker("")
@@ -501,7 +517,7 @@ func (m *Model) newQuestUnder(projectID string, status model.QuestStatus) model.
 // the empty title could otherwise hide real data being lost. Deleting a
 // project this way requires it to already be empty of quests; otherwise
 // Ctrl+X (with confirmation) is required.
-func (m *Model) handleBackspace(msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleBackspace(msg tea.KeyPressMsg) tea.Cmd {
 	if m.editor == nil {
 		return nil
 	}
@@ -551,6 +567,9 @@ func questHasDetails(q *model.Quest) bool {
 // either on a vaulted quest shows a brief inline warning instead of just
 // silently doing nothing.
 func (m *Model) toggleDone() tea.Cmd {
+	if m.cursor.kind == ui.RowWildsObjective {
+		return m.markWildsObjectiveDone()
+	}
 	if m.cursor.kind != ui.RowQuest {
 		return nil
 	}
@@ -562,6 +581,7 @@ func (m *Model) toggleDone() tea.Cmd {
 		return m.showWarning(m.cursor, "vault is read-only")
 	}
 	before := ui.SortBucket(*q)
+	becameDone := false
 	if q.Status == model.StatusDone {
 		q.Status = model.StatusOpen
 		q.CompletedAt = nil
@@ -569,11 +589,44 @@ func (m *Model) toggleDone() tea.Cmd {
 		q.Status = model.StatusDone
 		now := time.Now()
 		q.CompletedAt = &now
+		becameDone = true
 	}
 	q.UpdatedAt = time.Now()
 	m.reslotIfTierChanged(q.ID, before)
 	m.save()
+	if becameDone {
+		// A quest gets the ring "seal stamp"; objectives get the scatter burst.
+		m.spawnSparkleRing(m.cursorScreenX+questGlyphCol, m.cursorScreenY, 12)
+		return tea.Batch(m.playSound(sndQuestDone), m.maybeStartOverlayTick())
+	}
 	return nil
+}
+
+// markWildsObjectiveDone checks off the objective under the cursor in the
+// Wilds and lands the cursor on whatever row takes its place (the next
+// objective, or the parent quest once the last one is cleared) — the objective
+// row itself drops out of the list, since the Wilds only lists pending ones.
+func (m *Model) markWildsObjectiveDone() tea.Cmd {
+	q := m.findQuest(m.cursor.questID)
+	if q == nil {
+		return nil
+	}
+	idx := findRowIndex(m.visibleRows(), m.cursor)
+	objIndent := 0
+	for i := range q.Body {
+		if q.Body[i].ID == m.cursor.bodyLineID {
+			q.Body[i].Done = true
+			objIndent = q.Body[i].Indent
+			break
+		}
+	}
+	q.UpdatedAt = time.Now()
+	m.save()
+	if row, ok := nearestSelectableRow(m.visibleRows(), idx); ok {
+		m.setCursor(row)
+	}
+	m.spawnSparkleBurst(m.cursorScreenX+wildsObjCol+2*objIndent, m.cursorScreenY, 10)
+	return tea.Batch(m.playSound(sndObjectiveDone), m.maybeStartOverlayTick())
 }
 
 // toggleActive follows the same "set this status, or back to Open if it's
@@ -590,13 +643,18 @@ func (m *Model) toggleActive() tea.Cmd {
 	if m.isVaulted(q) {
 		return m.showWarning(m.cursor, "vault is read-only")
 	}
+	becameActive := false
 	if q.Status == model.StatusActive {
 		q.Status = model.StatusOpen
 	} else {
 		q.Status = model.StatusActive
+		becameActive = true
 	}
 	q.UpdatedAt = time.Now()
 	m.save()
+	if becameActive {
+		return m.playSound(sndQuestActive)
+	}
 	return nil
 }
 
@@ -631,6 +689,12 @@ func (m *Model) toggleVault() {
 			return
 		}
 		p.Archived = !p.Archived
+		if p.Archived {
+			now := time.Now()
+			p.ArchivedAt = &now // places it in the Vault's day timeline
+		} else {
+			p.ArchivedAt = nil
+		}
 		m.save()
 	}
 }
@@ -768,59 +832,34 @@ func titleOffset(row ui.Row, nestOffset int) int {
 	return 6 + nestOffset // cursor(2) + priority(2) + glyph(1) + space(1)
 }
 
-func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
+// handleClick handles a left mouse press — everything a v1 tea.MouseMsg with
+// Action==Press used to reach. Right/middle presses are ignored (matching v1,
+// which only ever checked Button==Left here).
+func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
+	mouse := msg.Mouse()
+	m.hoverSection = ""
+	m.confirmDeleteID = "" // any click/scroll cancels a pending inline delete confirm
+
+	if mouse.Button != tea.MouseLeft {
+		return nil
+	}
+
+	// A divider press starts a resize drag instead of any row/title dispatch
+	// below — see tavern_columns.go's hitTestDivider.
+	if cmd, started := m.tryStartResizeDrag(mouse.X, mouse.Y); started {
+		return cmd
+	}
+
 	rows := m.visibleRows()
 	if len(rows) == 0 {
 		return nil
 	}
 
-	if msg.Action == tea.MouseActionMotion {
-		if msg.Button == tea.MouseButtonLeft {
-			return m.dragTextSelection(msg, rows)
-		}
-		m.updateHover(msg, rows)
-		return nil
-	}
-
-	m.confirmDeleteID = "" // any click/scroll cancels a pending inline delete confirm
-
-	if msg.Action == tea.MouseActionPress && (msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown) {
-		delta := 1
-		if msg.Button == tea.MouseButtonWheelUp {
-			delta = -1
-		}
-		// In the two-column Tavern the wheel scrolls whichever section it's over
-		// (its own scroll view), moving the cursor only when that section holds
-		// it. Elsewhere it moves the cursor as before.
-		if m.twoColumn() {
-			m.wheelSection(m.sectionAtPoint(msg), delta)
-			return nil
-		}
-		m.moveCursor(delta)
-		return nil
-	}
-
-	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
-		return nil
-	}
-
 	// A click on a TAVERN/WILDS header label switches to that mode.
-	if msg.Y == m.modeToggleRow {
+	if mouse.Y == m.modeToggleRow {
 		for _, sp := range m.modeSpans {
-			if msg.X >= sp.x0 && msg.X < sp.x1 {
+			if mouse.X >= sp.x0 && mouse.X < sp.x1 {
 				return m.setWilds(sp.wilds)
-			}
-		}
-		return nil
-	}
-
-	// A click on an Wilds quick chip selects it (the chip line sits just
-	// above the rows).
-	if m.wilds && msg.Y == m.chipLineRow {
-		for _, sp := range m.chipSpans {
-			if msg.X >= sp.x0 && msg.X < sp.x1 {
-				f := sp.filter
-				return m.animateFilter(func() { m.setQuickFilter(f) })
 			}
 		}
 		return nil
@@ -829,10 +868,10 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	// Two-column Tavern clicks are mapped by the per-column line→row tables the
 	// renderer built (boxes shift lines, so plain arithmetic won't do).
 	if m.twoColumn() {
-		return m.handleTwoColumnClick(msg)
+		return m.handleTwoColumnClick(mouse)
 	}
 
-	relY := msg.Y - m.rowsScreenTop
+	relY := mouse.Y - m.rowsScreenTop
 	if relY < 0 {
 		return nil // clicked the logo/blank area above the rows
 	}
@@ -840,7 +879,90 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	if idx < 0 || idx >= len(rows) {
 		return nil
 	}
-	return m.clickRowAt(rows, idx, msg, m.leftMargin)
+	return m.clickRowAt(rows, idx, mouse, m.leftMargin)
+}
+
+// handleWheel handles a scroll-wheel event — the v1 equivalent lived inside
+// handleMouse guarded by Action==Press && Button==Wheel*.
+func (m *Model) handleWheel(msg tea.MouseWheelMsg) tea.Cmd {
+	mouse := msg.Mouse()
+	m.confirmDeleteID = ""
+	delta := 1
+	if mouse.Button == tea.MouseWheelUp {
+		delta = -1
+	}
+	// In the two-column Tavern the wheel scrolls whichever section it's over
+	// (its own scroll view), moving the cursor only when that section holds
+	// it. Elsewhere it moves the cursor as before.
+	if m.twoColumn() {
+		m.wheelSection(m.sectionAtPoint(mouse), delta)
+		return nil
+	}
+	m.moveCursor(delta)
+	return nil
+}
+
+// handleMotion handles mouse movement — v1's Action==Motion case. A resize
+// drag in progress owns motion until release; otherwise a held left button
+// (m.leftDown, set in Update's MouseClickMsg case) drags a text selection,
+// and with no button held it's just hover tracking.
+func (m *Model) handleMotion(msg tea.MouseMotionMsg) tea.Cmd {
+	mouse := msg.Mouse()
+	if m.resizeDrag.active {
+		m.updateResizeDrag(mouse.X, mouse.Y)
+		return nil
+	}
+	if m.twoColumn() && !m.leftDown {
+		m.updateResizeHover(mouse.X, mouse.Y)
+	}
+	rows := m.visibleRows()
+	if len(rows) == 0 {
+		return nil
+	}
+	if m.leftDown {
+		return m.dragTextSelection(mouse, rows)
+	}
+	if m.twoColumn() {
+		m.updateSectionHover(mouse)
+		return nil
+	}
+	m.updateHover(mouse, rows)
+	return nil
+}
+
+// updateResizeHover tracks which divider (if any) the mouse currently rests
+// on, purely for the hover line/joint highlight — never gates whether a drag
+// can start (tryStartResizeDrag hit-tests fresh at press time).
+func (m *Model) updateResizeHover(x, y int) {
+	next := m.hitTestDivider(x, y)
+	if next == m.resizeHover {
+		return
+	}
+	m.resizeHover = next
+	m.invalidateRender()
+}
+
+// commonRowClick performs the click actions that are identical on every list
+// surface — opening a rune, checking off a Wilds objective, collapsing a
+// rune-quest group, or adding via a "+ New …" affordance. It returns
+// (cmd, true) when it handled the row kind; (nil, false) leaves the
+// surface-specific kinds (Section chevron, Quest checkbox — whose click zones
+// depend on that surface's layout) to the caller. One definition of what a
+// click does to these rows, so the Tavern rail and campaigns/Wilds column
+// can't drift apart (the kind of split that hid the rune-click bug).
+func (m *Model) commonRowClick(row ui.Row) (tea.Cmd, bool) {
+	switch row.Kind {
+	case ui.RowRune:
+		return m.openConnection(connection{kind: linkRune, code: row.RuneKey, url: ldFlagURL(m.ldProject, m.ldEnv, row.RuneKey)}), true
+	case ui.RowRuneQuest:
+		m.toggleReveal()
+		return nil, true
+	case ui.RowWildsObjective:
+		return m.toggleDone(), true
+	case ui.RowNewProject, ui.RowNewQuest, ui.RowNewRune:
+		return m.handleEnter(), true
+	}
+	return nil, false
 }
 
 // clickRowAt handles a left-press on the row at idx of rows: opening a meta
@@ -848,7 +970,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 // default (toggle collapse/done, open a rune, add). colX is the column's
 // content left edge — relX is measured from it, matching how hint/code spans
 // were recorded.
-func (m *Model) clickRowAt(rows []ui.Row, idx int, msg tea.MouseMsg, colX int) tea.Cmd {
+func (m *Model) clickRowAt(rows []ui.Row, idx int, msg tea.Mouse, colX int) tea.Cmd {
 	if idx < 0 || idx >= len(rows) {
 		return nil
 	}
@@ -884,13 +1006,23 @@ func (m *Model) clickRowAt(rows []ui.Row, idx int, msg tea.MouseMsg, colX int) t
 				return m.handleReveal()
 			case "enter":
 				return m.handleEnter()
+			case "done":
+				return m.toggleDone()
 			}
 		}
 	}
 
+	if cmd, ok := m.commonRowClick(row); ok {
+		return cmd
+	}
+
 	switch row.Kind {
 	case ui.RowLabel:
-		return m.handleEnter() // the Campaigns banner toggles collapse-all
+		// Campaigns banner: chevron collapses all, name opens the focused view.
+		if relX <= 1 {
+			return m.handleEnter()
+		}
+		return m.handleReveal()
 	case ui.RowProject, ui.RowSection:
 		if relX <= 3+nestOffset {
 			m.toggleReveal()
@@ -902,10 +1034,6 @@ func (m *Model) clickRowAt(rows []ui.Row, idx int, msg tea.MouseMsg, colX int) t
 			return m.toggleDone()
 		}
 		m.beginTextSelection(m.editor, relX-titleOffset(row, nestOffset))
-	case ui.RowRune:
-		return openURL(ldFlagURL(m.ldProject, m.ldEnv, row.RuneKey))
-	case ui.RowNewProject, ui.RowNewQuest, ui.RowNewRune:
-		return m.handleEnter()
 	}
 	return nil
 }
@@ -928,7 +1056,7 @@ func (m *Model) beginTextSelection(ti *textinput.Model, relX int) {
 // with the left button held, as long as it's still over the same row the
 // drag started on — moving onto a different row just stops updating
 // rather than jumping the selection there.
-func (m *Model) dragTextSelection(msg tea.MouseMsg, rows []ui.Row) tea.Cmd {
+func (m *Model) dragTextSelection(msg tea.Mouse, rows []ui.Row) tea.Cmd {
 	if m.editor == nil || m.selAnchor == noSelection {
 		return nil
 	}
@@ -951,7 +1079,7 @@ func (m *Model) dragTextSelection(msg tea.MouseMsg, rows []ui.Row) tea.Cmd {
 // updateHover tracks which row the mouse is resting over (nil if none, or
 // off the row area entirely) — purely for the "(tab: open)"/"(read only)"
 // hints in View(); it never moves the cursor or changes any data.
-func (m *Model) updateHover(msg tea.MouseMsg, rows []ui.Row) {
+func (m *Model) updateHover(msg tea.Mouse, rows []ui.Row) {
 	relY := msg.Y - m.rowsScreenTop
 	if relY < 0 {
 		m.hover = nil

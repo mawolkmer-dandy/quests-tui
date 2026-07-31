@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
@@ -589,7 +589,7 @@ func (m *Model) integrationSegments(q *model.Quest) []integrationSegment {
 	// Agent state comes first, as just its icon (managed from the expanded
 	// view, so no click URL here).
 	for _, id := range q.AgentWorkspaces {
-		segs = append(segs, integrationSegment{text: m.agentGlyph(m.workspaceState(id)), width: 1})
+		segs = append(segs, integrationSegment{text: m.agentGlyph(m.agentState(id)), width: 1})
 	}
 	for _, code := range q.JiraCodes {
 		text := ui.StyleMuted.Render(code) + " " + m.jiraGlyph(code)
@@ -743,13 +743,18 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		sectionHeader(ui.GlyphConnNPC, "NPCs")
 		for _, id := range q.AgentWorkspaces {
 			li := len(m.focusLinks)
-			state := m.workspaceState(id)
+			state := m.agentState(id)
+			glyph := m.agentGlyph(state)
 			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAgent, code: id})
 			if m.focusLinkIdx == li {
 				m.focusCaretLine = ln
 			}
-			lines = append(lines, agentPrefix+m.agentGlyph(state)+" "+m.workspaceLabel(id)+"  "+
-				ui.StyleMuted.Render(agentWord(state))+hintFor(li, linkAgent))
+			// Clickable span over the name+status, so a click focuses the agent
+			// exactly as Enter does (see handleFocusClick's agentFocusPrefix case).
+			body := m.agentLabel(id) + "  " + ui.StyleMuted.Render(agentWord(state))
+			x := m.focusLeftMargin + indent + gutterW + lipgloss.Width(glyph) + 1
+			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: agentFocusPrefix + id})
+			lines = append(lines, agentPrefix+glyph+" "+body+hintFor(li, linkAgent))
 			ln++
 		}
 		if len(q.AgentWorkspaces) == 0 {
@@ -799,12 +804,18 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		sectionHeader(ui.GlyphConnRune, "Runes")
 		for _, key := range q.Runes {
 			li := len(m.focusLinks)
-			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkRune, code: key, url: ldFlagURL(m.ldProject, m.ldEnv, key)})
+			url := ldFlagURL(m.ldProject, m.ldEnv, key)
+			glyph := m.runeGlyph(key)
+			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkRune, code: key, url: url})
 			if m.focusLinkIdx == li {
 				m.focusCaretLine = ln
 			}
-			lines = append(lines, agentPrefix+m.runeGlyph(key)+" "+key+"  "+
-				ui.StyleMuted.Render(m.runeWord(key))+hintFor(li, linkRune))
+			body := ui.StyleName.Render(key) + "  " + ui.StyleMuted.Render(m.runeWord(key))
+			// Register the clickable span (the rune loop is bespoke — no codeW
+			// padding — so it can't use addLink; without this a click did nothing).
+			x := m.focusLeftMargin + indent + gutterW + lipgloss.Width(glyph) + 1
+			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: url})
+			lines = append(lines, agentPrefix+glyph+" "+body+hintFor(li, linkRune))
 			ln++
 		}
 		if len(q.Runes) == 0 {
@@ -839,6 +850,11 @@ func connectionCount(q *model.Quest) int {
 // a mouse click there opens the agent picker instead of a browser (see
 // handleFocusMouse).
 const addAgentSentinel = "\x00add-agent"
+
+// agentFocusPrefix marks a pinned-agent line's clickable span; the herdr
+// terminal id follows the prefix, so a click focuses that agent (matching
+// Enter — see handleFocusClick).
+const agentFocusPrefix = "\x00agent-focus:"
 
 // focusLinkCount is how many navigable link lines the expanded quest view
 // currently has — the "Connections" master toggle, plus (when expanded) each

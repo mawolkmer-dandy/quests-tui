@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
 	"github.com/mawolkmer-dandy/quests-tui/internal/store"
@@ -37,6 +37,49 @@ type pickerItem struct {
 // renderFocusView vs renderModal.
 func isFocusModal(k ModalKind) bool {
 	return k == ModalQuestDetail || k == ModalCampaignDetail || k == ModalSectionDetail
+}
+
+// isPickerModal reports whether kind is one of the small filtered-list dialogs
+// that support click-to-select and wheel-to-scroll (see handlePickerClick).
+func isPickerModal(k ModalKind) bool {
+	return k == ModalProjectPicker || k == ModalAgentPicker || k == ModalRunePicker
+}
+
+// handlePickerClick resolves a left-click on a picker list item to its index,
+// highlights it, and confirms it exactly as pressing Enter would — reusing
+// updateModal so each picker's confirm logic (move / pin / attach) isn't
+// duplicated here.
+func (m *Model) handlePickerClick(msg tea.MouseClickMsg) tea.Cmd {
+	if m.modal == nil || m.modalItemTop < 0 {
+		return nil
+	}
+	mouse := msg.Mouse()
+	if mouse.Button != tea.MouseLeft {
+		return nil
+	}
+	if mouse.X < m.modalItemX0 || mouse.X >= m.modalItemX1 {
+		return nil
+	}
+	idx := mouse.Y - m.modalItemTop
+	if idx < 0 || idx >= m.modalItemCount {
+		return nil
+	}
+	m.modal.PickerIndex = idx
+	return m.updateModal(tea.KeyPressMsg{Code: tea.KeyEnter})
+}
+
+// handlePickerWheel moves the picker's highlight up/down with the scroll wheel.
+func (m *Model) handlePickerWheel(msg tea.MouseWheelMsg) tea.Cmd {
+	if m.modal == nil {
+		return nil
+	}
+	switch msg.Mouse().Button {
+	case tea.MouseWheelUp:
+		return m.updateModal(tea.KeyPressMsg{Code: tea.KeyUp})
+	case tea.MouseWheelDown:
+		return m.updateModal(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	return nil
 }
 
 type Modal struct {
@@ -92,25 +135,11 @@ func campaignQuestRows(s *store.Store, campaignID string) []ui.Row {
 // sectionRows is the navigable row list for a section's focused page: the
 // Questboard's quests plus a "+ New Quest" affordance, or the Vault's parked
 // quests followed by its archived campaigns.
-func sectionRows(s *store.Store, section string) []ui.Row {
-	var rows []ui.Row
-	switch section {
-	case "inbox":
-		for _, q := range ui.QuestsForInbox(s) {
-			rows = append(rows, ui.Row{Kind: ui.RowQuest, QuestID: q.ID})
-		}
-		rows = append(rows, ui.Row{Kind: ui.RowNewQuest})
-	case "someday":
-		for _, q := range ui.QuestsForSomeday(s) {
-			rows = append(rows, ui.Row{Kind: ui.RowQuest, ProjectID: q.ProjectID, QuestID: q.ID, ShowProjectTag: q.ProjectID != ""})
-		}
-		for _, p := range s.Projects {
-			if p.Archived {
-				rows = append(rows, ui.Row{Kind: ui.RowProject, ProjectID: p.ID})
-			}
-		}
-	}
-	return rows
+// sectionRows is the navigable row list for a section's focused page — the
+// same content the Tavern box shows (see ui.SectionContent), so both views
+// render identically; the focused page just has more vertical room.
+func (m *Model) sectionRows(section string) []ui.Row {
+	return ui.SectionContent(m.store, section, m.collapsedProjects)
 }
 
 // filteredPickerItems is the project-picker list narrowed to the fuzzy filter
@@ -126,6 +155,21 @@ func (mod *Modal) filteredPickerItems() []pickerItem {
 		}
 	}
 	return out
+}
+
+// clipLabel truncates a picker label to at most max display columns (with a
+// trailing ellipsis), so every item stays on a single line — long agent titles
+// would otherwise wrap and both look messy and throw off the click-to-item
+// mapping (which assumes one screen row per item).
+func clipLabel(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max < 1 {
+		return ""
+	}
+	return string(r[:max-1]) + "…"
 }
 
 // fuzzySubsequence reports whether every rune of query appears in target in
@@ -155,6 +199,10 @@ func (m *Model) sectionTitle(section string) string {
 	switch section {
 	case "inbox":
 		return fmt.Sprintf("Questboard (%d)", ui.CountInbox(m.store))
+	case "runes":
+		return fmt.Sprintf("Runes (%d)", ui.CountRunes(m.store))
+	case "campaigns":
+		return "Campaigns"
 	case "someday":
 		return fmt.Sprintf("Vault (%d)", ui.CountSomeday(m.store)+ui.CountArchived(m.store))
 	}
@@ -394,7 +442,7 @@ func (m *Model) seedBodyEditor(idx, col int) {
 // editing), plus Ctrl+D objective toggling and multiline paste.
 // handled=false means the caller should forward msg to the line editor as
 // ordinary text input.
-func (m *Model) handleBodyOutlineKey(msg tea.KeyMsg) (tea.Cmd, bool) {
+func (m *Model) handleBodyOutlineKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	mod := m.modal
 	body := m.currentBody()
 	if body == nil {
@@ -409,7 +457,7 @@ func (m *Model) handleBodyOutlineKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		m.moveBodyLine(1)
 		return nil, true
 
-	case msg.Type == tea.KeyEnter:
+	case msg.Code == tea.KeyEnter:
 		raw := []rune(mod.BodyEditor.Value())
 		pos := mod.BodyEditor.Position()
 		kind, display := model.ClassifyBodyLine(string(raw))
@@ -444,7 +492,7 @@ func (m *Model) handleBodyOutlineKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		m.seedBodyEditor(insertAt, newCol)
 		return nil, true
 
-	case msg.Type == tea.KeyBackspace:
+	case msg.Code == tea.KeyBackspace:
 		if mod.BodyEditor.Position() != 0 {
 			return nil, false // normal in-line character delete
 		}
@@ -470,7 +518,7 @@ func (m *Model) handleBodyOutlineKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		m.seedBodyEditor(prevIdx, junction)
 		return nil, true
 
-	case msg.Type == tea.KeyDelete:
+	case msg.Code == tea.KeyDelete:
 		raw := []rune(mod.BodyEditor.Value())
 		if mod.BodyEditor.Position() < len(raw) || mod.BodyCursor >= len(*body)-1 {
 			return nil, false // normal forward delete / nothing below
@@ -485,36 +533,30 @@ func (m *Model) handleBodyOutlineKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		m.seedBodyEditor(mod.BodyCursor, len(raw))
 		return nil, true
 
-	case msg.Type == tea.KeyRunes && strings.ContainsAny(string(msg.Runes), "\n\r"):
-		// A multi-line paste — split it into real body lines instead of
-		// letting textinput collapse the newlines into spaces. Any links in the
-		// pasted lines (and ONLY those lines) are captured immediately.
-		start, end := m.pasteBodyLines(string(msg.Runes))
-		if mod.Kind == ModalQuestDetail {
-			if q := m.findQuest(mod.QuestID); q != nil {
-				return m.captureBodyLinesRange(q, start, end), true
-			}
-		}
-		return nil, true
-
-	case msg.Type == tea.KeyTab:
-		m.indentBodyLine(1)
-		return nil, true
-
-	case msg.Type == tea.KeyShiftTab:
+	case msg.Code == tea.KeyTab && msg.Mod&tea.ModShift != 0:
 		m.indentBodyLine(-1)
+		return nil, true
+
+	case msg.Code == tea.KeyTab:
+		m.indentBodyLine(1)
 		return nil, true
 
 	case msg.String() == "ctrl+d":
 		m.commitBodyLine()
 		body = m.currentBody()
 		kind, _ := model.ClassifyBodyLine((*body)[mod.BodyCursor].Text)
+		var cmd tea.Cmd
 		if kind == model.BodyObjective {
-			(*body)[mod.BodyCursor].Done = !(*body)[mod.BodyCursor].Done
+			done := !(*body)[mod.BodyCursor].Done
+			(*body)[mod.BodyCursor].Done = done
 			m.touchBodyOwner()
+			if done { // same check-off feedback as the Wilds: sparkle burst + sound
+				m.spawnSparkleBurst(m.cursorScreenX+bodyObjCol+2*(*body)[mod.BodyCursor].Indent, m.cursorScreenY, 10)
+				cmd = tea.Batch(m.playSound(sndObjectiveDone), m.maybeStartOverlayTick())
+			}
 		}
 		mod.BodyEditor = m.newBodyEditor((*body)[mod.BodyCursor].Text)
-		return nil, true
+		return cmd, true
 	}
 
 	return nil, false
@@ -589,14 +631,52 @@ func (m *Model) pasteBodyLines(text string) (start, end int) {
 	return start, lastIdx
 }
 
+// pasteIntoModal routes a bracketed-paste (tea.PasteMsg, decoupled from key
+// events in v2 — unlike v1, where a multi-line paste arrived as a multi-rune
+// KeyMsg) to whichever field the open modal is actually editing.
+func (m *Model) pasteIntoModal(msg tea.PasteMsg) tea.Cmd {
+	mod := m.modal
+	switch mod.Kind {
+	case ModalQuestDetail:
+		start, end := m.pasteBodyLines(msg.Content)
+		if q := m.findQuest(mod.QuestID); q != nil {
+			return tea.Batch(m.captureBodyLinesRange(q, start, end), m.maybeStartSpinner())
+		}
+		return nil
+	case ModalCampaignDetail:
+		if mod.InQuestList {
+			if m.editor == nil {
+				return nil
+			}
+			var cmd tea.Cmd
+			*m.editor, cmd = m.editor.Update(msg)
+			return cmd
+		}
+		m.pasteBodyLines(msg.Content)
+		return nil
+	case ModalSectionDetail:
+		if m.editor == nil {
+			return nil
+		}
+		var cmd tea.Cmd
+		*m.editor, cmd = m.editor.Update(msg)
+		return cmd
+	case ModalProjectPicker, ModalAgentPicker, ModalRunePicker:
+		mod.PickerFilter += msg.Content
+		mod.PickerIndex = 0
+		return nil
+	}
+	return nil
+}
+
 // focusScrollBy moves the focus-view caret n rows up/down by replaying that
 // many Up/Down key presses through updateModal — so wheel and Page keys
 // reuse the exact navigation logic (body rows, quest-list transitions), and
 // the view's caret-driven scroll follows along.
 func (m *Model) focusScrollBy(down bool, n int) tea.Cmd {
-	k := tea.KeyMsg{Type: tea.KeyUp}
+	k := tea.KeyPressMsg{Code: tea.KeyUp}
 	if down {
-		k.Type = tea.KeyDown
+		k.Code = tea.KeyDown
 	}
 	var cmd tea.Cmd
 	for i := 0; i < n; i++ {
@@ -605,16 +685,16 @@ func (m *Model) focusScrollBy(down bool, n int) tea.Cmd {
 	return cmd
 }
 
-func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
+func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 	mod := m.modal
 
 	// PageUp/PageDown scroll a focused quest/campaign by half a screen.
-	if isFocusModal(mod.Kind) && (msg.Type == tea.KeyPgUp || msg.Type == tea.KeyPgDown) {
+	if isFocusModal(mod.Kind) && (msg.Code == tea.KeyPgUp || msg.Code == tea.KeyPgDown) {
 		half := m.height / 2
 		if half < 1 {
 			half = 1
 		}
-		return m.focusScrollBy(msg.Type == tea.KeyPgDown, half)
+		return m.focusScrollBy(msg.Code == tea.KeyPgDown, half)
 	}
 
 	switch mod.Kind {
@@ -657,8 +737,8 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 				mod.PickerIndex = 0
 			}
 		default:
-			if msg.Type == tea.KeyRunes {
-				mod.PickerFilter += string(msg.Runes)
+			if msg.Text != "" {
+				mod.PickerFilter += msg.Text
 				mod.PickerIndex = 0
 			}
 		}
@@ -687,7 +767,8 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 					m.save()
 					// Reflect the pinned agent immediately, and make sure the
 					// poll is running now that a workspace is pinned.
-					cmd = tea.Batch(refreshWorkspacesCmd(), m.maybeStartAgentPoll())
+					m.pendingConnBurstCode = id
+					cmd = tea.Batch(refreshAgentsCmd(), m.maybeStartAgentPoll(), m.playSound(sndAddConnection), m.pokeOverlayTick())
 				}
 			}
 			m.closeModal()
@@ -700,8 +781,8 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 				mod.PickerIndex = 0
 			}
 		default:
-			if msg.Type == tea.KeyRunes {
-				mod.PickerFilter += string(msg.Runes)
+			if msg.Text != "" {
+				mod.PickerFilter += msg.Text
 				mod.PickerIndex = 0
 			}
 		}
@@ -733,7 +814,8 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 			key := mod.PickerItems[mod.PickerIndex].ID
 			m.attachRune(mod.TargetQuestID, key)
 			m.closeModal()
-			return tea.Batch(refreshRunesCmd(m.ldProject, m.ldEnv, []string{key}), m.maybeStartSpinner())
+			m.pendingConnBurstCode = key
+			return tea.Batch(refreshRunesCmd(m.ldProject, m.ldEnv, []string{key}), m.maybeStartSpinner(), m.playSound(sndAddConnection), m.pokeOverlayTick())
 		case "esc":
 			m.closeModal()
 		case "backspace":
@@ -741,8 +823,8 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 				mod.PickerFilter = string(r[:len(r)-1])
 			}
 		default:
-			if msg.Type == tea.KeyRunes {
-				mod.PickerFilter += string(msg.Runes)
+			if msg.Text != "" {
+				mod.PickerFilter += msg.Text
 			}
 		}
 		return nil
@@ -761,7 +843,7 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 				return cmd
 			}
 		}
-		if msg.Type == tea.KeyEsc {
+		if msg.Code == tea.KeyEsc {
 			m.commitBodyLine()
 			m.closeModal()
 			return nil
@@ -801,7 +883,7 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 			m.closeModal()
 			return nil
 		}
-		if msg.Type == tea.KeyEsc {
+		if msg.Code == tea.KeyEsc {
 			m.commitBodyLine()
 			m.commitEdit()
 			// Always return to the campaign itself in the outline below,
@@ -865,24 +947,24 @@ func (m *Model) updateModal(msg tea.KeyMsg) tea.Cmd {
 		return cmd
 
 	case ModalSectionDetail:
-		if msg.Type == tea.KeyEsc {
+		if msg.Code == tea.KeyEsc {
 			m.commitEdit()
 			m.setCursor(ui.Row{Kind: ui.RowSection, Section: mod.Section})
 			m.closeModal()
 			return nil
 		}
-		rows := sectionRows(m.store, mod.Section)
+		rows := m.sectionRows(mod.Section)
 		switch msg.String() {
 		case "up":
-			if idx := findRowIndex(rows, m.cursor); idx > 0 {
+			if r, ok := stepSelectable(rows, m.cursor, -1); ok {
 				m.commitEdit()
-				m.setCursor(rows[idx-1])
+				m.setCursor(r)
 			}
 			return nil
 		case "down":
-			if idx := findRowIndex(rows, m.cursor); idx >= 0 && idx < len(rows)-1 {
+			if r, ok := stepSelectable(rows, m.cursor, 1); ok {
 				m.commitEdit()
-				m.setCursor(rows[idx+1])
+				m.setCursor(r)
 			}
 			return nil
 		}
@@ -896,6 +978,11 @@ func (m *Model) renderModal() string {
 	mod := m.modal
 	var content string
 
+	// Picker list geometry, filled in by the picker cases below and turned into
+	// screen coordinates once the box is placed (see the tail of this function).
+	m.modalItemTop, m.modalItemCount = -1, 0
+	pickerFirstLine, pickerItemCount := -1, 0
+
 	switch mod.Kind {
 	case ModalHelp:
 		var b strings.Builder
@@ -904,23 +991,20 @@ func (m *Model) renderModal() string {
 		b.WriteString(ui.StyleMuted.Render("A single fluid outline for tracking quests inside campaigns."))
 		b.WriteString("\n\n")
 
-		b.WriteString(ui.StyleSectionHeader.Render("Terms"))
+		b.WriteString(ui.StyleSectionHeader.Render("Views"))
 		b.WriteString("\n")
-		fmt.Fprintf(&b, "%-11s%s\n", "Tavern", ui.StyleMuted.Render("home base — the full outline: Questboard, campaigns, Vault"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Wilds", ui.StyleMuted.Render("focused view (Ctrl+G) — just your taken-up quests to work through"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Questboard", ui.StyleMuted.Render("your inbox — new quests with no campaign yet"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Campaigns", ui.StyleMuted.Render("your projects — each lists its own quests"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Vault", ui.StyleMuted.Render("your archive — parked quests and retired campaigns"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Take up", ui.StyleMuted.Render("mark a quest active (Ctrl+A) to bring it Wilds"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Tavern", ui.StyleMuted.Render("the full outline — everything at once"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Wilds", ui.StyleMuted.Render("Ctrl+G — a focused view of just your taken-up quests"))
 		b.WriteString("\n")
 
-		b.WriteString(ui.StyleSectionHeader.Render("Getting around the Tavern"))
+		b.WriteString(ui.StyleSectionHeader.Render("Sections"))
 		b.WriteString("\n")
-		fmt.Fprintf(&b, "%-11s%s\n", "Layout", ui.StyleMuted.Render("Questboard, Runes & Vault in the left rail; campaigns fill the right"))
-		fmt.Fprintf(&b, "%-11s%s\n", "←/→", ui.StyleMuted.Render("switch to the rail / to campaigns (when the caret is at the title's edge)"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+B", ui.StyleMuted.Render("jump to the Questboard"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+R", ui.StyleMuted.Render("jump to the Runes"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+E", ui.StyleMuted.Render("jump back to the Campaigns"))
+		b.WriteString(ui.StyleMuted.Render("Ctrl+1–4 jump to one; Ctrl+Shift+1–3 collapse a rail section."))
+		b.WriteString("\n")
+		fmt.Fprintf(&b, "%-9s%-13s%s\n", "Ctrl+1", "Questboard", ui.StyleMuted.Render("your inbox — new quests with no campaign yet"))
+		fmt.Fprintf(&b, "%-9s%-13s%s\n", "Ctrl+2", "Runes", ui.StyleMuted.Render("feature flags you're watching, grouped by quest"))
+		fmt.Fprintf(&b, "%-9s%-13s%s\n", "Ctrl+3", "Vault", ui.StyleMuted.Render("your archive — parked quests and retired campaigns"))
+		fmt.Fprintf(&b, "%-9s%-13s%s\n", "Ctrl+4", "Campaigns", ui.StyleMuted.Render("your projects — each lists its own quests"))
 		b.WriteString("\n")
 
 		b.WriteString(ui.StyleSectionHeader.Render("Data"))
@@ -945,19 +1029,13 @@ func (m *Model) renderModal() string {
 
 		b.WriteString(ui.StyleSectionHeader.Render("Integrations"))
 		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("Paste a Jira or GitHub PR URL into a quest's body to link it (multiple of"))
+		b.WriteString(ui.StyleMuted.Render("A quest links to other systems, each a status-colored emblem by its title:"))
 		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("each allowed). On paste it's tracked and the URL is shortened inline to"))
-		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("its code, still clickable. Click a code to open it; arrow onto a link in"))
-		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("the expanded view to open (↵) or remove (" + Keys.Delete.Help().Key + ") it. PR shows " + ui.GlyphPRSuccess + "/" + ui.GlyphPRError + "/" + ui.GlyphPRRunning + "/" + ui.GlyphPRMerged + ","))
-		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("+ resolved/total comments; Jira shows " + ui.GlyphJiraTodo + "/" + ui.GlyphJiraInProgress + "/" + ui.GlyphJiraDone + " (todo / wip / done), ~60s."))
-		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("Requires gh and acli authenticated locally (gh auth login; acli jira"))
-		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("auth login)."))
+		fmt.Fprintf(&b, "%-14s%s\n", "Jira", ui.StyleMuted.Render("paste an issue URL into the quest body"))
+		fmt.Fprintf(&b, "%-14s%s\n", "GitHub PR", ui.StyleMuted.Render("paste a PR URL into the quest body"))
+		fmt.Fprintf(&b, "%-14s%s\n", "LaunchDarkly", ui.StyleMuted.Render("watch a flag — in the Runes section or a quest's detail"))
+		fmt.Fprintf(&b, "%-14s%s\n", "herdr", ui.StyleMuted.Render("pin a Claude agent from a quest's detail view"))
+		b.WriteString(ui.StyleMuted.Render("Jira/PR live status needs gh and acli logged in locally."))
 		b.WriteString("\n\n")
 
 		b.WriteString(ui.StyleSectionHeader.Render("Keys"))
@@ -988,10 +1066,12 @@ func (m *Model) renderModal() string {
 		if len(items) == 0 {
 			b.WriteString(ui.StyleMuted.Render("  (no matching campaigns)") + "\n")
 		}
+		pickerFirstLine, pickerItemCount = strings.Count(b.String(), "\n"), len(items)
 		for i, item := range items {
-			line := "  " + item.Label
+			label := clipLabel(item.Label, 54)
+			line := "  " + label
 			if i == mod.PickerIndex {
-				line = ui.StyleSelectedRow.Render("> " + item.Label)
+				line = ui.StyleSelectedRow.Render("> " + label)
 			}
 			b.WriteString(line + "\n")
 		}
@@ -1009,14 +1089,26 @@ func (m *Model) renderModal() string {
 		b.WriteString(ui.StyleMuted.Render("› ") + query + "\n\n")
 		items := mod.filteredPickerItems()
 		if len(items) == 0 {
-			b.WriteString(ui.StyleMuted.Render("  (no herdr workspaces — is the herdr server running?)") + "\n")
+			b.WriteString(ui.StyleMuted.Render("  (no herdr agents — is the herdr server running?)") + "\n")
 		}
+		pickerFirstLine, pickerItemCount = strings.Count(b.String(), "\n"), len(items)
 		for i, item := range items {
-			line := "  " + item.Label
+			// herdr-style row: a status icon in a left gutter (kept outside the
+			// selection highlight so its color survives), then "<workspace> ·
+			// <tab>" — workspace emphasized, tab muted. Look the agent up by its
+			// pinned terminal id for the live status/labels.
+			ag, _ := m.agentByID(item.ID)
+			icon := m.agentGlyph(ag.Status)
+			ws, tab := ag.Workspace, ag.Tab
+			var body string
 			if i == mod.PickerIndex {
-				line = ui.StyleSelectedRow.Render("> " + item.Label)
+				body = ui.StyleSelectedRow.Render(clipLabel(item.Label, 54))
+			} else if tab == "" {
+				body = ui.StyleName.Render(clipLabel(ws, 54))
+			} else {
+				body = ui.StyleName.Render(ws) + ui.StyleMuted.Render(" · "+tab)
 			}
-			b.WriteString(line + "\n")
+			b.WriteString("  " + icon + " " + body + "\n")
 		}
 		b.WriteString("\n" + ui.StyleMuted.Render("type to filter · ↑↓ choose · enter pin · esc cancel"))
 		content = b.String()
@@ -1042,10 +1134,12 @@ func (m *Model) renderModal() string {
 		case len(mod.PickerItems) == 0:
 			b.WriteString(ui.StyleMuted.Render("  (no flags match)") + "\n")
 		default:
+			pickerFirstLine, pickerItemCount = strings.Count(b.String(), "\n"), len(mod.PickerItems)
 			for i, item := range mod.PickerItems {
-				line := "  " + item.Label
+				label := clipLabel(item.Label, 54)
+				line := "  " + label
 				if i == mod.PickerIndex {
-					line = ui.StyleSelectedRow.Render("> " + item.Label)
+					line = ui.StyleSelectedRow.Render("> " + label)
 				}
 				b.WriteString(line + "\n")
 			}
@@ -1058,40 +1152,32 @@ func (m *Model) renderModal() string {
 		b.WriteString(ui.StyleTitle.Render("Quest & campaign details"))
 		b.WriteString("\n\n")
 
-		b.WriteString(ui.StyleSectionHeader.Render("Formatting"))
+		b.WriteString(ui.StyleSectionHeader.Render("Formatting the body"))
 		b.WriteString("\n")
-		fmt.Fprintf(&b, "%-11s%s\n", `"# "`, ui.StyleMuted.Render("start a heading"))
-		fmt.Fprintf(&b, "%-11s%s\n", `"- "`, ui.StyleMuted.Render("start an objective (checkbox)"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+D", ui.StyleMuted.Render("toggle the objective under the cursor"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Tab / ⇧Tab", ui.StyleMuted.Render("indent / outdent the line (nest objectives)"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Enter", ui.StyleMuted.Render("inside a list \"- \" carries onto the next line; empty, it exits the list"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Paste", ui.StyleMuted.Render("multi-line text splits into real lines (\"- \" / \"# \" recognized)"))
+		fmt.Fprintf(&b, "%-12s%s\n", `# `, ui.StyleMuted.Render("start a line with this for a heading"))
+		fmt.Fprintf(&b, "%-12s%s\n", `- `, ui.StyleMuted.Render("start an objective; Ctrl+D checks it off"))
 		b.WriteString("\n")
 
-		b.WriteString(ui.StyleSectionHeader.Render("Selecting text"))
+		b.WriteString(ui.StyleSectionHeader.Render("Integrations"))
 		b.WriteString("\n")
-		fmt.Fprintf(&b, "%-11s%s\n", "Shift+←/→", ui.StyleMuted.Render("select character by character (copies as it grows)"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Shift+↑/↓", ui.StyleMuted.Render("extend the selection across lines (copy-only)"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Mouse", ui.StyleMuted.Render("click a line and drag, across lines too"))
+		b.WriteString(ui.StyleMuted.Render("Paste a Jira/PR URL into the body — captured and shortened to a code:"))
 		b.WriteString("\n")
+		fmt.Fprintf(&b, "%-14s%s\n", "GitHub PR", ui.StyleMuted.Render("CI + review state, unresolved comments, merged;"))
+		fmt.Fprintf(&b, "%-14s%s\n", "", ui.StyleMuted.Render("several linked PRs order into a Graphite stack"))
+		fmt.Fprintf(&b, "%-14s%s\n", "Jira", ui.StyleMuted.Render("issue status — todo / in progress / done"))
+		fmt.Fprintf(&b, "%-14s%s\n", "LaunchDarkly", ui.StyleMuted.Render("\"+ watch a rune\" tracks a flag's on/off state"))
+		fmt.Fprintf(&b, "%-14s%s\n", "herdr", ui.StyleMuted.Render("\"+ add agent\" pins a Claude agent; Enter jumps to it"))
+		b.WriteString(ui.StyleMuted.Render("On a link line: ↑/↓ focus it, Enter opens, Ctrl+X removes. Needs gh + acli."))
+		b.WriteString("\n\n")
 
-		b.WriteString(ui.StyleSectionHeader.Render("Integration links (quest detail)"))
+		b.WriteString(ui.StyleSectionHeader.Render("Quest list (in a campaign)"))
 		b.WriteString("\n")
-		fmt.Fprintf(&b, "%-11s%s\n", "Paste URL", ui.StyleMuted.Render("a Jira/PR URL is captured instantly and pulled out of the line"))
-		fmt.Fprintf(&b, "%-11s%s\n", "↑ from body", ui.StyleMuted.Render("steps onto the link lines above; ↓ returns to the body"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Enter", ui.StyleMuted.Render("open the focused link (browser) or jump to the agent's herdr pane"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+X", ui.StyleMuted.Render("remove the focused link / unpin the agent (inline y/n)"))
-		fmt.Fprintf(&b, "%-11s%s\n", "+ add agent", ui.StyleMuted.Render("the muted line below the links pins a Claude agent (↵ / click)"))
-		b.WriteString("\n")
-
-		b.WriteString(ui.StyleSectionHeader.Render("Campaign quest list"))
-		b.WriteString("\n")
-		fmt.Fprintf(&b, "%-11s%s\n", "Tab", ui.StyleMuted.Render("open a listed quest's own detail view"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Enter", ui.StyleMuted.Render("add a quest via \"+ New Quest\", or a sibling below one"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+D/G/T", ui.StyleMuted.Render("toggle done / active-taken / type on the highlighted quest"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+P", ui.StyleMuted.Render("move the highlighted quest to a different campaign"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Ctrl+X", ui.StyleMuted.Render("delete the highlighted quest (inline y/n)"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Shift+↑/↓", ui.StyleMuted.Render("reorder the highlighted quest"))
+		fmt.Fprintf(&b, "%-12s%s\n", "Tab", ui.StyleMuted.Render("open a listed quest's own detail"))
+		fmt.Fprintf(&b, "%-12s%s\n", "Enter", ui.StyleMuted.Render("add via \"+ New Quest\", or a sibling below one"))
+		fmt.Fprintf(&b, "%-12s%s\n", "Ctrl+D/G/T", ui.StyleMuted.Render("toggle done / taken / type"))
+		fmt.Fprintf(&b, "%-12s%s\n", "Ctrl+P", ui.StyleMuted.Render("move to another campaign"))
+		fmt.Fprintf(&b, "%-12s%s\n", "Ctrl+X", ui.StyleMuted.Render("delete (inline y/n)"))
+		fmt.Fprintf(&b, "%-12s%s\n", "Shift+↑/↓", ui.StyleMuted.Render("reorder"))
 		b.WriteString("\n")
 
 		b.WriteString(ui.StyleMuted.Render("press any key to close"))
@@ -1109,6 +1195,25 @@ func (m *Model) renderModal() string {
 		Padding(1, 2).
 		Width(minInt(boxWidth, m.width-4)).
 		Render(content)
+
+	// Map the picker's list items to screen coordinates now that the box's size
+	// is known — lipgloss.Place centers it, so item i sits at boxTop + border(1)
+	// + padding(1) + its content-line index. Lets a click resolve to an item.
+	if pickerFirstLine >= 0 && pickerItemCount > 0 {
+		boxLines := strings.Split(box, "\n")
+		boxTop := (m.height - len(boxLines)) / 2
+		if boxTop < 0 {
+			boxTop = 0
+		}
+		boxLeft := (m.width - lipgloss.Width(boxLines[0])) / 2
+		if boxLeft < 0 {
+			boxLeft = 0
+		}
+		m.modalItemTop = boxTop + 2 + pickerFirstLine
+		m.modalItemCount = pickerItemCount
+		m.modalItemX0 = boxLeft
+		m.modalItemX1 = boxLeft + lipgloss.Width(boxLines[0])
+	}
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
@@ -1199,6 +1304,22 @@ func (m *Model) renderFocusView() string {
 	m.focusContentTop = topPad + 2 - scroll
 	m.focusBodyBaseRow = m.focusContentTop + m.focusBodyLineStart
 	m.focusHeaderRow = topPad - scroll
+	// Record the body caret's screen cell so a completion burst (Ctrl+D on an
+	// objective here) fires at the checkbox — same overlay path as the outline.
+	m.cursorScreenY = m.focusContentTop + m.focusCaretLine
+	m.cursorScreenX = leftMargin // the body caret's marker column
+	// A connection was just added: burst on its own line in the Sigils section
+	// (m.focusLinks was populated by renderFocusContent above).
+	if m.pendingConnBurstCode != "" {
+		code := m.pendingConnBurstCode
+		m.pendingConnBurstCode = ""
+		for _, l := range m.focusLinks {
+			if l.code == code {
+				m.spawnSparkleBurst(leftMargin+6, m.focusContentTop+l.line, 10)
+				break
+			}
+		}
+	}
 	m.focusBackWidth = lipgloss.Width(back)
 	m.focusHelpX = leftMargin + m.focusBackWidth + pad
 	m.focusHelpWidth = lipgloss.Width(right)
@@ -1244,27 +1365,47 @@ func foldHint(margin string, width int) string {
 // clicking the header's "← back (esc)"/"F1 help" triggers them, clicking a
 // body line moves the editing cursor there, and dragging (including across
 // lines) extends a text selection from where the press landed.
-func (m *Model) handleFocusMouse(msg tea.MouseMsg) tea.Cmd {
-	mod := m.modal
-	if mod == nil {
-		return nil
-	}
-	if msg.Action == tea.MouseActionPress && (msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown) {
-		return m.focusScrollBy(msg.Button == tea.MouseButtonWheelDown, 1)
-	}
-	if msg.Button != tea.MouseButtonLeft {
-		return nil
-	}
-	press := msg.Action == tea.MouseActionPress
-	if !press && msg.Action != tea.MouseActionMotion {
-		return nil
-	}
+// handleFocusWheel is the focus view's scroll-wheel handling — v1 folded this
+// into handleFocusMouse guarded by Action==Press; v2 gives wheel events their
+// own message type, dispatched separately from Update.
+func (m *Model) handleFocusWheel(msg tea.MouseWheelMsg) tea.Cmd {
+	mouse := msg.Mouse()
+	return m.focusScrollBy(mouse.Button == tea.MouseWheelDown, 1)
+}
 
-	if press && msg.Y == m.focusHeaderRow {
+// handleFocusClick is a left mouse press inside a focus view.
+func (m *Model) handleFocusClick(msg tea.MouseClickMsg) tea.Cmd {
+	if m.modal == nil {
+		return nil
+	}
+	mouse := msg.Mouse()
+	if mouse.Button != tea.MouseLeft {
+		return nil
+	}
+	return m.handleFocusPointer(mouse, true)
+}
+
+// handleFocusMotion is mouse movement inside a focus view — a drag extending
+// the body selection when one is armed (m.selAnchor), otherwise a no-op.
+func (m *Model) handleFocusMotion(msg tea.MouseMotionMsg) tea.Cmd {
+	if m.modal == nil {
+		return nil
+	}
+	return m.handleFocusPointer(msg.Mouse(), false)
+}
+
+// handleFocusPointer is the shared logic behind handleFocusClick/
+// handleFocusMotion — v1 combined both into one handleFocusMouse keyed off
+// msg.Action; the `press` flag now plays that role explicitly since v2 splits
+// press and motion into distinct message types.
+func (m *Model) handleFocusPointer(mouse tea.Mouse, press bool) tea.Cmd {
+	mod := m.modal
+
+	if press && mouse.Y == m.focusHeaderRow {
 		switch {
-		case msg.X >= m.focusLeftMargin && msg.X < m.focusLeftMargin+m.focusBackWidth:
-			return m.updateModal(tea.KeyMsg{Type: tea.KeyEsc})
-		case msg.X >= m.focusHelpX && msg.X < m.focusHelpX+m.focusHelpWidth:
+		case mouse.X >= m.focusLeftMargin && mouse.X < m.focusLeftMargin+m.focusBackWidth:
+			return m.updateModal(tea.KeyPressMsg{Code: tea.KeyEsc})
+		case mouse.X >= m.focusHelpX && mouse.X < m.focusHelpX+m.focusHelpWidth:
 			m.pushModal(detailHelpModal())
 		}
 		return nil
@@ -1274,10 +1415,9 @@ func (m *Model) handleFocusMouse(msg tea.MouseMsg) tea.Cmd {
 	// "+ add Claude agent" affordance opens the picker.
 	if press {
 		for _, sp := range m.focusCodeSpans {
-			if msg.Y == m.focusContentTop+sp.line && msg.X >= sp.x0 && msg.X < sp.x1 {
+			if mouse.Y == m.focusContentTop+sp.line && mouse.X >= sp.x0 && mouse.X < sp.x1 {
 				if sp.url == addAgentSentinel {
-					m.openAgentPicker()
-					return nil
+					return m.openAgentPicker()
 				}
 				if sp.url == addRuneSentinel {
 					if q := m.findQuest(mod.QuestID); q != nil {
@@ -1291,6 +1431,9 @@ func (m *Model) handleFocusMouse(msg tea.MouseMsg) tea.Cmd {
 						m.save()
 					}
 					return nil
+				}
+				if strings.HasPrefix(sp.url, agentFocusPrefix) {
+					return openAgent(strings.TrimPrefix(sp.url, agentFocusPrefix))
 				}
 				return openURL(sp.url)
 			}
@@ -1307,7 +1450,7 @@ func (m *Model) handleFocusMouse(msg tea.MouseMsg) tea.Cmd {
 	// Soft-wrapped body lines span several screen rows — the row map built
 	// during rendering resolves a row back to its body line and the raw
 	// rune offset that row starts at.
-	bodyRow := msg.Y - m.focusBodyBaseRow
+	bodyRow := mouse.Y - m.focusBodyBaseRow
 	if bodyRow < 0 || bodyRow >= len(m.focusRowLine) {
 		return nil
 	}
@@ -1323,7 +1466,7 @@ func (m *Model) handleFocusMouse(msg tea.MouseMsg) tea.Cmd {
 		m.clearFocusLink() // clicking into the body takes the caret out of the links
 		m.commitBodyLine()
 		raw := []rune((*body)[bodyIdx].Text)
-		pos := clampInt(m.focusRowOffset[bodyRow]+msg.X-textCol, 0, len(raw))
+		pos := clampInt(m.focusRowOffset[bodyRow]+mouse.X-textCol, 0, len(raw))
 		if bodyIdx != mod.BodyCursor {
 			mod.BodyCursor = bodyIdx
 			mod.BodyEditor = bodyLineEditor(string(raw))
@@ -1344,7 +1487,7 @@ func (m *Model) handleFocusMouse(msg tea.MouseMsg) tea.Cmd {
 		mod.BodyEditor = bodyLineEditor((*body)[bodyIdx].Text) // not newBodyEditor — the anchor must survive
 	}
 	runes := []rune(mod.BodyEditor.Value())
-	mod.BodyEditor.SetCursor(clampInt(m.focusRowOffset[bodyRow]+msg.X-textCol, 0, len(runes)))
+	mod.BodyEditor.SetCursor(clampInt(m.focusRowOffset[bodyRow]+mouse.X-textCol, 0, len(runes)))
 	return m.copyBodySelection()
 }
 
@@ -1460,7 +1603,7 @@ func (m *Model) renderFocusContent() string {
 	case ModalSectionDetail:
 		emit(ui.StyleTitle.Render(m.sectionTitle(mod.Section)))
 		emit("")
-		rows := sectionRows(m.store, mod.Section)
+		rows := m.sectionRows(mod.Section)
 		if len(rows) == 0 {
 			emit(ui.StyleMuted.Render("  (empty)"))
 			return strings.TrimRight(b.String(), "\n")
@@ -1474,6 +1617,8 @@ func (m *Model) renderFocusContent() string {
 				titleView = ui.StyleMuted.Render(m.warningText)
 			} else if isCursor && m.editor != nil {
 				titleView = m.renderEditableStyled(m.editor, m.cursorTitleStyle(row))
+			} else if row.Kind == ui.RowRune {
+				titleView = m.runeRowContent(row.RuneKey)
 			}
 			hint := ""
 			if confirming {

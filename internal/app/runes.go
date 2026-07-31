@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
@@ -266,28 +266,23 @@ func (m *Model) collectRuneKeys() []string {
 	return keys
 }
 
-// runeState is the display state for a flag key from cache, or "" (unknown /
-// not yet synced).
-func (m *Model) runeState(key string) string {
-	if st, ok := m.runeStatus[key]; ok {
-		return st.State
-	}
-	return ""
-}
-
-// runeGlyph is the state-colored icon for a rune: a lit circle when on, a
-// half circle for a partial/targeted rollout, a hollow circle when off, and
-// the muted fetching dot before its first sync.
+// runeGlyph is the rune's icon, colored by how widely it's live across both
+// environments: a filled green circle when on in production AND test, a half
+// amber circle when on in just one, a hollow muted circle when off in both,
+// and the pulsing dot before its first sync.
 func (m *Model) runeGlyph(key string) string {
-	switch m.runeState(key) {
-	case "on":
-		return lipgloss.NewStyle().Foreground(ui.ColorHeading).Render(ui.GlyphRuneOn)
-	case "partial":
-		return lipgloss.NewStyle().Foreground(ui.ColorRunning).Render(ui.GlyphRunePartial)
-	case "off":
-		return ui.StyleMuted.Render(ui.GlyphRuneOff)
-	default:
+	st, ok := m.runeStatus[key]
+	if !ok {
 		return m.pulseStyle().Render(ui.GlyphFetching)
+	}
+	on := func(s string) bool { return s == "on" || s == "partial" }
+	switch {
+	case on(st.State) && on(st.StateTest):
+		return lipgloss.NewStyle().Foreground(ui.ColorHeading).Render(ui.GlyphRuneOn)
+	case on(st.State) || on(st.StateTest):
+		return lipgloss.NewStyle().Foreground(ui.ColorPriorityMedium).Render(ui.GlyphRunePartial)
+	default:
+		return ui.StyleMuted.Render(ui.GlyphRuneOff)
 	}
 }
 

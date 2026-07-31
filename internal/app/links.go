@@ -4,8 +4,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
 )
@@ -51,7 +51,7 @@ func (m *Model) clearFocusLink() {
 // up with focusLinkIdx. Returns handled=false only for keys the link cursor
 // doesn't claim (so the caller can fall through to its normal handling; in
 // practice every relevant key is claimed here).
-func (m *Model) handleFocusLinkKey(msg tea.KeyMsg, q *model.Quest) (tea.Cmd, bool) {
+func (m *Model) handleFocusLinkKey(msg tea.KeyPressMsg, q *model.Quest) (tea.Cmd, bool) {
 	// Resolve the focused link against the last render's list. A stale index
 	// (list shrank) just drops back to the body.
 	if m.focusLinkIdx < 0 || m.focusLinkIdx >= len(m.focusLinks) {
@@ -70,7 +70,7 @@ func (m *Model) handleFocusLinkKey(msg tea.KeyMsg, q *model.Quest) (tea.Cmd, boo
 	}
 
 	switch {
-	case msg.Type == tea.KeyEsc:
+	case msg.Code == tea.KeyEsc:
 		m.commitBodyLine()
 		m.closeModal()
 		return nil, true
@@ -88,22 +88,21 @@ func (m *Model) handleFocusLinkKey(msg tea.KeyMsg, q *model.Quest) (tea.Cmd, boo
 		m.clearFocusLink()
 		m.seedBodyEditor(0, 0)
 		return nil, true
-	case msg.Type == tea.KeyEnter:
+	case msg.Code == tea.KeyEnter:
 		switch link.kind {
 		case linkToggleConn:
 			q.ConnectionsCollapsed = !q.ConnectionsCollapsed
 			m.save()
 			return nil, true
 		case linkAddAgent:
-			m.openAgentPicker()
-			return nil, true
+			return m.openAgentPicker(), true
 		case linkAddRune:
 			m.openRunePicker(q.ID)
 			return nil, true
-		case linkAgent:
-			return openWorkspace(link.code), true // focus the herdr workspace
-		default:
-			return openURL(link.url), true // linkJira/linkPR/linkRune → browser
+		case linkAgent, linkJira, linkPR, linkRune:
+			// One shared "open" — agents focus their pane, the rest open in the
+			// browser — identical to the Tavern (see openConnection).
+			return m.openConnection(connection{kind: link.kind, code: link.code, url: link.url}), true
 		}
 	case key.Matches(msg, Keys.Delete):
 		if link.kind == linkAddAgent || link.kind == linkAddRune || link.kind == linkToggleConn {
@@ -211,6 +210,16 @@ func (m *Model) captureSync(codes, runes []string) tea.Cmd {
 	}
 	if len(runes) > 0 {
 		cmds = append(cmds, refreshRunesCmd(m.ldProject, m.ldEnv, runes), m.maybeStartSpinner())
+	}
+	if len(codes) > 0 || len(runes) > 0 {
+		// a Jira/PR/rune link was just captured: sound + a sparkle burst on its
+		// Sigils line (deferred to the next render — see pendingConnBurstCode).
+		if len(codes) > 0 {
+			m.pendingConnBurstCode = codes[0]
+		} else {
+			m.pendingConnBurstCode = runes[0]
+		}
+		cmds = append(cmds, m.playSound(sndAddConnection), m.pokeOverlayTick())
 	}
 	return tea.Batch(cmds...)
 }

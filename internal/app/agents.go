@@ -2,66 +2,124 @@ package app
 
 import (
 	"encoding/json"
-	"fmt"
 	"os/exec"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
 
-// herdr-native agent integration. `herdr workspace list` is the source of
-// truth: each workspace carries a user-given label, a live agent_status
-// (accurate — herdr reads the pane's terminal output, not Claude's daemon), and
-// a stable workspace id. A quest pins workspaces by id; the status, name, and
-// "open" all come from herdr. Requires the herdr server to be running — when
-// it isn't, no agent state shows.
+// herdr-native agent integration. `herdr agent list` is the source of truth:
+// each entry is one live Claude agent pane, carrying its terminal title, a live
+// agent_status (accurate — herdr reads the pane's terminal output, not Claude's
+// daemon), and a stable terminal id. A quest pins agents by that terminal id;
+// the status, name, and "open" all come from herdr. Requires the herdr server
+// to be running — when it isn't, no agent state shows.
 
-// HerdrWorkspace is one entry of `herdr workspace list`.
-type HerdrWorkspace struct {
-	ID     string // workspace_id, e.g. "wC"
-	Label  string // user-given name, e.g. "S - questlog"
-	Status string // "idle" | "working" | "blocked" | "unknown"
+// HerdrAgent is one entry of `herdr agent list` — a live agent pane, named the
+// way herdr's own sidebar names it: "<workspace> · <tab>".
+type HerdrAgent struct {
+	ID        string // terminal_id, a stable focus target, e.g. "term_6579824d674f05"
+	Workspace string // herdr workspace label, e.g. "main" / "impressions-smokescreen"
+	Tab       string // herdr tab label, e.g. "better checkout" (often "1" for single-tab workspaces)
+	Status    string // "idle" | "working" | "blocked" | "done" | "unknown"
 }
 
-// workspacesMsg delivers a refreshed workspace list into Update.
-type workspacesMsg struct{ ws []HerdrWorkspace }
+// Name is the agent's herdr-style display name, "<workspace> · <tab>".
+func (a HerdrAgent) Name() string {
+	if a.Workspace == "" {
+		return a.Tab
+	}
+	if a.Tab == "" {
+		return a.Workspace
+	}
+	return a.Workspace + " · " + a.Tab
+}
 
-// fetchHerdrWorkspaces runs `herdr workspace list` and parses it. ok is false
-// when herdr isn't installed or its server isn't running.
-func fetchHerdrWorkspaces() (ws []HerdrWorkspace, ok bool) {
-	out, err := runCmd("herdr", "workspace", "list")
+// agentsMsg delivers a refreshed agent list into Update.
+type agentsMsg struct{ agents []HerdrAgent }
+
+// herdrLabels runs a `herdr <thing> list` command and returns an id→label map,
+// keyed on the given id field ("workspace_id" or "tab_id"). Best-effort: an
+// error yields an empty map, so the agent still shows with whatever it has.
+func herdrLabels(thing, listKey, idKey string) map[string]string {
+	out, err := runCmd("herdr", thing, "list")
+	if err != nil {
+		return map[string]string{}
+	}
+	// result mixes the entry array with scalar fields (e.g. "type"), so decode
+	// it loosely and pull just the list we want.
+	var resp struct {
+		Result map[string]json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return map[string]string{}
+	}
+	var raw []map[string]any
+	if err := json.Unmarshal(resp.Result[listKey], &raw); err != nil {
+		return map[string]string{}
+	}
+	labels := map[string]string{}
+	for _, e := range raw {
+		id, _ := e[idKey].(string)
+		label, _ := e["label"].(string)
+		if id != "" {
+			labels[id] = label
+		}
+	}
+	return labels
+}
+
+// fetchHerdrAgents runs `herdr agent list` and joins each agent to its herdr
+// workspace and tab labels (from `herdr workspace list` / `herdr tab list`), so
+// agents read the way they do in herdr's sidebar. ok is false when herdr isn't
+// installed or its server isn't running. Bare-shell panes (no agent) are
+// skipped — only actual agents are pinnable.
+func fetchHerdrAgents() (agents []HerdrAgent, ok bool) {
+	out, err := runCmd("herdr", "agent", "list")
 	if err != nil {
 		return nil, false
 	}
 	var resp struct {
 		Result struct {
-			Workspaces []struct {
-				WorkspaceID string `json:"workspace_id"`
-				Label       string `json:"label"`
+			Agents []struct {
+				Agent       string `json:"agent"`
 				AgentStatus string `json:"agent_status"`
-			} `json:"workspaces"`
+				TerminalID  string `json:"terminal_id"`
+				TabID       string `json:"tab_id"`
+				WorkspaceID string `json:"workspace_id"`
+			} `json:"agents"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return nil, false
 	}
-	for _, w := range resp.Result.Workspaces {
-		ws = append(ws, HerdrWorkspace{ID: w.WorkspaceID, Label: w.Label, Status: w.AgentStatus})
+	workspaces := herdrLabels("workspace", "workspaces", "workspace_id")
+	tabs := herdrLabels("tab", "tabs", "tab_id")
+	for _, a := range resp.Result.Agents {
+		if a.Agent == "" || a.TerminalID == "" {
+			continue // a bare-shell pane, not an agent
+		}
+		agents = append(agents, HerdrAgent{
+			ID:        a.TerminalID,
+			Workspace: workspaces[a.WorkspaceID],
+			Tab:       tabs[a.TabID],
+			Status:    a.AgentStatus,
+		})
 	}
-	return ws, true
+	return agents, true
 }
 
-// refreshWorkspacesCmd fetches the workspace list off the UI goroutine.
-func refreshWorkspacesCmd() tea.Cmd {
+// refreshAgentsCmd fetches the agent list off the UI goroutine.
+func refreshAgentsCmd() tea.Cmd {
 	return func() tea.Msg {
-		ws, ok := fetchHerdrWorkspaces()
+		agents, ok := fetchHerdrAgents()
 		if !ok {
 			return nil
 		}
-		return workspacesMsg{ws: ws}
+		return agentsMsg{agents: agents}
 	}
 }
 
@@ -75,29 +133,30 @@ func (m *Model) hasAgentLinks() bool {
 	return false
 }
 
-// workspace returns the cached herdr workspace with id, if present.
-func (m *Model) workspace(id string) (HerdrWorkspace, bool) {
-	for _, w := range m.workspaces {
-		if w.ID == id {
-			return w, true
+// agentByID returns the cached herdr agent with id, if present.
+func (m *Model) agentByID(id string) (HerdrAgent, bool) {
+	for _, a := range m.agents {
+		if a.ID == id {
+			return a, true
 		}
 	}
-	return HerdrWorkspace{}, false
+	return HerdrAgent{}, false
 }
 
-// workspaceState is the display state for a pinned workspace: its herdr
-// agent_status, or "none" when herdr doesn't know it (closed / server down).
-func (m *Model) workspaceState(id string) string {
-	if w, ok := m.workspace(id); ok {
-		return w.Status
+// agentState is the display state for a pinned agent: its herdr agent_status,
+// or "none" when herdr doesn't know it (closed / server down).
+func (m *Model) agentState(id string) string {
+	if a, ok := m.agentByID(id); ok {
+		return a.Status
 	}
 	return "none"
 }
 
-// workspaceLabel is the workspace's herdr label, or its id when unknown.
-func (m *Model) workspaceLabel(id string) string {
-	if w, ok := m.workspace(id); ok && w.Label != "" {
-		return w.Label
+// agentLabel is the agent's herdr-style name ("<workspace> · <tab>"), or its
+// id when herdr doesn't know it (closed / server down).
+func (m *Model) agentLabel(id string) string {
+	if a, ok := m.agentByID(id); ok && a.Name() != "" {
+		return a.Name()
 	}
 	return id
 }
@@ -122,7 +181,7 @@ func (m *Model) agentGlyph(status string) string {
 		return lipgloss.NewStyle().Foreground(ui.ColorImportant).Render(ui.GlyphAgentBlocked)
 	case "working":
 		return ui.StyleRunning.Render(m.spin(spinnerAgent))
-	case "idle":
+	case "idle", "done":
 		return lipgloss.NewStyle().Foreground(ui.ColorHeading).Render(ui.GlyphAgentIdle)
 	default: // "unknown" / "none"
 		return ui.StyleMuted.Render(ui.GlyphAgentNone)
@@ -137,7 +196,7 @@ func agentWord(status string) string {
 	case "":
 		return "unknown"
 	default:
-		return status // idle / working / blocked / unknown
+		return status // idle / working / blocked / done / unknown
 	}
 }
 
@@ -145,7 +204,7 @@ func agentWord(status string) string {
 func (m *Model) hasWorkingAgent() bool {
 	for i := range m.store.Quests {
 		for _, id := range m.store.Quests[i].AgentWorkspaces {
-			if m.workspaceState(id) == "working" {
+			if m.agentState(id) == "working" {
 				return true
 			}
 		}
@@ -230,7 +289,7 @@ func (m *Model) maybeStartAgentPoll() tea.Cmd {
 	}
 	m.agentPollOn = true
 	m.agentPollGen++
-	return tea.Batch(refreshWorkspacesCmd(), agentPollTick(m.agentPollGen))
+	return tea.Batch(refreshAgentsCmd(), agentPollTick(m.agentPollGen))
 }
 
 // onAgentPollTick refreshes and re-arms while any workspace stays pinned.
@@ -242,48 +301,50 @@ func (m *Model) onAgentPollTick(gen int) tea.Cmd {
 		m.agentPollOn = false
 		return nil
 	}
-	return tea.Batch(refreshWorkspacesCmd(), agentPollTick(gen))
+	return tea.Batch(refreshAgentsCmd(), agentPollTick(gen))
 }
 
-// openWorkspace focuses a herdr workspace (jumps to its pane), fire-and-forget.
-func openWorkspace(id string) tea.Cmd {
+// openAgent focuses a herdr agent (jumps to its pane), fire-and-forget.
+func openAgent(id string) tea.Cmd {
 	return func() tea.Msg {
-		_ = exec.Command("herdr", "workspace", "focus", id).Start()
+		_ = exec.Command("herdr", "agent", "focus", id).Start()
 		return nil
 	}
 }
 
 // --- picker ------------------------------------------------------------------
 
-// openAgentPicker opens the picker to pin a herdr workspace to the focused
-// quest. A no-op outside a quest detail view.
-func (m *Model) openAgentPicker() {
+// openAgentPicker opens the picker to pin a herdr agent to the focused quest.
+// A no-op outside a quest detail view.
+func (m *Model) openAgentPicker() tea.Cmd {
 	if m.modal == nil || m.modal.Kind != ModalQuestDetail {
-		return
+		return nil
 	}
 	q := m.findQuest(m.modal.QuestID)
 	if q == nil {
-		return
+		return nil
 	}
 	// Fetch fresh so the picker reflects herdr right now.
-	if ws, ok := fetchHerdrWorkspaces(); ok {
-		m.workspaces = ws
+	if agents, ok := fetchHerdrAgents(); ok {
+		m.agents = agents
 	}
 	m.commitBodyLine()
 	m.clearFocusLink()
-	m.pushModal(&Modal{Kind: ModalAgentPicker, TargetQuestID: q.ID, PickerItems: m.workspacePickerItems()})
+	m.pushModal(&Modal{Kind: ModalAgentPicker, TargetQuestID: q.ID, PickerItems: m.agentPickerItems()})
+	return m.playSound(sndOpenNPC)
 }
 
-// workspacePickerItems lists herdr workspaces for the picker, labelled
-// "<name> · <status>"; the ID is the workspace id that gets pinned.
-func (m *Model) workspacePickerItems() []pickerItem {
+// agentPickerItems lists herdr agents for the picker. Label is the plain
+// "<workspace> · <tab>" name (used for fuzzy filtering); the row is rendered
+// with a status icon + styling in renderModal. ID is the terminal id pinned.
+func (m *Model) agentPickerItems() []pickerItem {
 	var items []pickerItem
-	for _, w := range m.workspaces {
-		label := w.Label
+	for _, a := range m.agents {
+		label := a.Name()
 		if label == "" {
-			label = w.ID
+			label = a.ID
 		}
-		items = append(items, pickerItem{ID: w.ID, Label: fmt.Sprintf("%s · %s", label, agentWord(w.Status))})
+		items = append(items, pickerItem{ID: a.ID, Label: label})
 	}
 	return items
 }

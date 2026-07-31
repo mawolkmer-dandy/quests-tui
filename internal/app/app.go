@@ -9,12 +9,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/mawolkmer-dandy/quests-tui/internal/config"
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
 	"github.com/mawolkmer-dandy/quests-tui/internal/quickadd"
 	"github.com/mawolkmer-dandy/quests-tui/internal/store"
@@ -34,12 +35,12 @@ const mouseLeakChars = "\x1b[<;0123456789Mm"
 // mouse-report alphabet and include a "[" or "<" introducer — that can only
 // be a leaked (partial) mouse sequence, never real typing. A lone "[" (or
 // digits like "12", "5M") is left alone so ordinary input still works.
-func isMouseLeak(msg tea.KeyMsg) bool {
-	if msg.Type != tea.KeyRunes || len(msg.Runes) < 2 {
+func isMouseLeak(k tea.Key) bool {
+	if k.Text == "" || len(k.Text) < 2 {
 		return false
 	}
 	marker := false
-	for _, r := range msg.Runes {
+	for _, r := range k.Text {
 		if !strings.ContainsRune(mouseLeakChars, r) {
 			return false
 		}
@@ -54,11 +55,11 @@ func isMouseLeak(msg tea.KeyMsg) bool {
 // the mouse-report alphabet — used only inside the brief post-wheel window
 // (see lastWheelAt), where such a keystroke can only be a leaked fragment,
 // never intentional typing.
-func mouseAlphabetKey(msg tea.KeyMsg) bool {
-	if msg.Type != tea.KeyRunes || len(msg.Runes) == 0 {
+func mouseAlphabetKey(k tea.Key) bool {
+	if k.Text == "" {
 		return false
 	}
-	for _, r := range msg.Runes {
+	for _, r := range k.Text {
 		if !strings.ContainsRune(mouseLeakChars, r) {
 			return false
 		}
@@ -72,16 +73,17 @@ func mouseAlphabetKey(msg tea.KeyMsg) bool {
 // can move a quest to a different position in the list without losing the
 // cursor.
 type cursorTarget struct {
-	kind      ui.RowKind
-	projectID string
-	questID   string
-	section   string
-	label     string
-	runeKey   string
+	kind       ui.RowKind
+	projectID  string
+	questID    string
+	section    string
+	label      string
+	runeKey    string
+	bodyLineID string
 }
 
 func targetFromRow(row ui.Row) cursorTarget {
-	return cursorTarget{kind: row.Kind, projectID: row.ProjectID, questID: row.QuestID, section: row.Section, label: row.Label, runeKey: row.RuneKey}
+	return cursorTarget{kind: row.Kind, projectID: row.ProjectID, questID: row.QuestID, section: row.Section, label: row.Label, runeKey: row.RuneKey, bodyLineID: row.BodyLineID}
 }
 
 func (t cursorTarget) matches(row ui.Row) bool {
@@ -109,6 +111,8 @@ func (t cursorTarget) matches(row ui.Row) bool {
 		return t.projectID == row.ProjectID
 	case ui.RowRuneQuest:
 		return t.questID == row.QuestID
+	case ui.RowWildsObjective:
+		return t.questID == row.QuestID && t.bodyLineID == row.BodyLineID
 	}
 	return false
 }
@@ -127,6 +131,10 @@ type Model struct {
 	path    string
 	darkBg  bool
 	watcher *fsnotify.Watcher // watches the quick-add spool for live ingestion (see quickadd_watch.go)
+
+	// cfgPath is ~/.config/quests/config.toml — needed so a resize-drag
+	// release can persist the new layout ratios (see endResizeDrag).
+	cfgPath string
 
 	// Undo stack of prior store states (JSON snapshots). recordUndo pushes the
 	// pre-change state on each save; undo (Ctrl+Z) pops and restores. Bounded
@@ -164,6 +172,21 @@ type Model struct {
 	width, height int
 	scrollOffset  int
 	subtitle      string
+
+	// Screen-space overlay (see overlay.go): transient effects composited on
+	// top of the final frame. cursorScreen{X,Y} is the last-rendered cursor
+	// cell (Y = -1 when off-screen / not applicable), so a completion can spawn
+	// a burst where the item visually is.
+	overlayParticles []overlayParticle
+	overlayTickOn    bool
+	overlayGen       int
+	cursorScreenX    int
+	cursorScreenY    int
+	// pendingConnBurstCode spawns a sparkle burst on the next detail render on
+	// the just-added connection's own line in the Sigils section (matched by
+	// its code/id). Deferred a frame because the add happens with a modal open /
+	// before the connection has a rendered position. "" = nothing pending.
+	pendingConnBurstCode string
 
 	// Environment-change animation (see transition.go): old rows burn away
 	// right-to-left, a pause, then the new view reveals line by line. Runs on
@@ -278,6 +301,12 @@ type Model struct {
 	modal      *Modal
 	modalStack []*Modal
 
+	// Picker-modal click mapping (ModalProjectPicker/AgentPicker/RunePicker):
+	// the screen row of the first selectable list item, the item count, and the
+	// box's horizontal extent — recomputed each renderModal so a click on a row
+	// maps to an item index. modalItemTop is -1 when no list is showing.
+	modalItemTop, modalItemCount, modalItemX0, modalItemX1 int
+
 	// hover is whatever row the mouse is currently resting over, or the
 	// cursor's own row (nil if neither applies) — used to show an action
 	// hint ("→ open (tab)", "↓ collapse (enter)") next to it. See
@@ -287,6 +316,10 @@ type Model struct {
 	// and always shows).
 	hover         *cursorTarget
 	hideHoverTips bool
+	// hoverSection is the Tavern section whose title the mouse is currently over
+	// ("inbox"/"runes"/"someday"/"campaigns", or ""), so its box title can show
+	// the open/collapse hint on hover (set each motion in the two-column view).
+	hoverSection string
 
 	// warningText, if non-empty, replaces warningTarget's title for a couple
 	// of seconds — used for "vault is read-only" when an action is blocked
@@ -308,6 +341,25 @@ type Model struct {
 	// those stragglers can't land in the text.
 	lastWheelAt time.Time
 
+	// leftDown is true from a left MouseClickMsg until the next
+	// MouseReleaseMsg — v2 splits press/release/motion into distinct message
+	// types and a MouseMotionMsg carries no button state, so this is the only
+	// way handleMotion/handleFocusMotion know a drag (text selection or panel
+	// resize) is in progress.
+	leftDown bool
+
+	// resizeDrag/resizeHover/railWidthRatio/railBoxRatios/lastRailHeights/
+	// lastViewHeight — the two-column Tavern's draggable divider state. See
+	// tavern_columns.go. resizeHover is which divider (if any) the mouse
+	// currently rests on while not dragging — drives the "you can drag here"
+	// line/marker highlight.
+	resizeDrag      resizeDragState
+	resizeHover     resizeTarget
+	railWidthRatio  float64
+	railBoxRatios   [3]float64
+	lastRailHeights [3]int
+	lastViewHeight  int
+
 	// Integration sync (see sync.go). prStatus/jiraStatus cache the latest
 	// fetched status keyed by code; neither is persisted nor part of undo.
 	// integrationsEnabled gates the whole feature (config); syncInterval is
@@ -317,8 +369,9 @@ type Model struct {
 	integrationsEnabled bool
 	syncInterval        time.Duration
 	jiraBaseURL         string
-	ldProject           string // LaunchDarkly project for rune (flag) lookups
-	ldEnv               string // LaunchDarkly environment a rune's state is read in
+	ldProject           string       // LaunchDarkly project for rune (flag) lookups
+	ldEnv               string       // LaunchDarkly environment a rune's state is read in
+	soundCfg            config.Sound // completion-sound settings (see sound.go)
 	prStatus            map[string]PRStatus
 	jiraStatus          map[string]JiraStatus
 	runeStatus          map[string]RuneStatus
@@ -352,10 +405,10 @@ type Model struct {
 	focusLinkIdx       int
 	focusLinkConfirmID string
 
-	// workspaces is the latest `herdr workspace list`, refreshed by the agent
-	// poll (and immediately when the picker opens). A quest shows the state of
-	// its pinned workspaces (see agents.go).
-	workspaces []HerdrWorkspace
+	// agents is the latest `herdr agent list`, refreshed by the agent poll
+	// (and immediately when the picker opens). A quest shows the state of its
+	// pinned agents (see agents.go).
+	agents []HerdrAgent
 
 	// Working-agent spinner: spinnerFrame advances while any pinned agent is
 	// working, animating its status glyph. The ticker only runs while there's
@@ -428,6 +481,19 @@ type Options struct {
 	JiraBaseURL         string
 	LDProject           string // LaunchDarkly project for rune (flag) lookups
 	LDEnv               string // LaunchDarkly environment for rune state
+
+	// CfgPath is config.toml's path — threaded through so a resize-drag
+	// release can persist the new layout ratios (see endResizeDrag).
+	CfgPath string
+	// RailWidthRatio/RailBoxRatios seed the two-column Tavern's draggable
+	// divider ratios from config (see internal/config.Layout).
+	RailWidthRatio float64
+	RailBoxRatios  [3]float64
+	// CollapsedSections seeds which rail sections ("inbox"/"runes"/"someday")
+	// start collapsed, from config (see internal/config.Layout).
+	CollapsedSections []string
+	// Sound configures the completion sounds (see sound.go / config.Sound).
+	Sound config.Sound
 }
 
 func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
@@ -435,14 +501,26 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 	if subtitle == "" {
 		subtitle = ui.RandomGreeting()
 	}
+	railWidthRatio := opts.RailWidthRatio
+	if railWidthRatio <= 0 {
+		railWidthRatio = 0.34
+	}
+	railBoxRatios := opts.RailBoxRatios
+	if railBoxRatios[0]+railBoxRatios[1]+railBoxRatios[2] <= 0 {
+		railBoxRatios = [3]float64{1.0 / 3, 1.0 / 3, 1.0 / 3}
+	}
 	m := &Model{
 		store:             s,
 		path:              path,
 		darkBg:            darkBg,
+		cfgPath:           opts.CfgPath,
+		railWidthRatio:    railWidthRatio,
+		railBoxRatios:     railBoxRatios,
 		subtitle:          subtitle,
 		collapsedProjects: map[string]bool{},
-		// Every section (Questboard / Runes / Vault) starts expanded.
-		collapsedSections:   map[string]bool{},
+		// Every section (Questboard / Runes / Vault) starts expanded, unless
+		// config says otherwise (see internal/config.Layout).
+		collapsedSections:   collapsedSectionsFromList(opts.CollapsedSections),
 		sectionScroll:       map[string]int{},
 		sectionMaxScroll:    map[string]int{},
 		boxCache:            map[string]*boxCacheEntry{},
@@ -456,6 +534,7 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 		jiraBaseURL:         opts.JiraBaseURL,
 		ldProject:           opts.LDProject,
 		ldEnv:               opts.LDEnv,
+		soundCfg:            opts.Sound,
 		prStatus:            map[string]PRStatus{},
 		jiraStatus:          map[string]JiraStatus{},
 		runeStatus:          map[string]RuneStatus{},
@@ -463,6 +542,16 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 	}
 	if rows := m.visibleRows(); len(rows) > 0 {
 		m.setCursor(rows[0])
+	}
+	return m
+}
+
+// collapsedSectionsFromList builds the collapsedSections lookup map from
+// config's flat list of collapsed section keys.
+func collapsedSectionsFromList(sections []string) map[string]bool {
+	m := make(map[string]bool, len(sections))
+	for _, s := range sections {
+		m[s] = true
 	}
 	return m
 }
@@ -477,7 +566,8 @@ func (m *Model) Init() tea.Cmd {
 	// Update) so it doesn't burn frames before there's a size to render into.
 	// Start watching the quick-add spool so captures made elsewhere (CLI,
 	// Raycast) show up live without a relaunch.
-	cmds := []tea.Cmd{m.watchQuickAdd()}
+	// The app opens into the Tavern — play its arrival sound on launch.
+	cmds := []tea.Cmd{m.watchQuickAdd(), m.playSound(sndEnterTavern)}
 	if m.integrationsEnabled {
 		// Fire the first sync almost immediately so linked PR/Jira/rune
 		// statuses resolve on launch instead of sitting at "fetching…" for a
@@ -541,8 +631,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applySyncResult(msg)
 		return m, m.maybeStartSpinner()
 
-	case workspacesMsg:
-		m.workspaces = msg.ws
+	case agentsMsg:
+		m.agents = msg.agents
 		m.invalidateRender()
 		return m, m.maybeStartSpinner()
 
@@ -564,6 +654,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinnerTickMsg:
 		return m, m.onSpinnerTick(msg.gen)
 
+	case overlayTickMsg:
+		return m, m.onOverlayTick(msg.gen)
+
 	case agentPollTickMsg:
 		return m, m.onAgentPollTick(msg.gen)
 
@@ -575,9 +668,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearClipboardToastIfCurrent(msg.gen)
 		return m, nil
 
-	case tea.KeyMsg:
-		if msg.Type == tea.KeyCtrlC {
+	case tea.KeyPressMsg:
+		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
+		}
+		// Mute toggle is global (works in any view/modal) and persists.
+		if key.Matches(msg, Keys.MuteSound) {
+			return m, m.toggleMute()
 		}
 		// Some terminals/multiplexers occasionally feed unparsed mouse-report
 		// escapes (e.g. "[<65;80;30M" from scroll wheels) into the key stream;
@@ -585,10 +682,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// after a wheel event, also drop any lone mouse-alphabet key (a "["
 		// fragment fast scrolling split off), which the structural check
 		// above can't tell from a real keystroke on its own.
-		if isMouseLeak(msg) {
+		if isMouseLeak(tea.Key(msg)) {
 			return m, nil
 		}
-		if time.Since(m.lastWheelAt) < 300*time.Millisecond && mouseAlphabetKey(msg) {
+		if time.Since(m.lastWheelAt) < 300*time.Millisecond && mouseAlphabetKey(tea.Key(msg)) {
 			return m, nil
 		}
 		// The intro/transition animation is non-blocking: keys pass straight
@@ -600,22 +697,86 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.updateModal(msg)
 		}
-		return m, m.handleKey(msg)
+		// handleKey runs first (a move may drop a cursor-trail ghost), then the
+		// overlay ticker starts if anything's now animating.
+		return m, tea.Batch(m.handleKey(msg), m.maybeStartOverlayTick())
 
-	case tea.MouseMsg:
+	case tea.PasteMsg:
+		// v2 decouples bracketed-paste from key events entirely (v1 delivered a
+		// multi-line paste as a multi-rune KeyMsg); route it to whichever field
+		// is actually focused.
+		if m.transitioning() {
+			return m, nil
+		}
+		if m.modal != nil {
+			return m, m.pasteIntoModal(msg)
+		}
+		if m.searchOpen {
+			var cmd tea.Cmd
+			m.searchInput, cmd = m.searchInput.Update(msg)
+			m.rehomeCursor()
+			return m, cmd
+		}
+		if m.editor != nil {
+			var cmd tea.Cmd
+			*m.editor, cmd = m.editor.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
+	case tea.MouseClickMsg:
 		if m.transitioning() {
 			return m, nil // ignore mouse mid-animation
 		}
-		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
-			m.lastWheelAt = time.Now()
+		if msg.Mouse().Button == tea.MouseLeft {
+			m.leftDown = true
 		}
 		if m.modal != nil {
 			if isFocusModal(m.modal.Kind) {
-				return m, m.handleFocusMouse(msg)
+				return m, m.handleFocusClick(msg)
+			}
+			if isPickerModal(m.modal.Kind) {
+				return m, m.handlePickerClick(msg)
 			}
 			return m, nil
 		}
-		return m, m.handleMouse(msg)
+		return m, m.handleClick(msg)
+
+	case tea.MouseReleaseMsg:
+		if m.transitioning() {
+			return m, nil
+		}
+		m.leftDown = false
+		m.endResizeDrag()
+		return m, nil
+
+	case tea.MouseMotionMsg:
+		if m.transitioning() {
+			return m, nil // ignore mouse mid-animation
+		}
+		if m.modal != nil {
+			if isFocusModal(m.modal.Kind) {
+				return m, m.handleFocusMotion(msg)
+			}
+			return m, nil
+		}
+		return m, m.handleMotion(msg)
+
+	case tea.MouseWheelMsg:
+		if m.transitioning() {
+			return m, nil // ignore mouse mid-animation
+		}
+		m.lastWheelAt = time.Now()
+		if m.modal != nil {
+			if isFocusModal(m.modal.Kind) {
+				return m, m.handleFocusWheel(msg)
+			}
+			if isPickerModal(m.modal.Kind) {
+				return m, m.handlePickerWheel(msg)
+			}
+			return m, nil
+		}
+		return m, m.handleWheel(msg)
 	}
 
 	return m, nil
@@ -750,80 +911,18 @@ type chipSpan struct {
 	filter quickFilter
 }
 
-// renderFilterLine renders the reserved line above the rows: the Wilds quick
-// chips, or blank (the Tavern, and the search bar, come from elsewhere). It
-// records chipSpans for click hit-testing.
+// renderFilterLine renders the reserved line above the rows: the search bar
+// while searching, otherwise blank. (The Wilds quick-filter chips were removed.)
 func (m *Model) renderFilterLine(width int, margin string) string {
 	m.chipSpans = nil
 	if m.searchOpen {
 		return margin + m.renderSearchBar()
 	}
-	if !m.wilds {
-		return ""
-	}
-	filters := []quickFilter{filterTaken, filterPriority, filterAll}
-	labels := make([]string, len(filters))
-	widths := make([]int, len(filters))
-	total := 0
-	for i, f := range filters {
-		labels[i] = " " + f.label() + " "
-		widths[i] = lipgloss.Width(labels[i])
-		if i > 0 {
-			total += 2
-		}
-		total += widths[i]
-	}
-	// Center the chip row within the content column.
-	startX := m.leftMargin + (width-total)/2
-	if startX < m.leftMargin {
-		startX = m.leftMargin
-	}
-	var b strings.Builder
-	b.WriteString(strings.Repeat(" ", startX))
-	x := startX
-	for i, f := range filters {
-		if i > 0 {
-			b.WriteString("  ")
-			x += 2
-		}
-		m.chipSpans = append(m.chipSpans, chipSpan{x0: x, x1: x + widths[i], filter: f})
-		x += widths[i]
-		if f == m.quickFilter {
-			b.WriteString(ui.StyleSelectedRow.Render(labels[i]))
-		} else {
-			b.WriteString(ui.StyleMuted.Render(labels[i]))
-		}
-	}
-	return b.String()
+	return ""
 }
 
-// cycleQuickFilter steps the Wilds chip left/right and re-homes the cursor.
-func (m *Model) cycleQuickFilter(delta int) {
-	const n = 3
-	m.quickFilter = quickFilter((int(m.quickFilter) + delta + n) % n)
-	m.scrollOffset = 0
-	if rows := m.visibleRows(); len(rows) > 0 {
-		m.setCursor(rows[0])
-	} else {
-		m.cursor = cursorTarget{}
-	}
-}
-
-// setQuickFilter selects a chip directly (from a mouse click).
-func (m *Model) setQuickFilter(f quickFilter) {
-	if m.quickFilter == f {
-		return
-	}
-	m.quickFilter = f
-	m.scrollOffset = 0
-	if rows := m.visibleRows(); len(rows) > 0 {
-		m.setCursor(rows[0])
-	} else {
-		m.cursor = cursorTarget{}
-	}
-}
-
-// quickFilter is the Wilds radio chip narrowing the flat list.
+// quickFilter is the fixed Wilds filter (Taken). The chip switcher was removed,
+// so it never changes at runtime, but the type/matcher stays to scope the list.
 type quickFilter int
 
 const (
@@ -873,8 +972,27 @@ func (m *Model) wildsRows() []ui.Row {
 			continue
 		}
 		rows = append(rows, ui.Row{Kind: ui.RowQuest, ProjectID: q.ProjectID, QuestID: id, ShowProjectTag: true})
+		rows = append(rows, wildsObjectiveRows(q)...)
 	}
 	return m.insertQuestMetaRows(rows)
+}
+
+// wildsObjectiveRows lists a quest's pending (not-done) objectives as
+// indented child rows for the Wilds agenda. A done quest contributes none —
+// its remaining objectives are moot once the whole quest is finished.
+func wildsObjectiveRows(q model.Quest) []ui.Row {
+	if q.Status == model.StatusDone {
+		return nil
+	}
+	var rows []ui.Row
+	for _, l := range q.Body {
+		kind, _ := model.ClassifyBodyLine(l.Text)
+		if kind != model.BodyObjective || l.Done {
+			continue
+		}
+		rows = append(rows, ui.Row{Kind: ui.RowWildsObjective, ProjectID: q.ProjectID, QuestID: q.ID, BodyLineID: l.ID})
+	}
+	return rows
 }
 
 // wildsEligible maps every quest that can appear in the Wilds (under a
@@ -933,8 +1051,16 @@ func (m *Model) moveWildsQuest(delta int) {
 	}
 	vis := m.wildsRows()
 	vIdx := findRowIndex(vis, m.cursor)
+	if vIdx < 0 {
+		return
+	}
+	// Objectives are interleaved between quests now; step past them to the
+	// neighboring quest so a nudge swaps quest-with-quest, not quest-with-child.
 	nIdx := vIdx + delta
-	if vIdx < 0 || nIdx < 0 || nIdx >= len(vis) {
+	for nIdx >= 0 && nIdx < len(vis) && vis[nIdx].Kind != ui.RowQuest {
+		nIdx += delta
+	}
+	if nIdx < 0 || nIdx >= len(vis) {
 		return
 	}
 	idA, idB := m.cursor.questID, vis[nIdx].QuestID
@@ -992,7 +1118,11 @@ func (m *Model) setWilds(on bool) tea.Cmd {
 	}
 	cmd := m.beginTransition(old, kindMode)
 	m.transOldTwoColumn = oldTwoColumn // beginTransition reset it; set for this switch
-	return cmd
+	snd := sndEnterTavern
+	if on {
+		snd = sndEnterWilds
+	}
+	return tea.Batch(cmd, m.playSound(snd))
 }
 
 // contentWidth is the centered column the outline/header/footer live in.
@@ -1191,7 +1321,7 @@ func (m *Model) currentRowScope() []ui.Row {
 		case m.modal.Kind == ModalCampaignDetail && m.modal.InQuestList:
 			return campaignQuestRows(m.store, m.modal.CampaignID)
 		case m.modal.Kind == ModalSectionDetail:
-			return sectionRows(m.store, m.modal.Section)
+			return m.sectionRows(m.modal.Section)
 		}
 	}
 	return m.visibleRows()
@@ -1215,6 +1345,22 @@ func (m *Model) toggleAllCampaigns() {
 		}
 	}
 	m.invalidateRender()
+}
+
+// stepSelectable finds the next selectable row from the cursor in the given
+// direction (delta ±1), skipping spacers/day-headers/etc. Falls back to the
+// first selectable row when the cursor isn't in the list.
+func stepSelectable(rows []ui.Row, cur cursorTarget, delta int) (ui.Row, bool) {
+	i := findRowIndex(rows, cur)
+	if i < 0 {
+		return nearestSelectableRow(rows, 0)
+	}
+	for j := i + delta; j >= 0 && j < len(rows); j += delta {
+		if rows[j].Selectable() {
+			return rows[j], true
+		}
+	}
+	return ui.Row{}, false
 }
 
 // nearestSelectableRow finds the closest selectable row to idx, preferring
@@ -1271,12 +1417,26 @@ func (m *Model) confirmDeleteHint(row ui.Row) string {
 	return ""
 }
 
-func (m *Model) View() string {
+// View wraps renderContent's string in a tea.View, declaring alt-screen and
+// all-motion mouse reporting per-frame — v2 moved these off tea.NewProgram's
+// options (WithAltScreen/WithMouseAllMotion) onto the View itself.
+func (m *Model) View() tea.View {
+	v := tea.NewView(m.compositeOverlay(m.renderContent()))
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeAllMotion
+	return v
+}
+
+func (m *Model) renderContent() string {
 	if m.width == 0 {
 		return ""
 	}
 
 	if m.modal != nil {
+		// Modals/focus views don't record the cursor's screen cell yet, so
+		// suppress overlay effects there (a later phase adds detail-view
+		// recording) rather than bursting at a stale outline position.
+		m.cursorScreenY = -1
 		if isFocusModal(m.modal.Kind) {
 			return m.renderFocusView()
 		}
@@ -1391,6 +1551,13 @@ func (m *Model) View() string {
 		bottomPad = 0
 	}
 	m.rowsScreenTop = topPad + logoHeight
+	// Record the cursor's on-screen cell (for overlay effects like the
+	// completion burst); -1 when it's scrolled out of view.
+	m.cursorScreenY = -1
+	if idx >= m.scrollOffset && idx < end {
+		m.cursorScreenY = m.rowsScreenTop + (idx - m.scrollOffset)
+		m.cursorScreenX = m.leftMargin // the cursor "›" marker column
+	}
 	m.modeToggleRow = topPad // the header's first line is the TAVERN/WILDS toggle
 	// The reserved filter/chip line sits just above the rows (after the logo
 	// and its blank line) — its screen row is used for chip click hit-testing.
@@ -1558,21 +1725,17 @@ func actionHintParts(row ui.Row) []hintPart {
 	case ui.RowProject:
 		return []hintPart{{collapseHint(row.Collapsed), "enter"}, {"→ open (tab)", "tab"}}
 	case ui.RowSection:
-		// The Runes section has no focused page — Tab is a no-op there, so
-		// only offer the collapse hint.
-		if row.Section == "runes" {
-			return []hintPart{{collapseHint(row.Collapsed), "enter"}}
-		}
+		// Every section has a focused view (name / Tab opens it, chevron /
+		// Enter collapses).
 		return []hintPart{{collapseHint(row.Collapsed), "enter"}, {"→ open (tab)", "tab"}}
 	case ui.RowQuest:
 		return []hintPart{{"→ open (tab)", "tab"}}
+	case ui.RowWildsObjective:
+		return []hintPart{{"✓ done (ctrl+d)", "done"}}
 	case ui.RowRune:
 		return []hintPart{{"↵ open", "enter"}}
 	case ui.RowLabel:
-		if row.Collapsed {
-			return []hintPart{{"↓ expand all (enter)", "enter"}}
-		}
-		return []hintPart{{"↑ collapse all (enter)", "enter"}}
+		return []hintPart{{collapseHint(row.Collapsed), "enter"}, {"→ open (tab)", "tab"}}
 	}
 	return nil
 }

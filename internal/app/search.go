@@ -3,9 +3,9 @@ package app
 import (
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
@@ -179,28 +179,28 @@ func (m *Model) cycleFacet(focus, delta int) {
 // focused select (Tab is left free to open the cursor's quest); typing always
 // edits the find field. Up/Down and command chords fall through so you can
 // still navigate and act on the filtered results.
-func (m *Model) handleSearchBarKey(msg tea.KeyMsg) (tea.Cmd, bool) {
+func (m *Model) handleSearchBarKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	switch {
-	case msg.Type == tea.KeyEsc:
+	case msg.Code == tea.KeyEsc:
 		m.closeSearch()
 		return nil, true
 	case key.Matches(msg, Keys.Search):
 		m.closeSearch()
 		return nil, true
-	case msg.Type == tea.KeyLeft:
+	case msg.Code == tea.KeyLeft:
 		m.searchFocus = (m.searchFocus + focusCount - 1) % focusCount
 		return nil, true
-	case msg.Type == tea.KeyRight:
+	case msg.Code == tea.KeyRight:
 		m.searchFocus = (m.searchFocus + 1) % focusCount
 		return nil, true
-	case msg.Type == tea.KeyEnter:
+	case msg.Code == tea.KeyEnter:
 		if m.searchFocus == focusText {
 			return m.handleReveal(), true // open the cursor's quest
 		}
 		focus := m.searchFocus
 		return m.animateFilter(func() { m.cycleFacet(focus, 1) }), true
-	case msg.Type == tea.KeyRunes, msg.Type == tea.KeySpace,
-		msg.Type == tea.KeyBackspace, msg.Type == tea.KeyDelete:
+	case msg.Text != "", msg.Code == tea.KeySpace,
+		msg.Code == tea.KeyBackspace, msg.Code == tea.KeyDelete:
 		var cmd tea.Cmd
 		m.searchInput, cmd = m.searchInput.Update(msg)
 		m.rehomeCursor()

@@ -1,11 +1,14 @@
 package model
 
+import "time"
+
 type Project struct {
-	ID       string     `json:"id"`
-	Name     string     `json:"name"`
-	Icon     string     `json:"icon,omitempty"`
-	Archived bool       `json:"archived"`
-	Body     []BodyLine `json:"body"`
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Icon       string     `json:"icon,omitempty"`
+	Archived   bool       `json:"archived"`
+	ArchivedAt *time.Time `json:"archivedAt,omitempty"` // when archived; places it in the Vault's day timeline
+	Body       []BodyLine `json:"body"`
 }
 
 // ProgressBucket maps a 0..1 completion ratio to one of 5 text-glyph buckets,

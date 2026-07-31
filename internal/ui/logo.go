@@ -1,10 +1,11 @@
 package ui
 
 import (
+	"image/color"
 	"math/rand"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // TavernGreetings are candidate subtitles for the banner — one is picked at
@@ -88,7 +89,7 @@ const (
 // introShineHighlight is the brief highlight color the sweep passes through
 // — the title itself stays exactly StyleTitle's plain bold color throughout,
 // so there's no jump when the animation ends and RenderLogo takes over.
-var introShineHighlight = lipgloss.AdaptiveColor{Light: "#B8860B", Dark: "#FFD54F"}
+var introShineHighlight color.Color
 
 // IntroTotalFrames is how many frames the intro needs — until both the
 // shine sweep and the subtitle's typewriter reveal have finished, whichever

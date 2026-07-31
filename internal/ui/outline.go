@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
 	"github.com/mawolkmer-dandy/quests-tui/internal/store"
@@ -38,6 +38,11 @@ const (
 	RowDayHeader
 	RowVaultCampaign
 	RowRuneQuest
+	// RowWildsObjective is a single pending objective listed beneath its quest
+	// in the Wilds view — selectable (up/down step onto it) and indented under
+	// the quest. BodyLineID identifies which body line it maps to; Ctrl+D marks
+	// that line done, which drops the row from the list.
+	RowWildsObjective
 )
 
 // Row is one visible line of the outline. Quest rows under a project don't
@@ -56,6 +61,7 @@ type Row struct {
 	ShowProjectTag bool
 	Nested         bool
 	RuneKey        string // for RowRune: the LaunchDarkly flag key
+	BodyLineID     string // for RowWildsObjective: the quest body line it maps to
 }
 
 // Selectable reports whether a row can ever be the cursor target — spacers
@@ -63,7 +69,7 @@ type Row struct {
 // all button (see RowLabel in RenderRow), so it's selectable too.
 func (r Row) Selectable() bool {
 	switch r.Kind {
-	case RowProject, RowQuest, RowSection, RowNewProject, RowNewQuest, RowLabel, RowRune, RowNewRune, RowVaultCampaign, RowRuneQuest:
+	case RowProject, RowQuest, RowSection, RowNewProject, RowNewQuest, RowLabel, RowRune, RowNewRune, RowVaultCampaign, RowRuneQuest, RowWildsObjective:
 		return true
 	}
 	return false
@@ -92,6 +98,17 @@ func findQuest(s *store.Store, id string) *model.Quest {
 // shared so the two places can never drift apart. A Questboard quest has no
 // progress to show yet, so it gets the RPG "quest available" notice mark
 // instead of a diamond.
+// ObjectiveCheckbox is the muted checkbox glyph for an objective — hollow when
+// pending, filled when done. The single source both the outline (Wilds) and
+// the detail-page body render objectives through, so they can't drift apart.
+func ObjectiveCheckbox(done bool) string {
+	g := GlyphQuestOpen
+	if done {
+		g = GlyphQuestDone
+	}
+	return StyleMuted.Render(g)
+}
+
 func QuestGlyph(q *model.Quest) (string, lipgloss.Style) {
 	style := StyleSide
 	if q.Type == model.QuestTypeMain {
@@ -259,6 +276,29 @@ func BuildRows(s *store.Store, collapsedProjects, collapsedSections map[string]b
 	return addSpacers(rows)
 }
 
+// SectionContent is a section's rows WITHOUT its header — the exact content the
+// Tavern box shows for that section, so a focused section view renders
+// identically (day-grouped Vault, spaced campaigns, grouped Runes), just with
+// more vertical room. collapsedProjects drives per-quest rune groups and
+// archived-campaign nesting; the section itself is always expanded here.
+func SectionContent(s *store.Store, section string, collapsedProjects map[string]bool) []Row {
+	var full []Row
+	switch section {
+	case "inbox":
+		full = inboxRows(s, nil)
+	case "runes":
+		full = runesRows(s, collapsedProjects, nil)
+	case "someday":
+		full = vaultRows(s, collapsedProjects, nil)
+	case "campaigns":
+		full = BuildCampaignColumn(s, collapsedProjects)
+	}
+	if len(full) > 0 {
+		return full[1:] // drop the RowSection / RowLabel header
+	}
+	return nil
+}
+
 // BuildCampaignColumn is the two-column Tavern's campaigns column (the right
 // side): the Campaigns label followed by every campaign and its quests. Each
 // campaign is separated by a spacer for breathing room inside its box.
@@ -384,68 +424,78 @@ func vaultRows(s *store.Store, collapsedProjects, collapsedSections map[string]b
 	if collapsed {
 		return rows
 	}
-	// Retired campaigns first, as muted inline rows.
-	for _, p := range s.Projects {
-		if p.Archived {
-			rows = append(rows, Row{Kind: RowVaultCampaign, ProjectID: p.ID})
+	// Parked quests AND retired campaigns share one timeline, grouped by the day
+	// they entered the Vault (newest first), each day a divider. A retired
+	// campaign sits inline like a quest on the day it was archived.
+	var entries []vaultEntry
+	for _, q := range questsForSomeday(s) {
+		entries = append(entries, vaultEntry{when: q.VaultedAt, row: Row{Kind: RowQuest, ProjectID: q.ProjectID, QuestID: q.ID, ShowProjectTag: q.ProjectID != ""}})
+	}
+	for i := range s.Projects {
+		if p := &s.Projects[i]; p.Archived {
+			entries = append(entries, vaultEntry{when: p.ArchivedAt, row: Row{Kind: RowVaultCampaign, ProjectID: p.ID}})
 		}
 	}
-	// Then parked quests as a timeline, newest day first, each day a divider.
-	for i, g := range groupVaultByDay(questsForSomeday(s)) {
-		if i > 0 || len(rows) > 1 {
+	for i, g := range groupVaultEntries(entries) {
+		if i > 0 {
 			rows = append(rows, Row{Kind: RowSpacer})
 		}
 		rows = append(rows, Row{Kind: RowDayHeader, Label: g.label})
-		for _, q := range g.quests {
-			rows = append(rows, Row{Kind: RowQuest, ProjectID: q.ProjectID, QuestID: q.ID, ShowProjectTag: q.ProjectID != ""})
-		}
+		rows = append(rows, g.rows...)
 	}
 	return rows
 }
 
-// vaultDay groups quests parked on the same calendar day.
-type vaultDay struct {
-	label  string
-	key    string
-	quests []model.Quest
+// vaultEntry is one thing in the Vault (a parked quest or a retired campaign)
+// and when it got there (nil = before the app tracked it → "Earlier").
+type vaultEntry struct {
+	when *time.Time
+	row  Row
 }
 
-// vaultMoment is when a quest entered the Vault — its VaultedAt, falling back to
-// CompletedAt then UpdatedAt for quests parked before VaultedAt was recorded.
-func vaultMoment(q model.Quest) time.Time {
-	if q.VaultedAt != nil {
-		return *q.VaultedAt
-	}
-	if q.CompletedAt != nil {
-		return *q.CompletedAt
-	}
-	return q.UpdatedAt
+// vaultGroup is one day's worth of Vault entries (already rendered to rows).
+type vaultGroup struct {
+	label string
+	rows  []Row
 }
 
-// groupVaultByDay buckets quests by the day they were vaulted, newest day
-// first, and labels each day relative to today (Today / Yesterday / date).
-func groupVaultByDay(quests []model.Quest) []vaultDay {
-	sorted := make([]model.Quest, len(quests))
-	copy(sorted, quests)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		return vaultMoment(sorted[i]).After(vaultMoment(sorted[j]))
+// groupVaultEntries buckets entries by the day they entered the Vault, newest
+// day first (Today / Yesterday / date). Entries with no timestamp collect in a
+// single "Earlier" bucket at the bottom rather than a misleading fallback date.
+func groupVaultEntries(entries []vaultEntry) []vaultGroup {
+	var dated, undated []vaultEntry
+	for _, e := range entries {
+		if e.when != nil {
+			dated = append(dated, e)
+		} else {
+			undated = append(undated, e)
+		}
+	}
+	sort.SliceStable(dated, func(i, j int) bool {
+		return dated[i].when.After(*dated[j].when)
 	})
 
-	var days []vaultDay
+	var groups []vaultGroup
 	byKey := map[string]int{}
 	now := time.Now()
-	for _, q := range sorted {
-		t := vaultMoment(q)
-		key := t.Format("2006-01-02")
+	for _, e := range dated {
+		key := e.when.Format("2006-01-02")
 		idx, ok := byKey[key]
 		if !ok {
-			idx = len(days)
+			idx = len(groups)
 			byKey[key] = idx
-			days = append(days, vaultDay{label: relativeDay(t, now), key: key})
+			groups = append(groups, vaultGroup{label: relativeDay(*e.when, now)})
 		}
-		days[idx].quests = append(days[idx].quests, q)
+		groups[idx].rows = append(groups[idx].rows, e.row)
 	}
-	return days
+	if len(undated) > 0 {
+		g := vaultGroup{label: "Earlier"}
+		for _, e := range undated {
+			g.rows = append(g.rows, e.row)
+		}
+		groups = append(groups, g)
+	}
+	return groups
 }
 
 // relativeDay labels t as Today / Yesterday, or a "Mon, Jan 2" date otherwise.
@@ -620,6 +670,29 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor bool, width i
 	case RowNewQuest:
 		return fmt.Sprintf("%s%s    %s", cursorMark, nestIndent, StyleMuted.Render("+ New Quest")), -1
 
+	case RowWildsObjective:
+		q := findQuest(s, row.QuestID)
+		if q == nil {
+			return "", -1
+		}
+		display, extraIndent, found := "", 0, false
+		for _, l := range q.Body {
+			if l.ID == row.BodyLineID {
+				_, display = model.ClassifyBodyLine(l.Text)
+				extraIndent = 2 * l.Indent
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", -1
+		}
+		// Indented under the quest (past its priority slot + status glyph) so it
+		// reads as a child; the checkbox sits under the quest title.
+		indent := strings.Repeat(" ", 6+extraIndent)
+		check := ObjectiveCheckbox(false) // the Wilds only lists pending objectives
+		return withHint(fmt.Sprintf("%s%s%s %s", cursorMark, indent, check, StyleMuted.Render(display))), hintX
+
 	case RowRune:
 		// titleView is the app-rendered "glyph key  state" content (the live
 		// rollout state lives in the app, not here) — indented under its
@@ -652,7 +725,7 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor bool, width i
 		if name == "" {
 			name = StyleMuted.Render(p.Name)
 		}
-		return withHint(fmt.Sprintf("%s%s %s", cursorMark, StyleMuted.Render("⌂"), name)), hintX
+		return withHint(fmt.Sprintf("%s%s %s", cursorMark, StyleMuted.Render(GlyphArchived), name)), hintX
 
 	case RowLabel:
 		banner := StyleOrnament.Render(GlyphFlourishL) + " " +

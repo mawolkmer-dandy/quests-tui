@@ -4,7 +4,7 @@ import (
 	"os"
 	"path/filepath"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/quickadd"

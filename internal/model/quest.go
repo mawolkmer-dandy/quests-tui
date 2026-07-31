@@ -94,9 +94,10 @@ type Quest struct {
 	JiraCodes []string `json:"jiraCodes,omitempty"` // every linked Jira issue, e.g. "EPDCHAIR-5713"
 	PRs       []PRLink `json:"prs,omitempty"`       // every linked GitHub PR
 
-	// AgentWorkspaces pins herdr workspaces (by workspace id, e.g. "wC") to this
-	// quest, so each pinned agent's live herdr state shows on the quest. Added
-	// from the "+ add Claude agent" affordance (see internal/app/agents.go).
+	// AgentWorkspaces pins herdr agents (by terminal id, e.g. "term_6579…") to
+	// this quest, so each pinned agent's live herdr state shows on the quest.
+	// Added from the "+ add Claude agent" affordance (see internal/app/agents.go).
+	// The JSON key stays "agentWorkspaces" for back-compat with saved data.
 	AgentWorkspaces []string `json:"agentWorkspaces,omitempty"`
 
 	// Runes are LaunchDarkly flag keys attached to this quest; each shows its

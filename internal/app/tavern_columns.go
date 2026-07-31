@@ -2,23 +2,205 @@ package app
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
+	"github.com/mawolkmer-dandy/quests-tui/internal/config"
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
 
 // twoColGap is the number of blank columns between the left rail and the right
-// campaigns column.
-const twoColGap = 4
+// campaigns column — a single column so the hover/drag indicator line sits
+// exactly centered between the two boxes (nothing else can occupy the gap to
+// push it toward one side).
+const twoColGap = 1
 
 // ellipsis marks a section box that has more content scrolled out of view.
 const ellipsis = "···"
 
 // tavernTopPad is the blank rows above the TAVERN / WILDS header.
 const tavernTopPad = 2
+
+// resizeTarget identifies which two-column Tavern divider a drag (or hover)
+// is against.
+type resizeTarget int
+
+const (
+	resizeNone    resizeTarget = iota
+	resizeColumns              // vertical divider, rail vs. campaigns
+	resizeRail0                // between rail box 0 (Questboard) and box 1 (Runes)
+	resizeRail1                // between rail box 1 (Runes) and box 2 (Vault)
+)
+
+type resizeDragState struct {
+	active bool
+	target resizeTarget
+}
+
+// tryStartResizeDrag checks whether (x,y) lands on a divider's grab cell; if
+// so it arms resizeDrag and returns (nil, true) — fully consumed, no further
+// click dispatch this event. Only live in the two-column Tavern.
+func (m *Model) tryStartResizeDrag(x, y int) (tea.Cmd, bool) {
+	if !m.twoColumn() {
+		return nil, false
+	}
+	if t := m.hitTestDivider(x, y); t != resizeNone {
+		m.resizeDrag = resizeDragState{active: true, target: t}
+		return nil, true
+	}
+	return nil, false
+}
+
+// updateResizeDrag recomputes the dragged ratio from the CURRENT absolute
+// cursor position (not a delta from the last motion event) — coalesced or
+// dropped motion events are a non-issue this way: whatever position the
+// terminal last delivered, the ratio snaps directly to what it implies, with
+// no compounding drift.
+func (m *Model) updateResizeDrag(x, y int) {
+	switch m.resizeDrag.target {
+	case resizeColumns:
+		m.railWidthRatio = ratioFromColumnDrag(x, m.leftMargin, m.tavernWidth())
+	case resizeRail0, resizeRail1:
+		m.railBoxRatios = ratioFromRailDrag(m.resizeDrag.target, y, m.rowsScreenTop, m.lastRailHeights)
+	}
+	m.invalidateRender()
+}
+
+// endResizeDrag commits whatever ratio was live-updated during the drag by
+// persisting it to config.toml, then clears drag state. Cheap no-op if
+// nothing was dragging.
+func (m *Model) endResizeDrag() {
+	if !m.resizeDrag.active {
+		return
+	}
+	m.resizeDrag = resizeDragState{}
+	m.saveLayoutConfig()
+}
+
+// saveLayoutConfig persists the current rail/campaigns ratio, rail-box
+// ratios, and which sections are collapsed to config.toml (~/.config/quests
+// — untouched by reinstalling the app, so this survives one too) —
+// best-effort; a write failure (e.g. a read-only filesystem) just means it
+// doesn't survive a restart, not worth surfacing to the user mid-drag/click.
+func (m *Model) saveLayoutConfig() {
+	if m.cfgPath == "" {
+		return
+	}
+	cfg, err := config.Load(m.cfgPath)
+	if err != nil {
+		return
+	}
+	cfg.Layout.RailWidthRatio = m.railWidthRatio
+	cfg.Layout.RailBoxRatios = m.railBoxRatios
+	cfg.Layout.CollapsedSections = m.collapsedSectionsList()
+	_ = config.Save(m.cfgPath, cfg)
+}
+
+// collapsedSectionsList is m.collapsedSections as a stably-ordered list, for
+// persisting to config.toml.
+func (m *Model) collapsedSectionsList() []string {
+	var out []string
+	for _, sec := range [...]string{"inbox", "runes", "someday"} {
+		if m.collapsedSections[sec] {
+			out = append(out, sec)
+		}
+	}
+	return out
+}
+
+// hitTestDivider reports which divider (if any) screen cell (x,y) lands on.
+func (m *Model) hitTestDivider(x, y int) resizeTarget {
+	gapX0 := m.leftMargin + m.leftColWidth
+	if x >= gapX0 && x <= gapX0+twoColGap-1 {
+		top := m.rowsScreenTop
+		if y >= top && y < top+m.lastViewHeight {
+			return resizeColumns
+		}
+		return resizeNone
+	}
+	if x < m.leftMargin || x >= m.leftMargin+m.leftColWidth {
+		return resizeNone // not over the rail column at all
+	}
+	return m.hitTestRailDivider(y)
+}
+
+// hitTestRailDivider finds which of the 2 internal rail dividers (if any)
+// screen row y lands on. Stacked boxes' borders are directly adjacent (no
+// gap row — see renderRail), so each divider's unambiguous grab target is
+// simply the box ABOVE it's own bottom border row (never the box below's top
+// border, which also carries its title text).
+func (m *Model) hitTestRailDivider(y int) resizeTarget {
+	off := y - m.rowsScreenTop
+	heights := m.lastRailHeights
+	switch off {
+	case heights[0] - 1:
+		return resizeRail0
+	case heights[0] + heights[1] - 1:
+		return resizeRail1
+	}
+	return resizeNone
+}
+
+// ratioFromColumnDrag turns an absolute cursor X into the rail's desired
+// width fraction of tavernWidth — railWidthFor's own clamps enforce the real
+// min/max at render time, so this doesn't need to duplicate them.
+func ratioFromColumnDrag(x, leftMargin, contentWidth int) float64 {
+	if contentWidth <= 0 {
+		return 0.34
+	}
+	railW := x - leftMargin
+	return float64(railW) / float64(contentWidth)
+}
+
+// ratioFromRailDrag turns an absolute cursor Y into new ratios for all 3 rail
+// boxes: the dragged divider moves the boundary between its two neighbors,
+// the third box keeps its current absolute share. minH is reserved for BOTH
+// neighbors directly in the boundary clamp (not just floored afterward) —
+// dragging past the point where a neighbor would go under minH has to stop
+// the boundary there, or the far side of the clamp silently keeps growing
+// disconnected from the cursor once the near side hits its floor (the "drags
+// past the limit and grows the wrong box" bug).
+func ratioFromRailDrag(target resizeTarget, y, rowsScreenTop int, heights [3]int) [3]float64 {
+	const minH = 4
+	total := heights[0] + heights[1] + heights[2]
+	if total <= 0 {
+		return [3]float64{1.0 / 3, 1.0 / 3, 1.0 / 3}
+	}
+	off := clampInt(y-rowsScreenTop, 0, total)
+
+	h := heights
+	switch target {
+	case resizeRail0:
+		combined := heights[0] + heights[1]
+		boundary := splitBoundary(off, combined, minH)
+		h[0] = boundary
+		h[1] = combined - boundary
+	case resizeRail1:
+		combined := heights[1] + heights[2]
+		boundary := splitBoundary(off-heights[0], combined, minH)
+		h[1] = boundary
+		h[2] = combined - boundary
+	}
+	sum := float64(h[0] + h[1] + h[2])
+	if sum <= 0 {
+		return [3]float64{1.0 / 3, 1.0 / 3, 1.0 / 3}
+	}
+	return [3]float64{float64(h[0]) / sum, float64(h[1]) / sum, float64(h[2]) / sum}
+}
+
+// splitBoundary clamps a proposed split point of `combined` rows so BOTH
+// resulting sides keep at least minH — the point past which further dragging
+// has no more room to give, so it simply stops there instead of one side
+// silently continuing to grow.
+func splitBoundary(off, combined, minH int) int {
+	if combined < 2*minH {
+		return combined / 2 // not enough room for both minimums — split evenly
+	}
+	return clampInt(off, minH, combined-minH)
+}
 
 func (m *Model) tavernWidth() int {
 	w := m.width - 6
@@ -31,17 +213,24 @@ func (m *Model) tavernWidth() int {
 	return w
 }
 
-// railWidthFor sizes the left rail; the wider campaigns list takes the rest.
-func railWidthFor(contentWidth int) int {
-	rail := contentWidth * 34 / 100
-	rail = clampInt(rail, 40, 64)
-	if camp := contentWidth - rail - twoColGap; camp < 44 {
-		rail = contentWidth - twoColGap - 44
+// minColWidth is the narrowest either the rail or the campaigns column is
+// ever allowed to get — same floor both directions, so dragging the column
+// divider all the way to either side leaves both sides equally usable
+// instead of one having a much higher floor than the other. tavernWidth's own
+// 50-column floor comfortably fits both columns at their minimum
+// (2*minColWidth+twoColGap = 49).
+const minColWidth = 24
+
+// railWidthFor sizes the left rail from the user's stored ratio (draggable —
+// see hitTestDivider/updateResizeDrag); the wider campaigns list takes the
+// rest. Both columns share the same minColWidth floor.
+func railWidthFor(contentWidth int, ratio float64) int {
+	rail := int(float64(contentWidth)*ratio + 0.5)
+	maxRail := contentWidth - twoColGap - minColWidth
+	if maxRail < minColWidth {
+		maxRail = minColWidth
 	}
-	if rail < 24 {
-		rail = 24
-	}
-	return rail
+	return clampInt(rail, minColWidth, maxRail)
 }
 
 func fitWidth(s string, w int) string {
@@ -80,6 +269,17 @@ func lineFrom(lineMap []int, off int) int {
 	return lineMap[off]
 }
 
+// firstOffset inverts a line table: the first on-screen line offset that maps
+// to row index idx, or -1 if the row isn't currently on screen.
+func firstOffset(lineMap []int, idx int) int {
+	for off, r := range lineMap {
+		if r == idx {
+			return off
+		}
+	}
+	return -1
+}
+
 func indexOfInt(s []int, v int) int {
 	if v < 0 {
 		return -1
@@ -105,7 +305,7 @@ func (m *Model) sectionLabelCount(section string) (string, int) {
 }
 
 // sectionColor is a section's accent (full-saturation) color.
-func sectionColor(section string) lipgloss.TerminalColor {
+func sectionColor(section string) color.Color {
 	switch section {
 	case "runes":
 		return ui.ColorRune
@@ -122,13 +322,13 @@ func sectionColor(section string) lipgloss.TerminalColor {
 func sectionMotif(section string) string {
 	switch section {
 	case "inbox":
-		return "▤"
+		return "\U000f00e5" // nf-md-bulletin_board
 	case "runes":
-		return "◈"
+		return "\U000f0b2f" // nf-md-crystal_ball
 	case "someday":
-		return "▦"
+		return "\U000f0726" // nf-md-treasure_chest
 	case "campaigns":
-		return "⚑"
+		return "\U000f023b" // nf-md-flag
 	}
 	return ""
 }
@@ -267,17 +467,25 @@ type boxCacheEntry struct {
 // cache hit the cached spans are replayed into the current frame's span maps.
 func (m *Model) boxContent(section string, rows []ui.Row, headerIdx, itemStart, itemEnd, activeIdx, innerW, xBase int, withSpans bool) ([]string, []int) {
 	collapsed := rows[headerIdx].Collapsed
-	if e := m.boxCache[section]; e != nil && e.uiVersion == m.uiVersion && e.innerW == innerW && e.cursor == m.cursor && e.collapsed == collapsed {
-		for k, v := range e.hint {
-			m.hintSpans[k] = v
+	// The section holding the cursor carries the LIVE row editor (its value
+	// isn't part of the cache key), so it must render fresh every frame or
+	// typing/blinking wouldn't show — a stale cache hit is exactly what made
+	// typing feel frozen. It's just one section and ~1ms, so no caching there.
+	hasCursor := activeIdx >= headerIdx && activeIdx < itemEnd
+	if !hasCursor {
+		if e := m.boxCache[section]; e != nil && e.uiVersion == m.uiVersion && e.innerW == innerW && e.cursor == m.cursor && e.collapsed == collapsed {
+			for k, v := range e.hint {
+				m.hintSpans[k] = v
+			}
+			for k, v := range e.code {
+				m.codeSpans[k] = v
+			}
+			return e.content, e.rows
 		}
-		for k, v := range e.code {
-			m.codeSpans[k] = v
-		}
-		return e.content, e.rows
 	}
 
-	// Miss: render into fresh span maps so we can cache exactly this section's
+	// Miss (or the cursor's live section): render into fresh span maps so we can
+	// cache exactly this section's
 	// spans, then merge them back into the frame's maps.
 	prevHint, prevCode := m.hintSpans, m.codeSpans
 	m.hintSpans, m.codeSpans = map[int][]hintSpan{}, map[int][]codeSpan{}
@@ -301,6 +509,42 @@ func (m *Model) boxContent(section string, rows []ui.Row, headerIdx, itemStart, 
 	return content, contentRows
 }
 
+// sectionTitleWithHint is a section box's title plus, when the section is the
+// cursor's or the mouse is hovering its title, the open/collapse hint — the
+// fuller hint if it fits the box, otherwise a compact "↵ open", otherwise none.
+func (m *Model) sectionTitleWithHint(section string, header ui.Row, active bool, colW int) string {
+	title := m.boxTitle(section, header, active)
+	if m.hideHoverTips || !(active || m.hoverSection == section) {
+		return title
+	}
+	avail := colW - lipgloss.Width(title) - 6 // corners + spaces + motif budget
+	if full := renderHintParts(actionHintParts(header)); lipgloss.Width(full) <= avail {
+		return title + full
+	}
+	if short := "  " + ui.StyleMuted.Render("↵ open"); lipgloss.Width(short) <= avail {
+		return title + short
+	}
+	return title
+}
+
+// updateSectionHover sets hoverSection when the mouse is over a section title
+// (so its box shows the open/collapse hint), else clears it.
+func (m *Model) updateSectionHover(msg tea.Mouse) {
+	m.hoverSection = ""
+	off := msg.Y - m.rowsScreenTop
+	if msg.X >= m.leftMargin+m.leftColWidth+twoColGap {
+		rows := m.campaignColumnRows()
+		if idx := lineFrom(m.campLineRow, off); idx >= 0 && idx < len(rows) && rows[idx].Kind == ui.RowLabel {
+			m.hoverSection = "campaigns"
+		}
+		return
+	}
+	rows := m.railColumnRows()
+	if idx := lineFrom(m.railLineRow, off); idx >= 0 && idx < len(rows) && rows[idx].Kind == ui.RowSection {
+		m.hoverSection = rows[idx].Section
+	}
+}
+
 // boxNaturalHeight is how tall a box wants to be to show all its content.
 func boxNaturalHeight(collapsed bool, contentLen int, vpad bool) int {
 	if collapsed {
@@ -319,10 +563,11 @@ func boxNaturalHeight(collapsed bool, contentLen int, vpad bool) int {
 // It also records the box's max scroll so a mouse wheel can scroll it directly.
 func (m *Model) assembleBox(section string, header ui.Row, headerIdx, activeIdx int, content []string, contentRows []int, colW, height int, vpad bool, reveal float64) ([]string, []int) {
 	active := indexOfInt(contentRows, activeIdx) >= 0 || headerIdx == activeIdx
+	title := m.sectionTitleWithHint(section, header, active, colW)
 
 	if header.Collapsed {
 		m.sectionMaxScroll[section] = 0
-		box := drawBox(m.boxTitle(section, header, active), sectionMotif(section), nil, colW, sectionBorder(section), frameStyle(section, active))
+		box := drawBox(title, sectionMotif(section), nil, colW, sectionBorder(section), frameStyle(section, active))
 		return box, []int{headerIdx, -1}
 	}
 
@@ -388,7 +633,7 @@ func (m *Model) assembleBox(section string, header ui.Row, headerIdx, activeIdx 
 		interiorRows = append(interiorRows, -1)
 	}
 
-	box := drawBox(m.boxTitle(section, header, active), sectionMotif(section), interior, colW, sectionBorder(section), frameStyle(section, active))
+	box := drawBox(title, sectionMotif(section), interior, colW, sectionBorder(section), frameStyle(section, active))
 
 	lineMap := make([]int, len(box))
 	for k := range lineMap {
@@ -473,7 +718,7 @@ func sectionSpans(rows []ui.Row) [][3]int {
 // framed Questboard / Runes / Vault scroll-boxes and a right campaigns
 // scroll-box. Every section is a box with its title in the top border.
 func (m *Model) viewTwoColumn(contentWidth int, margin, footer string, logoLines []string, logoHeight, availableHeight int, reveal float64) string {
-	railW := railWidthFor(contentWidth)
+	railW := railWidthFor(contentWidth, m.railWidthRatio)
 	campW := contentWidth - railW - twoColGap
 	m.leftColWidth = railW
 
@@ -481,6 +726,7 @@ func (m *Model) viewTwoColumn(contentWidth int, margin, footer string, logoLines
 	if viewHeight < 1 {
 		viewHeight = 1
 	}
+	m.lastViewHeight = viewHeight
 
 	railRows := m.railColumnRows()
 	campRows := m.campaignColumnRows()
@@ -504,13 +750,28 @@ func (m *Model) viewTwoColumn(contentWidth int, margin, footer string, logoLines
 	m.railColX = m.leftMargin + 2
 	m.campColX = campContentX
 
-	gap := strings.Repeat(" ", twoColGap)
+	columnGap := m.columnGap()
 	var columnLines []string
 	for i := 0; i < viewHeight; i++ {
-		columnLines = append(columnLines, padOr(railLines, i, railW)+gap+padOr(campLines, i, campW))
+		columnLines = append(columnLines, padOr(railLines, i, railW)+columnGap+padOr(campLines, i, campW))
 	}
 
 	m.rowsScreenTop = tavernTopPad + logoHeight
+	// Record the cursor's on-screen cell in whichever column holds it, so
+	// overlay effects (completion burst) fire at the right place in the Tavern
+	// too — screen-space, same as the single-column path.
+	m.cursorScreenY = -1
+	if m.railFocus && railIdx >= 0 {
+		if off := firstOffset(railMap, railIdx); off >= 0 {
+			m.cursorScreenY = m.rowsScreenTop + off
+			m.cursorScreenX = m.railColX // the cursor "›" marker column
+		}
+	} else if !m.railFocus && campIdx >= 0 {
+		if off := firstOffset(campMap, campIdx); off >= 0 {
+			m.cursorScreenY = m.rowsScreenTop + off
+			m.cursorScreenX = m.campColX
+		}
+	}
 	m.modeToggleRow = tavernTopPad
 	m.chipLineRow = tavernTopPad + len(logoLines) + 1
 
@@ -549,15 +810,55 @@ func (m *Model) renderRail(rows []ui.Row, activeIdx, colW, height int, reveal fl
 	// Wrap each box's content ONCE (used for both sizing and rendering).
 	contents := make([][]string, len(spans))
 	contentRows := make([][]int, len(spans))
-	heights := make([]int, len(spans))
-	total := 0
+	natural := make([]int, len(spans))
 	for i, sp := range spans {
 		contents[i], contentRows[i] = m.boxContent(rows[sp[0]].Section, rows, sp[0], sp[1], sp[2], activeIdx, innerW, m.leftMargin+2, false)
-		heights[i] = boxNaturalHeight(rows[sp[0]].Collapsed, len(contents[i]), true)
-		total += heights[i]
+		natural[i] = boxNaturalHeight(rows[sp[0]].Collapsed, len(contents[i]), true)
 	}
-	// Shrink the tallest box (which then scrolls) until the stack fits.
+
 	const minH = 4
+	// Stacked boxes' borders sit directly adjacent (no dedicated blank row) —
+	// matching the column gap's own tight, single-unit footprint (a text row
+	// reads taller than a column reads wide, so a whole extra blank ROW looks
+	// disproportionately bigger than the 1-column gap; touching borders plus
+	// an on-hover recolor of the seam is the closer visual match).
+	var heights []int
+	if len(spans) == 3 {
+		// A collapsed box always gets a fixed height (title bar only); the
+		// REST of the rail's height is split among the non-collapsed boxes by
+		// their own relative ratios — so collapsing one section visibly hands
+		// its freed room to the others instead of leaving it as dead unused
+		// space below the stack. m.railBoxRatios itself is never touched
+		// here (only read), so un-collapsing later restores that box's exact
+		// prior share rather than leaving it squished to its floor.
+		var collapsed [3]bool
+		collapsedCount := 0
+		for i, sp := range spans {
+			collapsed[i] = rows[sp[0]].Collapsed
+			if collapsed[i] {
+				collapsedCount++
+			}
+		}
+		open := distributeOpenHeights(m.railBoxRatios, collapsed, height-2*collapsedCount, minH)
+		heights = make([]int, 3)
+		for i := range heights {
+			if collapsed[i] {
+				heights[i] = 2
+			} else {
+				heights[i] = open[i]
+			}
+		}
+	} else {
+		heights = append([]int(nil), natural...)
+	}
+	total := 0
+	for _, h := range heights {
+		total += h
+	}
+	// Safety net for a pathologically short terminal where even minH per open
+	// box doesn't fit — shrinks the tallest until the stack fits. Not
+	// expected to fire in practice since distributeOpenHeights already sizes
+	// to fit exactly.
 	for total > height {
 		tallest := -1
 		for i := range heights {
@@ -572,12 +873,28 @@ func (m *Model) renderRail(rows []ui.Row, activeIdx, colW, height int, reveal fl
 		total--
 	}
 
+	if len(spans) == 3 {
+		m.lastRailHeights = [3]int{heights[0], heights[1], heights[2]}
+	}
+
 	var lines []string
 	var lineMap []int
 	m.railLineSection = m.railLineSection[:0]
 	for i, sp := range spans {
 		sec := rows[sp[0]].Section
 		box, boxMap := m.assembleBox(sec, rows[sp[0]], sp[0], activeIdx, contents[i], contentRows[i], colW, heights[i], true, reveal)
+		// This box's bottom border IS the divider below it — recolor just
+		// that one line to accent while it's hovered/dragged, the same
+		// "line indicates you can grab it" cue the column gap uses.
+		if len(spans) == 3 && i < 2 {
+			target := resizeRail0
+			if i == 1 {
+				target = resizeRail1
+			}
+			if m.resizeDrag.target == target || m.resizeHover == target {
+				box[len(box)-1] = highlightBottomBorder(sec, colW)
+			}
+		}
 		lines = append(lines, box...)
 		lineMap = append(lineMap, boxMap...)
 		for range box {
@@ -590,6 +907,68 @@ func (m *Model) renderRail(rows []ui.Row, activeIdx, colW, height int, reveal fl
 		m.railLineSection = append(m.railLineSection, "")
 	}
 	return lines[:height], lineMap[:height]
+}
+
+// highlightBottomBorder redraws a box's bottom border row in accent color —
+// used to indicate the divider directly below (a click-drag target) is
+// hovered or being dragged, without reserving any extra row for it.
+func highlightBottomBorder(section string, colW int) string {
+	b := sectionBorder(section)
+	style := lipgloss.NewStyle().Foreground(ui.ColorAccent)
+	return style.Render(b.BottomLeft + strings.Repeat(b.Bottom, colW-2) + b.BottomRight)
+}
+
+// columnGap is the two-column gap's fill, the same on every line: a bright
+// accent vertical line, centered in the gap (equal blank padding either
+// side), while the column divider is hovered or being dragged; otherwise
+// plain blank.
+func (m *Model) columnGap() string {
+	if m.resizeDrag.target != resizeColumns && m.resizeHover != resizeColumns {
+		return strings.Repeat(" ", twoColGap)
+	}
+	left := (twoColGap - 1) / 2
+	right := twoColGap - 1 - left
+	return strings.Repeat(" ", left) + lipgloss.NewStyle().Foreground(ui.ColorAccent).Render("│") + strings.Repeat(" ", right)
+}
+
+// distributeOpenHeights splits `total` rows among the non-collapsed boxes by
+// their relative railBoxRatios weight (renormalized among just themselves —
+// a collapsed box's ratio doesn't count against the split), each floored at
+// minH. Falls back to an even split among the open boxes if their ratios are
+// degenerate (e.g. a hand-edited config.toml summing to 0). Collapsed slots
+// are left at the zero value; the caller fills those in separately.
+func distributeOpenHeights(ratios [3]float64, collapsed [3]bool, total, minH int) [3]int {
+	var sum float64
+	openCount := 0
+	for i, c := range collapsed {
+		if !c {
+			sum += ratios[i]
+			openCount++
+		}
+	}
+	var out [3]int
+	if openCount == 0 {
+		return out
+	}
+	if sum <= 0 {
+		sum = float64(openCount)
+		for i, c := range collapsed {
+			if !c {
+				ratios[i] = 1
+			}
+		}
+	}
+	for i, c := range collapsed {
+		if c {
+			continue
+		}
+		h := int(float64(total)*ratios[i]/sum + 0.5)
+		if h < minH {
+			h = minH
+		}
+		out[i] = h
+	}
+	return out
 }
 
 // renderCampaigns renders the campaigns column as one scroll-box filling the
@@ -667,6 +1046,17 @@ func (m *Model) jumpToSection(section string) {
 	}
 }
 
+// toggleSectionCollapse collapses/expands a rail section (inbox/runes/someday)
+// and lands the cursor on its header so it stays valid even when the row it
+// was on gets hidden. renderRail's distributeOpenHeights handles reflowing the
+// freed/reclaimed height across the remaining open boxes.
+func (m *Model) toggleSectionCollapse(section string) {
+	m.jumpToSection(section)
+	m.collapsedSections[section] = !m.collapsedSections[section]
+	m.saveLayoutConfig()
+	m.invalidateRender()
+}
+
 func (m *Model) caretAtStart() bool {
 	return m.editor == nil || m.editor.Position() == 0
 }
@@ -677,7 +1067,7 @@ func (m *Model) caretAtEnd() bool {
 
 // sectionAtPoint is the Tavern section the pointer is over: "campaigns" for
 // the right column, or the rail section (from railLineSection) for the left.
-func (m *Model) sectionAtPoint(msg tea.MouseMsg) string {
+func (m *Model) sectionAtPoint(msg tea.Mouse) string {
 	if msg.X >= m.leftMargin+m.leftColWidth+twoColGap {
 		return "campaigns"
 	}
@@ -708,7 +1098,7 @@ func (m *Model) wheelSection(section string, delta int) {
 
 // handleTwoColumnClick routes a left-press to the column it landed in and the
 // row the line→row map resolves it to.
-func (m *Model) handleTwoColumnClick(msg tea.MouseMsg) tea.Cmd {
+func (m *Model) handleTwoColumnClick(msg tea.Mouse) tea.Cmd {
 	campStartX := m.leftMargin + m.leftColWidth + twoColGap
 	if msg.X >= campStartX {
 		if m.railFocus {
@@ -723,7 +1113,7 @@ func (m *Model) handleTwoColumnClick(msg tea.MouseMsg) tea.Cmd {
 
 // clickRailAt handles a click at rail line `off`: focuses the rail, moves the
 // cursor to that row, and acts by kind.
-func (m *Model) clickRailAt(off int, msg tea.MouseMsg) tea.Cmd {
+func (m *Model) clickRailAt(off int, msg tea.Mouse) tea.Cmd {
 	rows := m.railColumnRows()
 	idx := lineFrom(m.railLineRow, off)
 	if idx < 0 || idx >= len(rows) {
@@ -740,26 +1130,23 @@ func (m *Model) clickRailAt(off int, msg tea.MouseMsg) tea.Cmd {
 	m.commitEdit()
 	m.setCursor(row)
 
+	if cmd, ok := m.commonRowClick(row); ok {
+		return cmd
+	}
+
 	relX := msg.X - m.railColX
 	switch row.Kind {
 	case ui.RowSection:
-		// Only the Questboard has a useful focused page; a click on its title
-		// body opens it, on the caret toggles. Runes/Vault titles just toggle.
-		if row.Section == "inbox" && relX > 1 {
-			return m.handleReveal()
+		// Consistent across all sections: chevron collapses, name opens the
+		// section's focused view.
+		if relX <= 1 {
+			m.toggleReveal()
+			return nil
 		}
-		m.toggleReveal()
-		return nil
+		return m.handleReveal()
 	case ui.RowQuest:
 		m.beginTextSelection(m.editor, relX-titleOffset(row, 0))
 		return nil
-	case ui.RowRuneQuest:
-		m.toggleReveal() // collapse/expand the quest's rune group
-		return nil
-	case ui.RowRune:
-		return openURL(ldFlagURL(m.ldProject, m.ldEnv, row.RuneKey))
-	case ui.RowNewQuest, ui.RowNewRune:
-		return m.handleEnter()
 	}
 	return nil
 }
