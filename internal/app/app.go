@@ -80,10 +80,12 @@ type cursorTarget struct {
 	label      string
 	runeKey    string
 	bodyLineID string
+	lookoutURL string
+	trackEvent string
 }
 
 func targetFromRow(row ui.Row) cursorTarget {
-	return cursorTarget{kind: row.Kind, projectID: row.ProjectID, questID: row.QuestID, section: row.Section, label: row.Label, runeKey: row.RuneKey, bodyLineID: row.BodyLineID}
+	return cursorTarget{kind: row.Kind, projectID: row.ProjectID, questID: row.QuestID, section: row.Section, label: row.Label, runeKey: row.RuneKey, bodyLineID: row.BodyLineID, lookoutURL: row.LookoutURL, trackEvent: row.TrackEvent}
 }
 
 func (t cursorTarget) matches(row ui.Row) bool {
@@ -105,14 +107,20 @@ func (t cursorTarget) matches(row ui.Row) bool {
 		return t.label == row.Label
 	case ui.RowRune:
 		return t.runeKey == row.RuneKey
-	case ui.RowNewRune:
-		return true
 	case ui.RowVaultCampaign:
 		return t.projectID == row.ProjectID
 	case ui.RowRuneQuest:
 		return t.questID == row.QuestID
 	case ui.RowWildsObjective:
 		return t.questID == row.QuestID && t.bodyLineID == row.BodyLineID
+	case ui.RowLookout:
+		return t.questID == row.QuestID && t.lookoutURL == row.LookoutURL
+	case ui.RowTrack:
+		return t.questID == row.QuestID && t.trackEvent == row.TrackEvent
+	case ui.RowLookoutQuest:
+		return t.questID == row.QuestID
+	case ui.RowVaultHeader:
+		return t.section == row.Section
 	}
 	return false
 }
@@ -160,6 +168,13 @@ type Model struct {
 	modeToggleRow int
 	modeSpans     []modeSpan
 
+	// tavernHelp{Row,X,Width}: the Tavern's top-right "F1 help" button extents
+	// (the copy toast borrows the same slot). Width is 0 while the toast shows,
+	// so the toast isn't a click target.
+	tavernHelpRow   int
+	tavernHelpX     int
+	tavernHelpWidth int
+
 	// Inline search/filter bar (Ctrl+F) — see search.go.
 	searchOpen       bool
 	searchInput      textinput.Model
@@ -178,7 +193,6 @@ type Model struct {
 	// cell (Y = -1 when off-screen / not applicable), so a completion can spawn
 	// a burst where the item visually is.
 	overlayParticles []overlayParticle
-	overlayTickOn    bool
 	overlayGen       int
 	cursorScreenX    int
 	cursorScreenY    int
@@ -249,6 +263,11 @@ type Model struct {
 	collapsedProjects map[string]bool
 	collapsedSections map[string]bool
 
+	// newQuestIDs marks quests just ingested from quick-add (raycast/cli) so a
+	// blue "●" shows where each landed; cleared when the quest is selected or
+	// opened. In-memory only (a session hint, not persisted).
+	newQuestIDs map[string]bool
+
 	cursor cursorTarget
 	editor *textinput.Model
 
@@ -279,12 +298,40 @@ type Model struct {
 	focusHelpX     int
 	focusHelpWidth int
 
+	// titleEditor is a live inline editor over a detail page's title (quest or
+	// campaign) while it's being renamed in place; nil otherwise. focusTitleRow
+	// and focusTitleX/Width record the title's screen position so a click can
+	// open the editor (and, while editing, so it renders in the right spot).
+	titleEditor     *textinput.Model
+	focusTitleRow   int
+	focusTitleX     int
+	focusTitleWidth int
+	// titleEditFromSigils records which pane the title editor was entered from
+	// (true = Sigils, false = body) so Down returns focus there.
+	titleEditFromSigils bool
+
+	// lookoutEditor is an inline editor over a focused Lookout's label while it's
+	// being renamed ("r"); lookoutEditURL is the Lookout being edited. Dashboard
+	// names can't be scraped (auth-gated SPAs), so the user names them by hand.
+	lookoutEditor      *textinput.Model
+	lookoutEditURL     string
+	lookoutEditQuestID string
+
 	// focusRowLine/focusRowOffset map each rendered body row (soft-wrapped
 	// lines span several) back to its body line index and the raw rune
 	// offset the row starts at — rebuilt every renderFocusContent, consumed
 	// by handleFocusMouse.
 	focusRowLine   []int
 	focusRowOffset []int
+
+	// Quest-detail two-column geometry (see renderFocusContent): the details
+	// sidebar is on the LEFT (focusDetailX), the editable body on the RIGHT
+	// (focusBodyX); focusBodyW is the body column's width. Used for click
+	// column-routing and burst placement. Non-quest focus views leave both at
+	// the content left margin (single column).
+	focusDetailX int
+	focusBodyX   int
+	focusBodyW   int
 
 	// hintSpans maps a visible row index to the clickable extents of its
 	// rendered action hints ("→ open (tab)" etc.), rebuilt each View — a
@@ -333,6 +380,19 @@ type Model struct {
 	// is copied — see showClipboardToast in anim.go.
 	clipboardToastActive bool
 	clipboardToastGen    int
+	// lastLinkClickURL / lastLinkClickAt implement single-click-copy /
+	// double-click-open for links (sigils + body): a first click copies, a
+	// second click on the same URL within linkDoubleClickWindow opens it.
+	lastLinkClickURL string
+	lastLinkClickAt  time.Time
+	// lastRowClick / lastRowClickAt implement double-click-to-open on a list row
+	// (a quest/campaign/section): a second click on the same row within the
+	// window enters its detail view — the mouse equivalent of Tab.
+	lastRowClick   cursorTarget
+	lastRowClickAt time.Time
+	// clipboardToastText overrides the toast's default "copied to clipboard"
+	// label (e.g. the incantation confirmation); empty = the default.
+	clipboardToastText string
 
 	// lastWheelAt is when the last scroll-wheel event arrived. Bubble Tea's
 	// input parser fragments SGR mouse sequences under fast scrolling and
@@ -356,9 +416,30 @@ type Model struct {
 	resizeDrag      resizeDragState
 	resizeHover     resizeTarget
 	railWidthRatio  float64
-	railBoxRatios   [3]float64
-	lastRailHeights [3]int
+	railBoxRatios   []float64 // one weight per rail box (Questboard/Runes/Wards/Vault)
+	lastRailHeights []int     // cached rendered height per rail box, for hit-testing
 	lastViewHeight  int
+
+	// detailWidthRatio is the quest-detail Sigils box's fraction of the detail
+	// view width (draggable, persisted); detailDividerX/detailPaneTop/Bottom are
+	// the last render's divider hit-target, set by viewQuestDetail.
+	detailWidthRatio float64
+	detailDividerX   int
+	detailPaneTop    int
+	detailPaneBottom int
+
+	// plansBusyQuest is the quest whose Lookout plans are currently being
+	// written (shows a "writing…" hint on its Tracks group); cleared when the
+	// generated prompt lands and is copied (see tracks.go / plansMsg).
+	plansBusyQuest string
+
+	// lastFoundSHA is the PR head SHA last scanned for tracks, keyed by
+	// "repo#num", so auto-find on sync only re-diffs a PR whose head changed.
+	lastFoundSHA map[string]string
+
+	// findingQuestID is the quest whose track-find is in flight (drives the
+	// "finding…" status on its find affordance); cleared in applyFind.
+	findingQuestID string
 
 	// Integration sync (see sync.go). prStatus/jiraStatus cache the latest
 	// fetched status keyed by code; neither is persisted nor part of undo.
@@ -394,6 +475,9 @@ type Model struct {
 	// span's content line.
 	focusBodyLineStart int
 	focusContentTop    int
+	// focusQuestListStart is the content-line index of the first row in a
+	// campaign detail page's "Quests" list, so a click Y maps to a quest row.
+	focusQuestListStart int
 
 	// focusLinks are the navigable link lines (Jira + each PR) rendered above
 	// the body in the expanded quest view, in top-to-bottom order — arrowing up
@@ -451,10 +535,14 @@ const (
 	linkJira linkKind = iota
 	linkPR
 	linkAgent
-	linkAddAgent   // the "+ add Claude agent" affordance line
-	linkRune       // an attached LaunchDarkly flag
-	linkAddRune    // the "+ attach a rune" affordance line
-	linkToggleConn // the "Connections" master header — Enter collapses/expands
+	linkAddAgent    // the "+ add Claude agent" affordance line
+	linkRune        // an attached LaunchDarkly flag
+	linkTrack       // a found tracking event
+	linkLookout     // a usage dashboard (per-quest)
+	linkForge       // the "write the Lookout's plans" affordance line
+	linkFind        // the "find tracks in trails" affordance line
+	linkRestore     // the "restore dismissed tracks" affordance line
+	linkCopySection // a section header — focusable so it can be copied as a list
 )
 
 // focusLink is one navigable link line (the Jira line or a PR line) in the
@@ -486,9 +574,11 @@ type Options struct {
 	// release can persist the new layout ratios (see endResizeDrag).
 	CfgPath string
 	// RailWidthRatio/RailBoxRatios seed the two-column Tavern's draggable
-	// divider ratios from config (see internal/config.Layout).
-	RailWidthRatio float64
-	RailBoxRatios  [3]float64
+	// divider ratios from config (see internal/config.Layout). RailBoxRatios is
+	// normalized to railBoxCount entries in New (older configs held 3).
+	RailWidthRatio   float64
+	RailBoxRatios    []float64
+	DetailWidthRatio float64
 	// CollapsedSections seeds which rail sections ("inbox"/"runes"/"someday")
 	// start collapsed, from config (see internal/config.Layout).
 	CollapsedSections []string
@@ -505,9 +595,10 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 	if railWidthRatio <= 0 {
 		railWidthRatio = 0.34
 	}
-	railBoxRatios := opts.RailBoxRatios
-	if railBoxRatios[0]+railBoxRatios[1]+railBoxRatios[2] <= 0 {
-		railBoxRatios = [3]float64{1.0 / 3, 1.0 / 3, 1.0 / 3}
+	railBoxRatios := normalizeRailRatios(opts.RailBoxRatios)
+	detailWidthRatio := opts.DetailWidthRatio
+	if detailWidthRatio <= 0 {
+		detailWidthRatio = 0.42
 	}
 	m := &Model{
 		store:             s,
@@ -516,8 +607,10 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 		cfgPath:           opts.CfgPath,
 		railWidthRatio:    railWidthRatio,
 		railBoxRatios:     railBoxRatios,
+		detailWidthRatio:  detailWidthRatio,
 		subtitle:          subtitle,
 		collapsedProjects: map[string]bool{},
+		newQuestIDs:       map[string]bool{},
 		// Every section (Questboard / Runes / Vault) starts expanded, unless
 		// config says otherwise (see internal/config.Layout).
 		collapsedSections:   collapsedSectionsFromList(opts.CollapsedSections),
@@ -538,6 +631,7 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 		prStatus:            map[string]PRStatus{},
 		jiraStatus:          map[string]JiraStatus{},
 		runeStatus:          map[string]RuneStatus{},
+		lastFoundSHA:        map[string]string{},
 		focusLinkIdx:        noSelection,
 	}
 	if rows := m.visibleRows(); len(rows) > 0 {
@@ -598,8 +692,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// keep listening. Cursor is tracked by identity, so appending quests
 		// doesn't disturb it; the new row appears on the next render.
 		if m.watcher != nil {
+			before := make(map[string]bool, len(m.store.Quests))
+			for i := range m.store.Quests {
+				before[m.store.Quests[i].ID] = true
+			}
 			if n := quickadd.Drain(filepath.Dir(m.path), m.store); n > 0 {
+				for i := range m.store.Quests {
+					if id := m.store.Quests[i].ID; !before[id] {
+						m.newQuestIDs[id] = true // flag where it landed, until selected/opened
+					}
+				}
 				m.save()
+				m.invalidateRender()
 			}
 			return m, waitForQuickAdd(m.watcher)
 		}
@@ -629,20 +733,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case syncResultMsg:
 		m.applySyncResult(msg)
-		return m, m.maybeStartSpinner()
+		return m, tea.Batch(m.maybeStartSpinner(), m.autoFindCmd())
 
 	case agentsMsg:
 		m.agents = msg.agents
+		if m.healAgentPins() {
+			m.save()
+		}
 		m.invalidateRender()
 		return m, m.maybeStartSpinner()
-
-	case runeSearchMsg:
-		if mod := m.modal; mod != nil && mod.Kind == ModalRunePicker && mod.SearchQuery == msg.query {
-			mod.RuneSearching = false
-			mod.PickerItems = msg.items
-			mod.PickerIndex = 0
-		}
-		return m, nil
 
 	case runesMsg:
 		for _, st := range msg.runes {
@@ -650,6 +749,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.invalidateRender()
 		return m, m.maybeStartSpinner()
+
+	case plansMsg:
+		return m, m.applyPlans(msg)
+
+	case findMsg:
+		return m, m.applyFind(msg)
+
+	case stackMsg:
+		q := m.findQuest(msg.questID)
+		if q == nil {
+			return m, nil
+		}
+		var added []string
+		for _, c := range msg.codes {
+			before := len(q.PRs)
+			appendPRLink(q, model.PRRef{Code: c, Repo: msg.repo})
+			if len(q.PRs) > before {
+				added = append(added, c)
+			}
+		}
+		if len(added) == 0 {
+			return m, nil
+		}
+		m.save()
+		m.invalidateRender()
+		cmds := []tea.Cmd{m.syncNow(added), m.maybeStartSpinner()}
+		if m.detailOpenFor(msg.questID) { // feedback only while viewing the quest
+			m.pendingConnBurstCode = added[0]
+			cmds = append(cmds, m.playSound(sndAddConnection), m.pokeOverlayTick())
+		}
+		return m, tea.Batch(cmds...)
 
 	case spinnerTickMsg:
 		return m, m.onSpinnerTick(msg.gen)
@@ -738,6 +868,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if isPickerModal(m.modal.Kind) {
 				return m, m.handlePickerClick(msg)
 			}
+			// A help / overlay modal: a click anywhere dismisses it (there's
+			// nothing to interact with inside), matching "press any key to close".
+			m.closeModal()
 			return m, nil
 		}
 		return m, m.handleClick(msg)
@@ -766,7 +899,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.transitioning() {
 			return m, nil // ignore mouse mid-animation
 		}
-		m.lastWheelAt = time.Now()
+		m.lastWheelAt = time.Now() // for the key-leak guard
 		if m.modal != nil {
 			if isFocusModal(m.modal.Kind) {
 				return m, m.handleFocusWheel(msg)
@@ -891,6 +1024,8 @@ func (m *Model) closeModal() {
 	// search box) must not leak into whatever's focused next — its anchor
 	// is just a rune index, meaningless (and potentially out of bounds) for
 	// a different, unrelated textinput.
+	m.titleEditor = nil   // don't carry an open rename into the next view
+	m.lookoutEditor = nil // nor an open lookout rename
 	m.clearSelection()
 	m.clearFocusLink()
 	m.focusScroll = 0 // re-entering a view below re-scrolls to its caret
@@ -1241,6 +1376,9 @@ func (m *Model) setCursor(row ui.Row) {
 	m.cursor = targetFromRow(row)
 	m.cursorMoved = true // so the Tavern scroll follows the cursor this frame
 	m.clearSelection()
+	if row.Kind == ui.RowQuest {
+		delete(m.newQuestIDs, row.QuestID) // selecting a quick-add quest clears its "new" dot
+	}
 
 	switch row.Kind {
 	case ui.RowProject:
@@ -1397,6 +1535,10 @@ func rowMatchesConfirmDelete(row ui.Row, id string) bool {
 		return row.ProjectID == id
 	case ui.RowRune:
 		return row.RuneKey == id
+	case ui.RowLookout:
+		return row.LookoutURL == id
+	case ui.RowTrack:
+		return row.TrackEvent == id
 	}
 	return false
 }
@@ -1413,6 +1555,10 @@ func (m *Model) confirmDeleteHint(row ui.Row) string {
 		return "delete this campaign? y/n"
 	case ui.RowRune:
 		return "stop watching this rune? y/n"
+	case ui.RowLookout:
+		return "remove this lookout? y/n"
+	case ui.RowTrack:
+		return "dismiss this track? y/n"
 	}
 	return ""
 }
@@ -1437,6 +1583,9 @@ func (m *Model) renderContent() string {
 		// suppress overlay effects there (a later phase adds detail-view
 		// recording) rather than bursting at a stale outline position.
 		m.cursorScreenY = -1
+		if m.modal.Kind == ModalQuestDetail {
+			return m.viewQuestDetail() // two bordered/scrollable panes + draggable divider
+		}
 		if isFocusModal(m.modal.Kind) {
 			return m.renderFocusView()
 		}
@@ -1467,8 +1616,7 @@ func (m *Model) renderContent() string {
 	}
 	margin := strings.Repeat(" ", m.leftMargin)
 
-	rawFooter := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Right).Render(m.renderFooter())
-	footer := indentLines(rawFooter, margin)
+	footer := indentLines(m.statusBar(contentWidth), margin)
 	availableHeight := m.height - lipgloss.Height(footer)
 	if availableHeight < 1 {
 		availableHeight = 1
@@ -1507,7 +1655,9 @@ func (m *Model) renderContent() string {
 		m.setCursor(rows[0])
 	}
 
-	if idx >= 0 {
+	// Re-center on the cursor only when it actually moved (keyboard) — a wheel
+	// scroll leaves the cursor put and must not be snapped back to it.
+	if idx >= 0 && m.cursorMoved {
 		if idx < m.scrollOffset {
 			m.scrollOffset = idx
 		}
@@ -1558,7 +1708,8 @@ func (m *Model) renderContent() string {
 		m.cursorScreenY = m.rowsScreenTop + (idx - m.scrollOffset)
 		m.cursorScreenX = m.leftMargin // the cursor "›" marker column
 	}
-	m.modeToggleRow = topPad // the header's first line is the TAVERN/WILDS toggle
+	m.modeToggleRow = topPad          // the header's first line is the TAVERN/WILDS toggle
+	m.tavernHelpRow = m.modeToggleRow // F1 help sits on the header row
 	// The reserved filter/chip line sits just above the rows (after the logo
 	// and its blank line) — its screen row is used for chip click hit-testing.
 	m.chipLineRow = topPad + len(logoLines) + 1
@@ -1612,6 +1763,7 @@ func (m *Model) renderContent() string {
 		b.WriteString("\n")
 	}
 
+	m.cursorMoved = false // consumed; the wheel scrolls freely until the next key move
 	return strings.TrimRight(b.String(), "\n") + "\n" + footer
 }
 
@@ -1636,49 +1788,90 @@ func (m *Model) renderOutlineRowLine(rows []ui.Row, i, idx, hoverIdx, vaultIdx, 
 	titleView := ""
 	if warning {
 		titleView = ui.StyleMuted.Render(m.warningText)
-	} else if isCursor && m.editor != nil {
-		titleView = m.renderEditableStyled(m.editor, m.cursorTitleStyle(row))
-	} else if row.Kind == ui.RowRune {
-		titleView = m.runeRowContent(row.RuneKey)
+	} else {
+		titleView = m.rowTitleView(row, isCursor)
 	}
+	// Action hints render on the fixed bottom status line (see statusBar), never
+	// inline — an inline hint on a long row wrapped and shifted the layout. The
+	// only inline exceptions are the delete confirm prompt and the Vault's
+	// read-only note, which are row-specific state, not generic action tips.
 	hint := ""
-	var hintParts []hintPart
 	if confirming {
-		// Keep the name visible; the prompt takes over the right-hand hint slot
-		// (where open/collapse tips would be) so you can see exactly what you're
-		// about to delete.
 		hint = "  " + ui.StyleImportant.Render(m.confirmDeleteHint(row))
-	} else if !warning {
-		if !m.hideHoverTips && (isCursor || hoverIdx == i) {
-			hintParts = actionHintParts(row)
-		}
-		hint = renderHintParts(hintParts)
-		if !m.hideHoverTips && row.Kind == ui.RowSection && row.Section == "someday" && vaultIdx >= 0 && hoverIdx >= vaultIdx {
-			hint += "  " + ui.StyleMuted.Render("(read only)")
-		}
+	} else if !warning && !m.hideHoverTips && row.Kind == ui.RowSection && row.Section == "someday" && vaultIdx >= 0 && hoverIdx >= vaultIdx {
+		hint = "  " + ui.StyleMuted.Render("(read only)")
 	}
-	// RenderRow places the hint inline right after the row's content (before a
-	// campaign's right-aligned progress) and reports where — that's what makes
-	// the hint parts clickable.
-	rendered, hintX := ui.RenderRow(row, m.store, titleView, isCursor, width, hint)
-	if len(hintParts) > 0 && hintX >= 0 {
-		x := xBase + hintX + 2 // +2 for the gap renderHintParts prepends
-		var spans []hintSpan
-		for _, p := range hintParts {
-			w := lipgloss.Width(p.label)
-			spans = append(spans, hintSpan{x0: x, x1: x + w, action: p.action})
-			x += w + 2 // labels are joined with two spaces
-		}
-		m.hintSpans[i] = spans
+	rendered, _ := ui.RenderRow(row, m.store, titleView, isCursor, m.isNewQuest(row), width, hint)
+	if !warning {
+		rendered = m.withConnectionIcons(rendered, row) // inline emblems (quests)
 	}
-	// Connection status emblems inline after the quest title (replacing the old
-	// meta sub-line) — only when integrations are on and not being edited/warned.
-	if row.Kind == ui.RowQuest && m.integrationsEnabled && titleView == "" {
+	return rendered
+}
+
+// rowTitleView is the title text for ANY list row — the live editor when it's
+// the cursor, else the kind-specific content. ONE definition, used by every
+// surface that renders rows (the outline, both Tavern columns, and the
+// campaign/section focus pages) so a change to how a row looks lands in all of
+// them at once. Returns "" for rows RenderRow styles itself (plain campaigns,
+// sections, "+ New …", etc. — unless they're the cursor being edited).
+func (m *Model) rowTitleView(row ui.Row, isCursor bool) string {
+	switch row.Kind {
+	case ui.RowQuest:
+		return m.questTitleView(row, isCursor)
+	case ui.RowRune:
+		return m.runeRowContent(row.QuestID, row.RuneKey)
+	case ui.RowLookout:
+		return m.lookoutRowTitle(row.QuestID, row.LookoutURL)
+	case ui.RowTrack:
+		return m.trackRowContent(row.QuestID, row.TrackEvent)
+	}
+	if isCursor && m.editor != nil {
+		return m.renderEditableStyled(m.editor, m.cursorTitleStyle(row))
+	}
+	return ""
+}
+
+// withConnectionIcons appends a quest's inline status emblems (NPC/Jira/PR/
+// Rune/Track/Lookout) after its rendered line — shown on every list a quest
+// appears in (outline, Tavern, campaign/section pages), focused or not.
+func (m *Model) withConnectionIcons(rendered string, row ui.Row) string {
+	if row.Kind == ui.RowQuest && m.integrationsEnabled {
 		if q := m.findQuest(row.QuestID); q != nil {
-			rendered += m.connectionIcons(q)
+			return rendered + m.connectionIcons(q)
 		}
 	}
 	return rendered
+}
+
+// constantWidthTitle renders an editable title at the SAME width whether it's
+// being edited or not, so content after it (a chip, emblems, progress) never
+// shifts — not when the caret moves AND not when you select the line to edit.
+// Editing → the live editor with the end-caret cell reserved; plain → the
+// styled text with the same one cell reserved. THE shared title renderer for
+// the Tavern list and the detail pages (see docs/ui-consistency.md).
+func (m *Model) constantWidthTitle(text string, editor *textinput.Model, editStyle, plainStyle lipgloss.Style) string {
+	if editor != nil {
+		return m.renderEditableFixedWidth(editor, editStyle)
+	}
+	return plainStyle.Render(text) + " " // reserve the caret cell the edited state uses
+}
+
+// questTitleView renders a quest row's title at a constant width (see
+// constantWidthTitle) so the emblems/progress after it never shift.
+func (m *Model) questTitleView(row ui.Row, isCursor bool) string {
+	q := m.findQuest(row.QuestID)
+	if q == nil {
+		return ""
+	}
+	plainStyle := ui.StyleName
+	if q.Status == model.StatusDone {
+		plainStyle = ui.StyleDone
+	}
+	var editor *textinput.Model
+	if isCursor {
+		editor = m.editor // nil-safe: nil falls through to the plain render
+	}
+	return m.constantWidthTitle(q.Title, editor, m.cursorTitleStyle(row), plainStyle)
 }
 
 // wildsEmptyHelp is the centered flavor + how-to shown when the Wilds list
@@ -1708,8 +1901,8 @@ func (m *Model) wildsEmptyHelp(width int) []string {
 // it stands in for ("enter"/"tab"), so a mouse click on the rendered label
 // can trigger the same thing (see hintSpan / handleMouse).
 type hintPart struct {
-	label  string
-	action string
+	key  string // the keyboard key, e.g. "enter", "tab", "c", "ctrl+d"
+	verb string // what it does, e.g. "open", "copy", "mark done"
 }
 
 // hintSpan is a hint part's clickable extent in absolute screen columns.
@@ -1718,73 +1911,138 @@ type hintSpan struct {
 	action string
 }
 
-// actionHintParts lists the action tips for row — e.g. collapse + open for
-// a campaign, just open for a quest.
+// actionHintParts lists the action tips for row as (key, verb) pairs — e.g.
+// collapse + open for a campaign, just open for a quest. Rendered uniformly as
+// "<key> to <verb>" by renderHintParts.
 func actionHintParts(row ui.Row) []hintPart {
 	switch row.Kind {
-	case ui.RowProject:
-		return []hintPart{{collapseHint(row.Collapsed), "enter"}, {"→ open (tab)", "tab"}}
-	case ui.RowSection:
-		// Every section has a focused view (name / Tab opens it, chevron /
-		// Enter collapses).
-		return []hintPart{{collapseHint(row.Collapsed), "enter"}, {"→ open (tab)", "tab"}}
+	case ui.RowProject, ui.RowSection, ui.RowLabel:
+		return []hintPart{{"enter", collapseVerb(row.Collapsed)}, {"tab", "open"}}
 	case ui.RowQuest:
-		return []hintPart{{"→ open (tab)", "tab"}}
+		return []hintPart{{"tab", "open"}}
 	case ui.RowWildsObjective:
-		return []hintPart{{"✓ done (ctrl+d)", "done"}}
+		return []hintPart{{"ctrl+d", "mark done"}}
 	case ui.RowRune:
-		return []hintPart{{"↵ open", "enter"}}
-	case ui.RowLabel:
-		return []hintPart{{collapseHint(row.Collapsed), "enter"}, {"→ open (tab)", "tab"}}
+		return []hintPart{{"enter", "open"}, {"c", "copy"}}
+	case ui.RowTrack:
+		return []hintPart{{"c", "copy"}}
+	case ui.RowLookout:
+		return []hintPart{{"enter", "open"}, {"c", "copy"}, {"r", "rename"}}
+	case ui.RowRuneQuest, ui.RowLookoutQuest, ui.RowVaultHeader:
+		// Collapsible group headers (a quest's runes/lookouts, the Vaulted group).
+		return []hintPart{{"enter", collapseVerb(row.Collapsed)}}
+	case ui.RowNewProject, ui.RowNewQuest:
+		return []hintPart{{"enter", "add"}}
+	case ui.RowVaultCampaign:
+		return []hintPart{{"tab", "open"}}
 	}
 	return nil
 }
 
-// renderHintParts renders the joined muted hint text, prefixed with the
-// two-space gap that separates it from the row's own content.
+// keyHint renders a single "<key> to <verb>" hint — the key in the muted-orange
+// key style, the rest muted. THE one hint format, used by every view (status
+// bar, sigil status line). Change it here and everywhere follows.
+func keyHint(key, verb string) string {
+	return ui.StyleKey.Render(key) + ui.StyleMuted.Render(" to "+verb)
+}
+
+// joinHints joins several "<key> to <verb>" hints with a muted middot.
+func joinHints(parts ...string) string {
+	return strings.Join(parts, ui.StyleMuted.Render(" · "))
+}
+
+// renderHintParts renders the joined hints, prefixed with a two-space gap.
 func renderHintParts(parts []hintPart) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	labels := make([]string, len(parts))
+	hs := make([]string, len(parts))
 	for i, p := range parts {
-		labels[i] = p.label
+		hs[i] = keyHint(p.key, p.verb)
 	}
-	return "  " + ui.StyleMuted.Render(strings.Join(labels, "  "))
+	return "  " + joinHints(hs...)
 }
 
-// actionHint returns the rendered tip(s) for row when it's under attention
-// (active — the keyboard cursor or a mouse hover, either counts, so the
-// hint is discoverable with just a keyboard). Hidden entirely via Ctrl+K
-// (hideHoverTips).
-func (m *Model) actionHint(row ui.Row, active bool) string {
-	if m.hideHoverTips || !active {
-		return ""
-	}
-	return renderHintParts(actionHintParts(row))
+// isNewQuest reports whether a row is a quest freshly ingested from quick-add
+// and not yet selected/opened — it shows the blue "●" landing marker.
+func (m *Model) isNewQuest(row ui.Row) bool {
+	return row.Kind == ui.RowQuest && m.newQuestIDs[row.QuestID]
 }
 
-func collapseHint(collapsed bool) string {
+// collapseVerb is the verb for a collapsible row's enter action.
+func collapseVerb(collapsed bool) string {
 	if collapsed {
-		return "↓ expand (enter)"
+		return "expand"
 	}
-	return "↑ collapse (enter)"
+	return "collapse"
 }
 
 // renderFooter is deliberately just a short, right-aligned pointer to the
 // help overlay — not an inline dump of every keybinding.
-func (m *Model) renderFooter() string {
-	if m.clipboardToastActive {
-		return lipgloss.NewStyle().Padding(0, 1).Render(renderClipboardToast())
+// statusRow resolves the row whose actions the status line should show — the
+// mouse-hovered row when hovering (so hover-discovery survives the move off
+// inline hints), else the cursor/selected row — searching whichever row set
+// the active view uses.
+func (m *Model) statusRow() (ui.Row, bool) {
+	target := m.cursor
+	if m.hover != nil {
+		target = *m.hover
 	}
-	// Mode switching lives in the header now; the footer just shows a taken-up
-	// count in the Tavern as a gentle nudge toward setting out.
-	if !m.wilds {
-		if taken := m.takenCount(); taken > 0 {
-			return ui.StyleFooter.Render(fmt.Sprintf("%d taken up", taken))
+	var sets [][]ui.Row
+	switch {
+	case m.modal != nil && m.modal.Kind == ModalCampaignDetail && m.modal.InQuestList:
+		sets = [][]ui.Row{campaignQuestRows(m.store, m.modal.CampaignID)}
+	case m.modal != nil && m.modal.Kind == ModalSectionDetail:
+		sets = [][]ui.Row{m.sectionRows(m.modal.Section)}
+	case m.twoColumn():
+		sets = [][]ui.Row{m.railColumnRows(), m.campaignColumnRows()}
+	default:
+		sets = [][]ui.Row{m.visibleRows()}
+	}
+	for _, rows := range sets {
+		if idx := findRowIndex(rows, target); idx >= 0 {
+			return rows[idx], true
 		}
 	}
+	return ui.Row{}, false
+}
+
+// statusHint is the action-hint text shown on the fixed bottom status line in
+// EVERY view (never inline — inline hints wrapped long rows and shifted the
+// layout). In the quest detail it's the focused sigil's actions; elsewhere the
+// hovered-or-cursor row's. Empty when hints are toggled off (Ctrl+K).
+func (m *Model) statusHint() string {
+	if m.hideHoverTips {
+		return ""
+	}
+	if m.modal != nil && m.modal.Kind == ModalQuestDetail {
+		if q := m.findQuest(m.modal.QuestID); q != nil {
+			return m.sigilStatusLine(q)
+		}
+		return ""
+	}
+	if row, ok := m.statusRow(); ok {
+		return renderHintParts(actionHintParts(row))
+	}
 	return ""
+}
+
+// statusBar is the app-wide bottom line: the current selection's action hints
+// on the left, the taken-up count on the right — one consistent presentation
+// across the Tavern, Wilds, section pages, and the quest detail.
+func (m *Model) statusBar(width int) string {
+	left := strings.TrimPrefix(m.statusHint(), "  ") // renderHintParts prepends a 2-space gap; the bar owns spacing
+	right := ""
+	if !m.wilds {
+		if taken := m.takenCount(); taken > 0 {
+			right = ui.StyleFooter.Render(fmt.Sprintf("%d taken up", taken))
+		}
+	}
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
 }
 
 // takenCount is how many quests are currently taken up (active) under a

@@ -22,6 +22,11 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 			return cmd
 		}
 	}
+	// An inline Lookout rename owns every key while it's open (same as in the
+	// detail view — see handleLookoutRenameKey).
+	if cmd, handled := m.handleLookoutRenameKey(msg); handled {
+		return cmd
+	}
 	switch {
 	case key.Matches(msg, Keys.Help):
 		m.commitEdit()
@@ -32,7 +37,11 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case key.Matches(msg, Keys.ToggleHints):
 		m.hideHoverTips = !m.hideHoverTips
-		return nil
+		label := "hover tips shown"
+		if m.hideHoverTips {
+			label = "hover tips hidden"
+		}
+		return m.showClipboardToastText(label) // top-right toast
 	case key.Matches(msg, Keys.Undo):
 		m.undo()
 		return nil
@@ -51,13 +60,32 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.jumpToSection("runes")
 		return nil
 	case m.twoColumn() && msg.String() == "ctrl+3":
-		m.jumpToSection("someday")
+		m.jumpToSection("lookouts")
 		return nil
 	case m.twoColumn() && msg.String() == "ctrl+4":
+		m.jumpToSection("someday")
+		return nil
+	case m.twoColumn() && msg.String() == "ctrl+5":
 		m.jumpToSection("campaigns")
 		return nil
-	// Ctrl+Shift+1..3 collapse/expand a rail section in place (Campaigns isn't a
-	// collapsible box, so there's no Ctrl+Shift+4).
+	// Alt+arrows resize the focused section: ←/→ the rail↔campaigns width,
+	// ↑/↓ the focused rail box's height. Alt (not Ctrl, which macOS grabs for
+	// Mission Control; not Shift, which selects text) — and Alt+arrows are free
+	// in the Tavern (move-line's Alt+↑/↓ is body-only).
+	case m.twoColumn() && msg.String() == "alt+right":
+		m.resizeColumnWidth(resizeStep)
+		return nil
+	case m.twoColumn() && msg.String() == "alt+left":
+		m.resizeColumnWidth(-resizeStep)
+		return nil
+	case m.twoColumn() && msg.String() == "alt+down":
+		m.resizeCurrentRailBox(resizeStep)
+		return nil
+	case m.twoColumn() && msg.String() == "alt+up":
+		m.resizeCurrentRailBox(-resizeStep)
+		return nil
+	// Ctrl+Shift+1..4 collapse/expand a rail section in place (Campaigns isn't a
+	// collapsible box, so there's no Ctrl+Shift+5).
 	case m.twoColumn() && msg.String() == "ctrl+shift+1":
 		m.toggleSectionCollapse("inbox")
 		return nil
@@ -65,6 +93,9 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.toggleSectionCollapse("runes")
 		return nil
 	case m.twoColumn() && msg.String() == "ctrl+shift+3":
+		m.toggleSectionCollapse("lookouts")
+		return nil
+	case m.twoColumn() && msg.String() == "ctrl+shift+4":
 		m.toggleSectionCollapse("someday")
 		return nil
 	// The rail is the left column, campaigns the right: Left→rail, Right→campaigns.
@@ -115,6 +146,12 @@ func (m *Model) handleRowKey(msg tea.KeyPressMsg) tea.Cmd {
 			case ui.RowRune:
 				qid := target.questID
 				m.removeCurrentRow(func() { m.detachRuneFromQuest(qid, id) })
+			case ui.RowLookout:
+				qid := target.questID
+				m.removeCurrentRow(func() { m.removeLookout(qid, id) })
+			case ui.RowTrack:
+				qid := target.questID
+				m.removeCurrentRow(func() { m.dismissTrack(qid, id) })
 			}
 		}
 		return nil
@@ -151,6 +188,22 @@ func (m *Model) handleRowKey(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, Keys.Delete):
 		m.openConfirmDelete()
 		return nil
+	case key.Matches(msg, Keys.Find):
+		if m.cursor.kind == ui.RowQuest {
+			return m.findTracksInTrails(m.cursor.questID)
+		}
+		return nil
+	case m.cursor.kind == ui.RowLookout && (msg.String() == "r" || key.Matches(msg, Keys.Rename)):
+		// Rename a dashboard from the Tavern too — same inline editor as the
+		// detail view (its name can't be scraped from the URL).
+		m.beginLookoutRename(m.cursor.questID, m.cursor.lookoutURL)
+		return nil
+	case msg.String() == "c" && m.cursor.kind == ui.RowTrack:
+		return m.copyTrack(m.cursor.questID, m.cursor.trackEvent)
+	case msg.String() == "c" && m.cursor.kind == ui.RowRune:
+		return m.copyToClipboard(ldFlagURL(m.ldProject, m.ldEnv, m.cursor.runeKey), "link copied")
+	case msg.String() == "c" && m.cursor.kind == ui.RowLookout:
+		return m.copyToClipboard(m.cursor.lookoutURL, "link copied")
 	}
 
 	// Everything else — printable characters, arrows, Home/End, Ctrl+A/E/K/U/W
@@ -168,8 +221,9 @@ func (m *Model) handleRowKey(msg tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
-// moveCursor steps to the previous/next row, skipping over spacer/label rows
-// (they're purely visual and never a valid cursor target).
+// moveCursor steps to the previous/next selectable row, leaving a fading trail
+// ghost — the keyboard "hop". (The mouse wheel scrolls the viewport instead and
+// never touches the cursor — see handleWheel.)
 func (m *Model) moveCursor(delta int) {
 	rows := m.visibleRows()
 	if len(rows) == 0 {
@@ -198,9 +252,8 @@ func (m *Model) moveCursor(delta int) {
 	if !rows[next].Selectable() {
 		return
 	}
-	// Drop a fading ghost where the cursor was, then move it instantly — a
-	// trail behind the cursor, no easing delay. cursorScreen{X,Y} still holds
-	// the last-rendered (old) cell here.
+	// The trail ghost is dropped where the cursor was (cursorScreen{X,Y} still
+	// holds the last-rendered cell), then the cursor moves instantly.
 	m.spawnCursorTrail(m.cursorScreenX, m.cursorScreenY)
 	m.setCursor(rows[next])
 }
@@ -376,9 +429,13 @@ func (m *Model) toggleReveal() {
 	case ui.RowSection:
 		m.collapsedSections[m.cursor.section] = !m.collapsedSections[m.cursor.section]
 		m.saveLayoutConfig()
-	case ui.RowRuneQuest:
-		// Rune-quest groups reuse collapsedProjects keyed by quest ID.
+	case ui.RowRuneQuest, ui.RowLookoutQuest:
+		// Rune/Lookout-quest groups reuse collapsedProjects keyed by quest ID.
 		m.collapsedProjects[m.cursor.questID] = !m.collapsedProjects[m.cursor.questID]
+	case ui.RowVaultHeader:
+		// A focused page's Vaulted group — expanded state under a synthetic key.
+		k := ui.VaultOpenKey(m.cursor.section)
+		m.collapsedProjects[k] = !m.collapsedProjects[k]
 	}
 	m.invalidateRender()
 }
@@ -451,14 +508,14 @@ func (m *Model) handleEnter() tea.Cmd {
 		q := m.newQuestUnder(row.ProjectID, model.StatusOpen)
 		m.setCursor(ui.Row{Kind: ui.RowQuest, ProjectID: q.ProjectID, QuestID: q.ID})
 
-	case ui.RowProject, ui.RowSection, ui.RowRuneQuest:
+	case ui.RowProject, ui.RowSection, ui.RowRuneQuest, ui.RowLookoutQuest, ui.RowVaultHeader:
 		m.toggleReveal()
 
 	case ui.RowRune:
 		return m.openConnection(connection{kind: linkRune, code: row.RuneKey, url: ldFlagURL(m.ldProject, m.ldEnv, row.RuneKey)})
 
-	case ui.RowNewRune:
-		m.openRunePicker("")
+	case ui.RowLookout:
+		return m.openLookoutScry(row.LookoutURL)
 
 	case ui.RowLabel:
 		m.toggleAllCampaigns()
@@ -788,6 +845,10 @@ func (m *Model) openConfirmDelete() {
 		m.confirmDeleteID = m.cursor.projectID
 	case ui.RowRune:
 		m.confirmDeleteID = m.cursor.runeKey
+	case ui.RowLookout:
+		m.confirmDeleteID = m.cursor.lookoutURL
+	case ui.RowTrack:
+		m.confirmDeleteID = m.cursor.trackEvent
 	}
 }
 
@@ -855,8 +916,13 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 		return nil
 	}
 
-	// A click on a TAVERN/WILDS header label switches to that mode.
+	// The header row holds the TAVERN/WILDS toggle (centered) and the right-
+	// aligned "F1 help" button.
 	if mouse.Y == m.modeToggleRow {
+		if m.tavernHelpWidth > 0 && mouse.X >= m.tavernHelpX && mouse.X < m.tavernHelpX+m.tavernHelpWidth {
+			m.pushModal(helpModal())
+			return nil
+		}
 		for _, sp := range m.modeSpans {
 			if mouse.X >= sp.x0 && mouse.X < sp.x1 {
 				return m.setWilds(sp.wilds)
@@ -891,14 +957,16 @@ func (m *Model) handleWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	if mouse.Button == tea.MouseWheelUp {
 		delta = -1
 	}
-	// In the two-column Tavern the wheel scrolls whichever section it's over
-	// (its own scroll view), moving the cursor only when that section holds
-	// it. Elsewhere it moves the cursor as before.
+	// The wheel scrolls the VIEWPORT only — it never moves the cursor (which
+	// stays put, possibly scrolling out of view, like a normal editor). Every
+	// scrollable surface follows this rule; each render re-centers on the cursor
+	// only when the cursor itself moved (cursorMoved), so a wheel scroll sticks.
 	if m.twoColumn() {
-		m.wheelSection(m.sectionAtPoint(mouse), delta)
+		m.wheelSection(m.sectionAtPoint(mouse), delta) // the box under the pointer
 		return nil
 	}
-	m.moveCursor(delta)
+	m.scrollOffset += delta // single-column viewport; the render clamps it
+	m.invalidateRender()
 	return nil
 }
 
@@ -953,13 +1021,19 @@ func (m *Model) updateResizeHover(x, y int) {
 func (m *Model) commonRowClick(row ui.Row) (tea.Cmd, bool) {
 	switch row.Kind {
 	case ui.RowRune:
-		return m.openConnection(connection{kind: linkRune, code: row.RuneKey, url: ldFlagURL(m.ldProject, m.ldEnv, row.RuneKey)}), true
-	case ui.RowRuneQuest:
+		// A click copies the flag link (double-click opens); Enter still opens
+		// via applyRowAction — matching links everywhere else.
+		return m.clickLink(ldFlagURL(m.ldProject, m.ldEnv, row.RuneKey)), true
+	case ui.RowRuneQuest, ui.RowLookoutQuest, ui.RowVaultHeader:
 		m.toggleReveal()
 		return nil, true
+	case ui.RowLookout:
+		return m.clickLink(row.LookoutURL), true
+	case ui.RowTrack:
+		return m.copyTrack(row.QuestID, row.TrackEvent), true // click copies the event + marks
 	case ui.RowWildsObjective:
 		return m.toggleDone(), true
-	case ui.RowNewProject, ui.RowNewQuest, ui.RowNewRune:
+	case ui.RowNewProject, ui.RowNewQuest:
 		return m.handleEnter(), true
 	}
 	return nil, false
@@ -970,6 +1044,22 @@ func (m *Model) commonRowClick(row ui.Row) (tea.Cmd, bool) {
 // default (toggle collapse/done, open a rune, add). colX is the column's
 // content left edge — relX is measured from it, matching how hint/code spans
 // were recorded.
+// rowDoubleClickWindow is how close two clicks on the same row must be for the
+// second to open its detail (matching linkDoubleClickWindow's feel).
+const rowDoubleClickWindow = 400 * time.Millisecond
+
+// rowOpensDetail reports whether a row kind has a detail/focus view that Tab
+// opens and that single-click does NOT already open — i.e. one a double-click
+// should enter (see handleReveal). RowLabel is excluded: its name already opens
+// the section on a single click.
+func rowOpensDetail(k ui.RowKind) bool {
+	switch k {
+	case ui.RowQuest, ui.RowProject, ui.RowSection:
+		return true
+	}
+	return false
+}
+
 func (m *Model) clickRowAt(rows []ui.Row, idx int, msg tea.Mouse, colX int) tea.Cmd {
 	if idx < 0 || idx >= len(rows) {
 		return nil
@@ -996,6 +1086,25 @@ func (m *Model) clickRowAt(rows []ui.Row, idx int, msg tea.Mouse, colX int) tea.
 
 	m.commitEdit()
 	m.setCursor(row)
+	// A click acts on the row it landed on — point the overlay origin at the
+	// clicked cell so a completion burst (marking an objective/quest done) fires
+	// THERE, not at the cursor's previous on-screen position. cursorScreen* is
+	// otherwise only refreshed on the next render, which happens after the burst
+	// is spawned. colX is the cursor-mark column; msg.Y is the clicked row.
+	m.cursorScreenX = colX
+	m.cursorScreenY = msg.Y
+
+	// Double-click an openable row (quest / campaign / section) to enter its
+	// detail view — the mouse equivalent of Tab.
+	if rowOpensDetail(row.Kind) {
+		now := time.Now()
+		if m.cursor == m.lastRowClick && now.Sub(m.lastRowClickAt) < rowDoubleClickWindow {
+			m.lastRowClick = cursorTarget{} // disarm so a third click doesn't re-open
+			return m.handleReveal()
+		}
+		m.lastRowClick = m.cursor
+		m.lastRowClickAt = now
+	}
 
 	// A click landing on a rendered action hint ("→ open (tab)", "↓ collapse
 	// (enter)") triggers that action, exactly as pressing its key would.
@@ -1008,6 +1117,21 @@ func (m *Model) clickRowAt(rows []ui.Row, idx int, msg tea.Mouse, colX int) tea.
 				return m.handleEnter()
 			case "done":
 				return m.toggleDone()
+			case "rename":
+				if row.Kind == ui.RowLookout {
+					m.beginLookoutRename(row.QuestID, row.LookoutURL)
+				}
+				return nil
+			case "copy":
+				switch row.Kind {
+				case ui.RowTrack:
+					return m.copyTrack(row.QuestID, row.TrackEvent)
+				case ui.RowRune:
+					return m.copyToClipboard(ldFlagURL(m.ldProject, m.ldEnv, row.RuneKey), "link copied")
+				case ui.RowLookout:
+					return m.copyToClipboard(row.LookoutURL, "link copied")
+				}
+				return nil
 			}
 		}
 	}

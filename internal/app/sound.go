@@ -93,11 +93,11 @@ func (m *Model) playSound(e soundEvent) tea.Cmd {
 func (m *Model) toggleMute() tea.Cmd {
 	m.soundCfg.Enabled = !m.soundCfg.Enabled
 	m.saveSoundConfig()
-	label := "🔊 sound on"
+	label := "sound on"
 	if !m.soundCfg.Enabled {
-		label = "🔇 sound muted"
+		label = "sound muted"
 	}
-	return m.showWarning(m.cursor, label)
+	return m.showClipboardToastText(label) // top-right toast, not an inline row warning
 }
 
 // saveSoundConfig persists the current mute state to config.toml (best-effort,

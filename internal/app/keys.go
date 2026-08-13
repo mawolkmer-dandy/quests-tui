@@ -46,6 +46,8 @@ type KeyMap struct {
 	Help            key.Binding
 	ToggleHints     key.Binding
 	MuteSound       key.Binding
+	Find            key.Binding
+	Rename          key.Binding
 	Quit            key.Binding
 }
 
@@ -72,6 +74,8 @@ var Keys = KeyMap{
 	Help:            key.NewBinding(key.WithKeys("f1"), key.WithHelp("F1", "help")),
 	ToggleHints:     key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("Ctrl+K", "hide / show hover tips")),
 	MuteSound:       key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("Ctrl+S", "mute / unmute sound")),
+	Find:            key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("Ctrl+R", "find tracks in linked trails")),
+	Rename:          key.NewBinding(key.WithKeys("f2"), key.WithHelp("F2", "rename title")),
 	Quit:            key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("Ctrl+C", "quit")),
 }
 
@@ -128,6 +132,6 @@ func (k KeyMap) ShortHelp() []key.Binding {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.ToggleActive, k.ToggleDone, k.ToggleImportant, k.ToggleVault, k.ToggleType, k.MoveProject},
-		{k.Delete, k.Undo, k.SetOut, k.Search, k.Help, k.ToggleHints, k.MuteSound, k.Quit},
+		{k.Delete, k.Undo, k.SetOut, k.Search, k.Help, k.ToggleHints, k.MuteSound, k.Find, k.Quit},
 	}
 }

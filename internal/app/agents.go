@@ -21,10 +21,22 @@ import (
 // HerdrAgent is one entry of `herdr agent list` — a live agent pane, named the
 // way herdr's own sidebar names it: "<workspace> · <tab>".
 type HerdrAgent struct {
-	ID        string // terminal_id, a stable focus target, e.g. "term_6579824d674f05"
-	Workspace string // herdr workspace label, e.g. "main" / "impressions-smokescreen"
-	Tab       string // herdr tab label, e.g. "better checkout" (often "1" for single-tab workspaces)
-	Status    string // "idle" | "working" | "blocked" | "done" | "unknown"
+	ID          string // terminal_id, e.g. "term_6579824d674f05" — the focus target, but EPHEMERAL (rotates when a pane is closed/recreated or herdr restarts)
+	Session     string // agent_session.value — the Claude conversation UUID; the most STABLE identity (survives terminal rotation)
+	WorkspaceID string // workspace_id, e.g. "w0" / "w15" — what an older version of this app pinned
+	Workspace   string // herdr workspace label, e.g. "main" / "impressions-smokescreen"
+	Tab         string // herdr tab label, e.g. "better checkout" (often "1" for single-tab workspaces)
+	Status      string // "idle" | "working" | "blocked" | "done" | "unknown"
+}
+
+// pinKey is the identity persisted when a quest pins this agent: the Claude
+// session UUID when known (stable across terminal rotation), else the terminal
+// id. matchAgent resolves either back to the live agent.
+func (a HerdrAgent) pinKey() string {
+	if a.Session != "" {
+		return a.Session
+	}
+	return a.ID
 }
 
 // Name is the agent's herdr-style display name, "<workspace> · <tab>".
@@ -85,11 +97,14 @@ func fetchHerdrAgents() (agents []HerdrAgent, ok bool) {
 	var resp struct {
 		Result struct {
 			Agents []struct {
-				Agent       string `json:"agent"`
-				AgentStatus string `json:"agent_status"`
-				TerminalID  string `json:"terminal_id"`
-				TabID       string `json:"tab_id"`
-				WorkspaceID string `json:"workspace_id"`
+				Agent        string `json:"agent"`
+				AgentStatus  string `json:"agent_status"`
+				TerminalID   string `json:"terminal_id"`
+				TabID        string `json:"tab_id"`
+				WorkspaceID  string `json:"workspace_id"`
+				AgentSession struct {
+					Value string `json:"value"`
+				} `json:"agent_session"`
 			} `json:"agents"`
 		} `json:"result"`
 	}
@@ -103,13 +118,45 @@ func fetchHerdrAgents() (agents []HerdrAgent, ok bool) {
 			continue // a bare-shell pane, not an agent
 		}
 		agents = append(agents, HerdrAgent{
-			ID:        a.TerminalID,
-			Workspace: workspaces[a.WorkspaceID],
-			Tab:       tabs[a.TabID],
-			Status:    a.AgentStatus,
+			ID:          a.TerminalID,
+			Session:     a.AgentSession.Value,
+			WorkspaceID: a.WorkspaceID,
+			Workspace:   workspaces[a.WorkspaceID],
+			Tab:         tabs[a.TabID],
+			Status:      a.AgentStatus,
 		})
 	}
 	return agents, true
+}
+
+// healAgentPins migrates persisted pins to the stable session UUID whenever a
+// fresh agent list lets us resolve them — so a pin stored as an ephemeral
+// terminal id or a legacy workspace id upgrades itself the next time herdr
+// reports the agent, instead of decaying into "no agent" later. Returns true
+// if anything changed (so the caller can persist).
+func (m *Model) healAgentPins() bool {
+	changed := false
+	for i := range m.store.Quests {
+		q := &m.store.Quests[i]
+		for j, pin := range q.AgentWorkspaces {
+			a, ok := m.matchAgent(pin)
+			if !ok {
+				continue
+			}
+			// Only auto-migrate UNAMBIGUOUS matches (session/terminal → session).
+			// A legacy workspace-id pin maps to several agents, so leave it in
+			// place — matchAgent still resolves it for display, and silently
+			// committing it to one agent could pick the wrong one.
+			if pin != a.Session && pin != a.ID {
+				continue
+			}
+			if stable := a.pinKey(); stable != "" && stable != pin {
+				q.AgentWorkspaces[j] = stable
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 // refreshAgentsCmd fetches the agent list off the UI goroutine.
@@ -133,10 +180,23 @@ func (m *Model) hasAgentLinks() bool {
 	return false
 }
 
-// agentByID returns the cached herdr agent with id, if present.
-func (m *Model) agentByID(id string) (HerdrAgent, bool) {
+// matchAgent resolves a persisted pin to a live herdr agent. A pin may be a
+// session UUID (current scheme), a terminal id (older), or a workspace id (the
+// oldest — what "AgentWorkspaces" was named after). Session/terminal are exact
+// and specific; workspace is ambiguous (a workspace can hold several agents),
+// so it's only used as a fallback, resolving to that workspace's first agent —
+// enough to show a real name/status instead of the raw "w0 / no agent".
+func (m *Model) matchAgent(pin string) (HerdrAgent, bool) {
+	if pin == "" {
+		return HerdrAgent{}, false
+	}
 	for _, a := range m.agents {
-		if a.ID == id {
+		if pin == a.Session || pin == a.ID {
+			return a, true
+		}
+	}
+	for _, a := range m.agents {
+		if pin == a.WorkspaceID {
 			return a, true
 		}
 	}
@@ -146,7 +206,7 @@ func (m *Model) agentByID(id string) (HerdrAgent, bool) {
 // agentState is the display state for a pinned agent: its herdr agent_status,
 // or "none" when herdr doesn't know it (closed / server down).
 func (m *Model) agentState(id string) string {
-	if a, ok := m.agentByID(id); ok {
+	if a, ok := m.matchAgent(id); ok {
 		return a.Status
 	}
 	return "none"
@@ -155,7 +215,7 @@ func (m *Model) agentState(id string) string {
 // agentLabel is the agent's herdr-style name ("<workspace> · <tab>"), or its
 // id when herdr doesn't know it (closed / server down).
 func (m *Model) agentLabel(id string) string {
-	if a, ok := m.agentByID(id); ok && a.Name() != "" {
+	if a, ok := m.matchAgent(id); ok && a.Name() != "" {
 		return a.Name()
 	}
 	return id
@@ -304,10 +364,17 @@ func (m *Model) onAgentPollTick(gen int) tea.Cmd {
 	return tea.Batch(refreshAgentsCmd(), agentPollTick(gen))
 }
 
-// openAgent focuses a herdr agent (jumps to its pane), fire-and-forget.
-func openAgent(id string) tea.Cmd {
+// openAgent focuses a pinned herdr agent (jumps to its pane), fire-and-forget.
+// The pin is resolved to the agent's CURRENT terminal id first — herdr's focus
+// target must be a live terminal/name/pane, and the pinned key may be a session
+// or (legacy) workspace id that isn't a valid target on its own.
+func (m *Model) openAgent(pin string) tea.Cmd {
+	target := pin
+	if a, ok := m.matchAgent(pin); ok && a.ID != "" {
+		target = a.ID
+	}
 	return func() tea.Msg {
-		_ = exec.Command("herdr", "agent", "focus", id).Start()
+		_ = exec.Command("herdr", "agent", "focus", target).Start()
 		return nil
 	}
 }
@@ -336,15 +403,16 @@ func (m *Model) openAgentPicker() tea.Cmd {
 
 // agentPickerItems lists herdr agents for the picker. Label is the plain
 // "<workspace> · <tab>" name (used for fuzzy filtering); the row is rendered
-// with a status icon + styling in renderModal. ID is the terminal id pinned.
+// with a status icon + styling in renderModal. ID is the pinKey persisted on
+// the quest (session UUID when known) so the pin survives terminal rotation.
 func (m *Model) agentPickerItems() []pickerItem {
 	var items []pickerItem
 	for _, a := range m.agents {
 		label := a.Name()
 		if label == "" {
-			label = a.ID
+			label = a.pinKey()
 		}
-		items = append(items, pickerItem{ID: a.ID, Label: label})
+		items = append(items, pickerItem{ID: a.pinKey(), Label: label})
 	}
 	return items
 }

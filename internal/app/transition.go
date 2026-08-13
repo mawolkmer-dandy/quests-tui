@@ -109,7 +109,7 @@ func (m *Model) currentRowLines() []string {
 		if r.Kind == ui.RowQuestMeta {
 			continue // meta sub-lines are app-level; skip in the cosmetic transition snapshot
 		}
-		line, _ := ui.RenderRow(r, m.store, "", false, cw, "")
+		line, _ := ui.RenderRow(r, m.store, "", false, false, cw, "")
 		out = append(out, line)
 	}
 	return out
@@ -358,8 +358,7 @@ func (m *Model) viewTavernTransition(reveal float64) string {
 	}
 	margin := strings.Repeat(" ", m.leftMargin)
 
-	rawFooter := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Right).Render(m.renderFooter())
-	footer := indentLines(rawFooter, margin)
+	footer := indentLines(m.statusBar(contentWidth), margin)
 	availableHeight := m.height - lipgloss.Height(footer)
 	if availableHeight < 1 {
 		availableHeight = 1
@@ -469,6 +468,23 @@ func (m *Model) renderModeLine(width int, litTav, litWild []bool) string {
 	if !m.hideHoverTips {
 		b.WriteString(ui.StyleMuted.Render("  ⌃G"))
 	}
+	// Right-aligned "F1 help" (clickable) on the header row, for consistency with
+	// the detail views — the copy toast borrows the same slot while it's active.
+	help := ui.StyleMuted.Render("F1 help")
+	if m.clipboardToastActive {
+		help = renderClipboardToast(m.clipboardToastText)
+	}
+	slack := width - lipgloss.Width(b.String()) - lipgloss.Width(help)
+	if slack < 1 {
+		slack = 1
+	}
+	m.tavernHelpX = m.leftMargin + lipgloss.Width(b.String()) + slack
+	m.tavernHelpWidth = lipgloss.Width(ui.StyleMuted.Render("F1 help"))
+	if m.clipboardToastActive {
+		m.tavernHelpWidth = 0 // the toast isn't a button
+	}
+	b.WriteString(strings.Repeat(" ", slack))
+	b.WriteString(help)
 	return b.String()
 }
 

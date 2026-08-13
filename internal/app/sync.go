@@ -26,17 +26,24 @@ import (
 // used to order linked PRs into a Graphite-style stack (see prStack).
 type PRStatus struct {
 	Code             string // "#47477"
-	Status           string // "running" | "error" | "success"
+	Status           string // "running" | "error" | "success" | "merged" | "closed"
 	CommentsResolved int
 	CommentsTotal    int
-	BaseRef          string // the branch this PR targets (baseRefName)
-	HeadRef          string // this PR's own branch (headRefName)
+	BaseRef          string    // the branch this PR targets (baseRefName)
+	HeadRef          string    // this PR's own branch (headRefName)
+	HeadSHA          string    // this PR's head commit oid — auto-find re-diffs only when it changes
+	MergedAt         time.Time // when the PR merged (zero if not merged) — ages tracks/runes it introduced
+	Title            string    // PR title, for the shareable copy-section list
+	Additions        int       // lines added, for the "+N/-M" churn suffix
+	Deletions        int       // lines removed
+	Draft            bool      // draft PR — a distinct emoji in the copied list
 }
 
 // JiraStatus is a Jira issue's coarse status category.
 type JiraStatus struct {
 	Code   string // "EPDCHAIR-5713"
 	Status string // "todo" | "in progress" | "done"
+	Title  string // issue summary, for the shareable copy-section list
 }
 
 // syncTarget is one quest's linked codes, collected for a sync pass.
@@ -205,7 +212,13 @@ type prRollupResponse struct {
 	StatusCheckRollup []prRollupEntry `json:"statusCheckRollup"`
 	BaseRefName       string          `json:"baseRefName"`
 	HeadRefName       string          `json:"headRefName"`
-	State             string          `json:"state"` // OPEN | MERGED | CLOSED
+	HeadRefOid        string          `json:"headRefOid"`
+	MergedAt          string          `json:"mergedAt"` // RFC3339, empty if not merged
+	State             string          `json:"state"`    // OPEN | MERGED | CLOSED
+	Title             string          `json:"title"`
+	Additions         int             `json:"additions"`
+	Deletions         int             `json:"deletions"`
+	IsDraft           bool            `json:"isDraft"`
 }
 
 type reviewThreadsResponse struct {
@@ -229,7 +242,7 @@ func fetchPRStatus(prCode, prRepo string) (PRStatus, bool) {
 		return PRStatus{}, false
 	}
 
-	status, baseRef, headRef, ok := fetchPRCIStatus(prRepo, num)
+	status, resp, ok := fetchPRCIStatus(prRepo, num)
 	if !ok {
 		return PRStatus{}, false
 	}
@@ -237,36 +250,46 @@ func fetchPRStatus(prCode, prRepo string) (PRStatus, bool) {
 	if !ok {
 		return PRStatus{}, false
 	}
-	return PRStatus{
+	st := PRStatus{
 		Code:             prCode,
 		Status:           status,
 		CommentsResolved: resolved,
 		CommentsTotal:    total,
-		BaseRef:          baseRef,
-		HeadRef:          headRef,
-	}, true
+		BaseRef:          resp.BaseRefName,
+		HeadRef:          resp.HeadRefName,
+		HeadSHA:          resp.HeadRefOid,
+		Title:            resp.Title,
+		Additions:        resp.Additions,
+		Deletions:        resp.Deletions,
+		Draft:            resp.IsDraft,
+	}
+	if resp.MergedAt != "" {
+		if t, err := time.Parse(time.RFC3339, resp.MergedAt); err == nil {
+			st.MergedAt = t
+		}
+	}
+	return st, true
 }
 
-func fetchPRCIStatus(prRepo, num string) (status, baseRef, headRef string, ok bool) {
+func fetchPRCIStatus(prRepo, num string) (status string, resp prRollupResponse, ok bool) {
 	url := prURL(prRepo, num)
-	out, err := runCmd("gh", "pr", "view", url, "--json", "state,statusCheckRollup,baseRefName,headRefName")
+	out, err := runCmd("gh", "pr", "view", url, "--json", "state,statusCheckRollup,baseRefName,headRefName,headRefOid,mergedAt,title,additions,deletions,isDraft")
 	if err != nil {
-		return "", "", "", false
+		return "", prRollupResponse{}, false
 	}
-	var resp prRollupResponse
 	if err := json.Unmarshal(out, &resp); err != nil {
-		return "", "", "", false
+		return "", prRollupResponse{}, false
 	}
 	// A merged/closed PR outranks its last CI run — a merged PR showing
 	// "passing" (or a closed one showing whatever its checks were) would read
 	// as still-open work.
 	switch strings.ToUpper(resp.State) {
 	case "MERGED":
-		return "merged", resp.BaseRefName, resp.HeadRefName, true
+		return "merged", resp, true
 	case "CLOSED":
-		return "closed", resp.BaseRefName, resp.HeadRefName, true
+		return "closed", resp, true
 	}
-	return collapseRollup(resp.StatusCheckRollup), resp.BaseRefName, resp.HeadRefName, true
+	return collapseRollup(resp.StatusCheckRollup), resp, true
 }
 
 // collapseRollup reduces gh's mixed CheckRun/StatusContext rollup to one of
@@ -325,7 +348,8 @@ func fetchPRReviewThreads(owner, repo, num string) (resolved, total int, ok bool
 
 type jiraViewResponse struct {
 	Fields struct {
-		Status struct {
+		Summary string `json:"summary"`
+		Status  struct {
 			StatusCategory struct {
 				Key string `json:"key"`
 			} `json:"statusCategory"`
@@ -334,7 +358,7 @@ type jiraViewResponse struct {
 }
 
 func fetchJiraStatus(code string) (JiraStatus, bool) {
-	out, err := runCmd("acli", "jira", "workitem", "view", code, "--json", "--fields", "status")
+	out, err := runCmd("acli", "jira", "workitem", "view", code, "--json", "--fields", "status,summary")
 	if err != nil {
 		return JiraStatus{}, false
 	}
@@ -346,7 +370,7 @@ func fetchJiraStatus(code string) (JiraStatus, bool) {
 	if !ok {
 		return JiraStatus{}, false
 	}
-	return JiraStatus{Code: code, Status: status}, true
+	return JiraStatus{Code: code, Status: status, Title: resp.Fields.Summary}, true
 }
 
 // jiraCategoryStatus maps Jira's statusCategory key to the coarse label shown
@@ -378,7 +402,13 @@ func splitRepo(repo string) (owner, name string, ok bool) {
 // stdout. Used for the gh/acli fetches — kept tiny so each call site stays
 // declarative.
 func runCmd(name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), syncFetchTimeout)
+	return runCmdTimeout(syncFetchTimeout, name, args...)
+}
+
+// runCmdTimeout is runCmd with a caller-chosen timeout — used by the PR
+// harvest, where a large `gh pr diff` can outrun the short sync timeout.
+func runCmdTimeout(d time.Duration, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
 	defer cancel()
 	return exec.CommandContext(ctx, name, args...).Output()
 }
@@ -630,10 +660,54 @@ func (m *Model) integrationSegments(q *model.Quest) []integrationSegment {
 // focused cursor target it also gets a muted action hint ("↵ open · Ctrl+X
 // remove") or, while a removal is armed, the inline "remove this link? y/n"
 // prompt — and its line index is recorded as the caret line for scrolling.
-func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
-	const indent = 4  // body text starts 4 cols in (see focusTextWidth)
+// questCampaignName is the quest's parent campaign name (its "parent"), or
+// "Questboard" when it has no campaign yet.
+func (m *Model) questCampaignName(q *model.Quest) string {
+	if q.ProjectID == "" {
+		return "Questboard"
+	}
+	if p := m.findProject(q.ProjectID); p != nil {
+		return p.Name
+	}
+	return "—"
+}
+
+func questTypeLabel(q *model.Quest) string {
+	if q.Type == model.QuestTypeMain {
+		return "main quest"
+	}
+	return "side quest"
+}
+
+func (m *Model) questStatusLabel(q *model.Quest) string {
+	s := "open"
+	switch q.Status {
+	case model.StatusActive:
+		s = "active"
+	case model.StatusDone:
+		s = "done"
+	}
+	if m.isVaulted(q) {
+		s += " · vaulted"
+	}
+	return s
+}
+
+func questPriorityLabel(q *model.Quest) string {
+	switch q.Priority {
+	case model.PriorityHigh:
+		return "high"
+	case model.PriorityMedium:
+		return "medium"
+	case model.PriorityLow:
+		return "low"
+	}
+	return ""
+}
+
+func (m *Model) focusCodeLines(q *model.Quest, startLn, baseX int) []string {
 	const gutterW = 2 // left slot holding the stack marker (blank otherwise)
-	pad := strings.Repeat(" ", indent)
+	pad := ""         // detail-column lines are placed at baseX by the composer
 
 	stack := m.prStack(q.PRs)
 
@@ -657,35 +731,28 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 	// focusLinks index li, when it's the focused cursor target. The hint depends
 	// on the link kind: browser links open + remove, the agent affordance adds,
 	// a pinned agent only removes (no open — it's status-only).
-	hintFor := func(li int, kind linkKind) string {
-		if m.focusLinkIdx != li {
-			return ""
-		}
-		if m.focusLinkConfirmID != "" {
-			return "  " + ui.StyleImportant.Render("remove this link? y/n")
-		}
-		switch kind {
-		case linkToggleConn:
-			if q.ConnectionsCollapsed {
-				return "  " + ui.StyleMuted.Render("↵ show")
-			}
-			return "  " + ui.StyleMuted.Render("↵ hide")
-		case linkAddAgent:
-			return "  " + ui.StyleMuted.Render("↵ add")
-		case linkAddRune:
-			return "  " + ui.StyleMuted.Render("↵ attach")
-		default: // linkAgent/linkJira/linkPR/linkRune — open + remove
-			return "  " + ui.StyleMuted.Render("↵ open · "+Keys.Delete.Help().Key+" remove")
-		}
-	}
+	// The focused item's actions render on a fixed status line below the box
+	// (see viewQuestDetail's sigilStatusLine), NOT inline — an inline hint made
+	// long rows wrap and shifted the whole layout. hintFor is kept as a no-op so
+	// the section loops read the same; drop it if the layout is ever reworked.
+	hintFor := func(li int, kind linkKind) string { return "" }
 
 	// addLink emits one aligned link line: a fixed-width stack gutter, the
 	// (already-styled) status glyph, the padded code, then the status text. The
 	// clickable span and cursor target both start at the code.
+	// focusGutter is the 2-col left gutter for a sigil line: the accent "› "
+	// cursor mark when this link is focused (matching the body/outline), else
+	// the provided fallback (a stack marker or blank).
+	focusGutter := func(li int, fallback string) string {
+		if m.onFocusLink() && m.focusLinkIdx == li {
+			return ui.StyleCursor.Render(ui.GlyphCursor)
+		}
+		return ui.StyleMuted.Render(fallback + strings.Repeat(" ", gutterW-lipgloss.Width(fallback)))
+	}
+
 	addLink := func(marker, glyph, code, text string, kind linkKind, url string) {
 		li := len(m.focusLinks)
-		gutter := marker + strings.Repeat(" ", gutterW-lipgloss.Width(marker))
-		x := m.focusLeftMargin + indent + gutterW + lipgloss.Width(glyph) + 1
+		x := baseX + gutterW + lipgloss.Width(glyph) + 1
 		codePadded := code + strings.Repeat(" ", codeW-lipgloss.Width(code))
 		// The code (Jira/PR id) reads white like the NPC label and rune keys;
 		// only the trailing status word is muted.
@@ -695,40 +762,55 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		if m.focusLinkIdx == li {
 			m.focusCaretLine = ln
 		}
-		lines = append(lines, pad+ui.StyleMuted.Render(gutter)+glyph+" "+body+hintFor(li, kind))
+		lines = append(lines, pad+focusGutter(li, marker)+glyph+" "+body+hintFor(li, kind))
 		ln++
 	}
 
 	agentPrefix := pad + strings.Repeat(" ", gutterW)
-	silent := m.isVaulted(q)
+	// linePrefix is focusGutter for the sigil loops that don't go through
+	// addLink (agents, runes, tracks, lookouts, affordances) — a "› " when
+	// focused, else the blank agent-aligned gutter.
+	linePrefix := func(li int) string {
+		return pad + focusGutter(li, "")
+	}
 
-	// Master "Connections" header — Enter/click collapses to just the body.
-	toggleLi := len(m.focusLinks)
-	m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkToggleConn})
-	if m.focusLinkIdx == toggleLi {
-		m.focusCaretLine = ln
+	// Metadata rows (non-navigable) at the top of the details column, indented
+	// (agentPrefix) so their labels line up with the connection sections below.
+	meta := func(label, value string) {
+		if value == "" {
+			return
+		}
+		lines = append(lines, agentPrefix+ui.StyleMuted.Render(fmt.Sprintf("%-10s", label))+value)
+		ln++
 	}
-	caret := ui.GlyphExpanded
-	if q.ConnectionsCollapsed {
-		caret = ui.GlyphCollapsed
-	}
-	title := caret + " Sigils"
-	if q.ConnectionsCollapsed {
-		title += fmt.Sprintf(" (%d)", connectionCount(q))
-	}
-	if silent {
-		title += ui.StyleMuted.Render("  · vaulted (silent)")
-	}
-	tx0 := m.focusLeftMargin + indent
-	m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: tx0, x1: tx0 + lipgloss.Width(title), url: toggleConnSentinel})
-	lines = append(lines, pad+ui.StyleSectionHeader.Render(title)+hintFor(toggleLi, linkToggleConn))
-	ln++
+	meta("Campaign", m.questCampaignName(q))
+	meta("Type", questTypeLabel(q))
+	meta("Status", m.questStatusLabel(q))
+	meta("Priority", questPriorityLabel(q))
+	meta("Created", agoStr(q.CreatedAt))
+	meta("Updated", agoStr(q.UpdatedAt))
 
-	// sectionHeader emits a blank spacer then a muted "emblem Name" line
-	// (non-navigable), so each section has a little breathing room above it.
-	sectionHeader := func(glyph, name string) {
-		lines = append(lines, "", agentPrefix+ui.StyleMuted.Render(glyph+" "+name))
-		ln += 2
+	// sectionHeader emits a blank spacer then a muted "emblem Name" line. When
+	// the section has items (count>0) the header is a focus stop that copies the
+	// whole section as a shareable list ("c"); empty sections stay non-navigable.
+	sectionHeader := func(glyph, name, sectionKey string, count int) {
+		lines = append(lines, "") // spacer (non-navigable)
+		ln++
+		hdr := ui.StyleMuted.Render(glyph + " " + name)
+		if count == 0 {
+			lines = append(lines, agentPrefix+hdr)
+			ln++
+			return
+		}
+		li := len(m.focusLinks)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkCopySection, code: sectionKey})
+		if m.focusLinkIdx == li {
+			m.focusCaretLine = ln
+		}
+		x0 := baseX + gutterW
+		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(glyph+" "+name), url: copySectionSentinel + sectionKey})
+		lines = append(lines, linePrefix(li)+hdr+hintFor(li, linkCopySection))
+		ln++
 	}
 	// pasteHint emits a muted "add by pasting a link" affordance (non-navigable —
 	// every connection is added by pasting its URL into the body). Only shown
@@ -738,112 +820,176 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn int) []string {
 		ln++
 	}
 
-	if !q.ConnectionsCollapsed {
-		// NPCs (pinned agents).
-		sectionHeader(ui.GlyphConnNPC, "NPCs")
-		for _, id := range q.AgentWorkspaces {
-			li := len(m.focusLinks)
-			state := m.agentState(id)
-			glyph := m.agentGlyph(state)
-			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAgent, code: id})
-			if m.focusLinkIdx == li {
-				m.focusCaretLine = ln
-			}
-			// Clickable span over the name+status, so a click focuses the agent
-			// exactly as Enter does (see handleFocusClick's agentFocusPrefix case).
-			body := m.agentLabel(id) + "  " + ui.StyleMuted.Render(agentWord(state))
-			x := m.focusLeftMargin + indent + gutterW + lipgloss.Width(glyph) + 1
-			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: agentFocusPrefix + id})
-			lines = append(lines, agentPrefix+glyph+" "+body+hintFor(li, linkAgent))
-			ln++
+	// NPCs (pinned agents).
+	sectionHeader(ui.GlyphConnNPC, "NPCs", secNPCs, len(q.AgentWorkspaces))
+	for _, id := range q.AgentWorkspaces {
+		li := len(m.focusLinks)
+		state := m.agentState(id)
+		glyph := m.agentGlyph(state)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAgent, code: id})
+		if m.focusLinkIdx == li {
+			m.focusCaretLine = ln
 		}
-		if len(q.AgentWorkspaces) == 0 {
-			li := len(m.focusLinks)
-			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAddAgent})
-			if m.focusLinkIdx == li {
-				m.focusCaretLine = ln
-			}
-			label := "+ select a Herdr agent"
-			x0 := m.focusLeftMargin + indent + gutterW + 2 // align with the paste-link affordances
-			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: addAgentSentinel})
-			lines = append(lines, agentPrefix+"  "+ui.StyleMuted.Render(label)+hintFor(li, linkAddAgent))
-			ln++
+		// Clickable span over the name+status, so a click focuses the agent
+		// exactly as Enter does (see handleFocusClick's agentFocusPrefix case).
+		body := m.agentLabel(id) + "  " + ui.StyleMuted.Render(agentWord(state))
+		x := baseX + gutterW + lipgloss.Width(glyph) + 1
+		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: agentFocusPrefix + id})
+		lines = append(lines, linePrefix(li)+glyph+" "+body+hintFor(li, linkAgent))
+		ln++
+	}
+	if len(q.AgentWorkspaces) == 0 {
+		li := len(m.focusLinks)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkAddAgent})
+		if m.focusLinkIdx == li {
+			m.focusCaretLine = ln
 		}
-
-		// Scrolls (Jira).
-		sectionHeader(ui.GlyphConnScroll, "Scrolls")
-		for _, code := range q.JiraCodes {
-			text := ui.StyleMuted.Render(m.jiraStatusWord(code))
-			addLink("", m.jiraGlyph(code), code, text, linkJira, jiraURL(code, m.jiraBaseURL))
-		}
-		if len(q.JiraCodes) == 0 {
-			pasteHint("Jira")
-		}
-
-		// Trails (GitHub PRs).
-		sectionHeader(ui.GlyphConnTrail, "Trails")
-		for i, node := range stack {
-			pr := node.link
-			glyph, _ := m.prGlyph(pr.Code)
-			text := ui.StyleMuted.Render(m.prStatusWord(pr.Code) + " · " + m.prCommentsText(pr.Code))
-			marker := ""
-			if node.stacked {
-				marker = ui.GlyphStackBranchMid
-				if i == len(stack)-1 || stack[i+1].depth == 0 {
-					marker = ui.GlyphStackBranchEnd
-				}
-			}
-			addLink(marker, glyph, pr.Code, text, linkPR, prURL(pr.Repo, pr.Code))
-		}
-		if len(stack) == 0 {
-			pasteHint("GitHub")
-		}
-
-		// Runes (LaunchDarkly flags) — added by pasting an LD link, same as the
-		// others (no picker).
-		sectionHeader(ui.GlyphConnRune, "Runes")
-		for _, key := range q.Runes {
-			li := len(m.focusLinks)
-			url := ldFlagURL(m.ldProject, m.ldEnv, key)
-			glyph := m.runeGlyph(key)
-			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkRune, code: key, url: url})
-			if m.focusLinkIdx == li {
-				m.focusCaretLine = ln
-			}
-			body := ui.StyleName.Render(key) + "  " + ui.StyleMuted.Render(m.runeWord(key))
-			// Register the clickable span (the rune loop is bespoke — no codeW
-			// padding — so it can't use addLink; without this a click did nothing).
-			x := m.focusLeftMargin + indent + gutterW + lipgloss.Width(glyph) + 1
-			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: url})
-			lines = append(lines, agentPrefix+glyph+" "+body+hintFor(li, linkRune))
-			ln++
-		}
-		if len(q.Runes) == 0 {
-			pasteHint("LaunchDarkly")
-		}
+		label := "+ select a Herdr agent"
+		x0 := baseX + gutterW + 2 // align with the paste-link affordances
+		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: addAgentSentinel})
+		lines = append(lines, linePrefix(li)+"  "+ui.StyleMuted.Render(label)+hintFor(li, linkAddAgent))
+		ln++
 	}
 
-	// Body separator.
-	sepW := m.focusTextWidth
-	if sepW < 10 {
-		sepW = 10
+	// Scrolls (Jira).
+	sectionHeader(ui.GlyphConnScroll, "Scrolls", secScrolls, len(q.JiraCodes))
+	for _, code := range q.JiraCodes {
+		text := ui.StyleMuted.Render(m.jiraStatusWord(code))
+		addLink("", m.jiraGlyph(code), code, text, linkJira, jiraURL(code, m.jiraBaseURL))
 	}
-	if sepW > 60 {
-		sepW = 60
+	if len(q.JiraCodes) == 0 {
+		pasteHint("Jira")
 	}
-	lines = append(lines, pad+ui.StyleMuted.Render(strings.Repeat("─", sepW)))
-	ln++
+
+	// Trails (GitHub PRs).
+	sectionHeader(ui.GlyphConnTrail, "Trails", secTrails, len(stack))
+	for i, node := range stack {
+		pr := node.link
+		glyph, _ := m.prGlyph(pr.Code)
+		text := ui.StyleMuted.Render(m.prStatusWord(pr.Code) + " · " + m.prCommentsText(pr.Code))
+		marker := ""
+		if node.stacked {
+			marker = ui.GlyphStackBranchMid
+			if i == len(stack)-1 || stack[i+1].depth == 0 {
+				marker = ui.GlyphStackBranchEnd
+			}
+		}
+		addLink(marker, glyph, pr.Code, text, linkPR, prURL(pr.Repo, pr.Code))
+	}
+	if len(stack) == 0 {
+		pasteHint("GitHub")
+	}
+	// Find affordance — scan the Trails for Tracks (events) + flags/issues.
+	// Only shown when there are trails to search; status while busy.
+	if len(stack) > 0 {
+		li := len(m.focusLinks)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkFind})
+		if m.focusLinkIdx == li {
+			m.focusCaretLine = ln
+		}
+		label := ui.GlyphFind + " find tracks in trails"
+		x0 := baseX + gutterW + 2
+		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: findSentinel})
+		lines = append(lines, linePrefix(li)+"  "+ui.StyleMuted.Render(label)+hintFor(li, linkFind))
+		ln++
+	}
+
+	// Runes (LaunchDarkly flags) — added by pasting an LD link, same as the
+	// others (no picker).
+	sectionHeader(ui.GlyphConnRune, "Runes", secRunes, len(q.Runes))
+	for _, key := range q.Runes {
+		li := len(m.focusLinks)
+		url := ldFlagURL(m.ldProject, m.ldEnv, key)
+		glyph := m.runeGlyph(key)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkRune, code: key, url: url})
+		if m.focusLinkIdx == li {
+			m.focusCaretLine = ln
+		}
+		body := ui.StyleName.Render(key) + "  " + ui.StyleMuted.Render(m.runeWord(key)) + ageDaysLabel(m.runeAgeDays(q.ID, key), true)
+		// Register the clickable span (the rune loop is bespoke — no codeW
+		// padding — so it can't use addLink; without this a click did nothing).
+		x := baseX + gutterW + lipgloss.Width(glyph) + 1
+		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: url})
+		lines = append(lines, linePrefix(li)+glyph+" "+body+hintFor(li, linkRune))
+		ln++
+	}
+	if len(q.Runes) == 0 {
+		lines = append(lines, agentPrefix+strings.Repeat(" ", 2)+ui.StyleMuted.Render("found from trails (flags declared in launch-darkly.types.ts)"))
+		ln++
+	}
+
+	// Tracks (tracking events, found from the Trails — no manual entry). The
+	// glyph is colored by whether the event's source PR is merged (in
+	// production) or still pending.
+	sectionHeader(ui.GlyphConnTrack, "Tracks", secTracks, len(q.Tracks))
+	for _, t := range q.Tracks {
+		li := len(m.focusLinks)
+		glyph := m.trackGlyph(t)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkTrack, code: t.Event})
+		if m.focusLinkIdx == li {
+			m.focusCaretLine = ln
+		}
+		body := ui.StyleName.Render(t.Event) + "  " + ui.StyleMuted.Render(m.trackWord(t))
+		x := baseX + gutterW + lipgloss.Width(glyph) + 1
+		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: copyTrackSentinel + t.Event})
+		lines = append(lines, linePrefix(li)+glyph+" "+body+hintFor(li, linkTrack))
+		ln++
+	}
+	if len(q.Tracks) == 0 {
+		lines = append(lines, agentPrefix+strings.Repeat(" ", 2)+ui.StyleMuted.Render("find tracks in a trail to gather them"))
+		ln++
+	} else {
+		// Write the Lookout's plans (a per-quest dashboard build-plan).
+		li := len(m.focusLinks)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkForge})
+		if m.focusLinkIdx == li {
+			m.focusCaretLine = ln
+		}
+		label := ui.GlyphVine + " write the Lookout's plans"
+		x0 := baseX + gutterW + 2
+		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: forgeSentinel})
+		lines = append(lines, linePrefix(li)+"  "+ui.StyleMuted.Render(label)+hintFor(li, linkForge))
+		ln++
+	}
+	// Restore affordance — bring back tracks dismissed by mistake.
+	if len(q.DismissedTracks) > 0 {
+		li := len(m.focusLinks)
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkRestore})
+		if m.focusLinkIdx == li {
+			m.focusCaretLine = ln
+		}
+		label := fmt.Sprintf("⌀ %d dismissed", len(q.DismissedTracks))
+		x0 := baseX + gutterW + 2
+		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: restoreSentinel})
+		lines = append(lines, linePrefix(li)+"  "+ui.StyleMuted.Render(label)+hintFor(li, linkRestore))
+		ln++
+	}
+
+	// Lookouts (usage dashboards) — added by pasting a dashboard URL.
+	sectionHeader(ui.GlyphConnLookout, "Lookouts", secLookouts, len(q.Lookouts))
+	for _, l := range q.Lookouts {
+		li := len(m.focusLinks)
+		glyph := lookoutGlyph()
+		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkLookout, code: l.URL, url: l.URL})
+		if m.focusLinkIdx == li {
+			m.focusCaretLine = ln
+		}
+		x := baseX + gutterW + lipgloss.Width(glyph) + 1
+		if m.lookoutEditor != nil && m.lookoutEditURL == l.URL {
+			// Inline rename in progress — render the editor in place of the label.
+			lines = append(lines, linePrefix(li)+glyph+" "+m.renderEditableStyled(m.lookoutEditor, ui.StyleName))
+			ln++
+			continue
+		}
+		body := ui.StyleName.Render(lookoutLabel(l)) + ageDaysLabel(daysSince(l.AddedAt), false)
+		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: l.URL})
+		lines = append(lines, linePrefix(li)+glyph+" "+body+hintFor(li, linkLookout))
+		ln++
+	}
+	if len(q.Lookouts) == 0 {
+		pasteHint("dashboard")
+	}
 	return lines
-}
-
-// toggleConnSentinel marks the "Connections" header line so a click there
-// collapses/expands the connections (see handleFocusMouse).
-const toggleConnSentinel = "\x00toggle-conn"
-
-// connectionCount is the total number of connections on a quest (NPCs +
-// Scrolls + Trails + Runes).
-func connectionCount(q *model.Quest) int {
-	return len(q.AgentWorkspaces) + len(q.JiraCodes) + len(q.PRs) + len(q.Runes)
 }
 
 // addAgentSentinel is a fake span URL marking the "+ add Claude agent" line, so
@@ -851,24 +997,58 @@ func connectionCount(q *model.Quest) int {
 // handleFocusMouse).
 const addAgentSentinel = "\x00add-agent"
 
+// forgeSentinel marks the "write the Lookout's plans" line; findSentinel marks
+// the "find tracks in trails" line; restoreSentinel marks the "N dismissed"
+// line — so a click there writes the plans / finds / restores, rather than
+// opening a browser.
+const forgeSentinel = "\x00write-plans"
+const findSentinel = "\x00find-tracks"
+const restoreSentinel = "\x00restore-tracks"
+
 // agentFocusPrefix marks a pinned-agent line's clickable span; the herdr
 // terminal id follows the prefix, so a click focuses that agent (matching
 // Enter — see handleFocusClick).
 const agentFocusPrefix = "\x00agent-focus:"
 
+// copySectionSentinel marks a section-header's clickable span; the section key
+// follows the prefix, so a click copies that whole section as a list.
+const copySectionSentinel = "\x00copy-section:"
+
+// copyTrackSentinel marks a track's clickable span; the event name follows the
+// prefix, so a click copies the event + its marks (tracks have no URL to open).
+const copyTrackSentinel = "\x00copy-track:"
+
 // focusLinkCount is how many navigable link lines the expanded quest view
 // currently has — the "Connections" master toggle, plus (when expanded) each
-// NPC (or the "+ add" affordance), each Scroll, each Trail, each Rune, and the
-// "attach a rune" affordance. Section headers and the paste hints aren't
-// navigable. Used to bound link-cursor movement.
+// NPC (or the "+ add" affordance), each Scroll, each Trail, the find
+// affordance, each Rune, each Track, each Lookout, and the write-plans /
+// restore affordances. Section headers and paste hints aren't navigable. Used
+// to bound link-cursor movement.
+// focusLinkCount MUST equal len(m.focusLinks) after focusCodeLines renders —
+// they're two views of the same stop list, and any drift breaks Down-nav (see
+// TestFocusLinkCountMatchesRender, which locks this invariant). Items, then one
+// copy stop per non-empty section header, then the affordances.
 func (m *Model) focusLinkCount(q *model.Quest) int {
-	n := 1 // the Connections toggle
-	if q.ConnectionsCollapsed {
-		return n
+	trails := len(m.prStack(q.PRs))
+	n := len(q.JiraCodes) + trails + len(q.AgentWorkspaces) + len(q.Runes) + len(q.Tracks) + len(q.Lookouts)
+	// One focusable copy stop per non-empty section header.
+	for _, count := range []int{len(q.AgentWorkspaces), len(q.JiraCodes), trails, len(q.Runes), len(q.Tracks), len(q.Lookouts)} {
+		if count > 0 {
+			n++
+		}
 	}
-	n += len(q.JiraCodes) + len(m.prStack(q.PRs)) + len(q.AgentWorkspaces) + len(q.Runes)
+	// Affordances.
 	if len(q.AgentWorkspaces) == 0 {
 		n++ // the "+ add an NPC" affordance (only when none pinned)
+	}
+	if trails > 0 {
+		n++ // the find affordance (only when there are trails)
+	}
+	if len(q.Tracks) > 0 {
+		n++ // the "write the Lookout's plans" affordance (only with tracks)
+	}
+	if len(q.DismissedTracks) > 0 {
+		n++ // the restore-dismissed affordance
 	}
 	return n
 }

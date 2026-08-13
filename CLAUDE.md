@@ -9,6 +9,13 @@ The store is `~/.config/quests/data.json`. A past intermediate build silently wi
 - Test migrations against data that ALREADY has the new-format fields populated, not just legacy fields being migrated.
 - Daily backups: `~/.config/quests/backups/data-YYYY-MM-DD.json` (one per launch/day). Recovery = merge by quest `id`, preserving newer edits.
 
+## UI consistency — apply changes to ALL similar surfaces (critical)
+
+A UI change the user asks for must land on **every** surface that shows the same
+kind of thing, not just the screen they pointed at. If duplication makes that
+hard, decouple the shared component and route every surface through it. Full
+rule + the list of parallel surfaces + shared components: **[docs/ui-consistency.md](docs/ui-consistency.md)**.
+
 ## UX — keyboard-first AND mouse
 
 Every TUI interaction must work **both** keyboard-first and via mouse — never keyboard-only or click-only for any control.

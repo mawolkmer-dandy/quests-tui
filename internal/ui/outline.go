@@ -27,10 +27,8 @@ const (
 	// It's deliberately absent from Selectable() so cursor nav and the mouse
 	// skip it, keeping one selectable row per screen line.
 	RowQuestMeta
-	// RowRune is one watched LaunchDarkly flag in the Tavern's Runes section;
-	// RowNewRune is the "+ watch a rune" affordance below them.
+	// RowRune is one watched LaunchDarkly flag in the Tavern's Runes section.
 	RowRune
-	RowNewRune
 	// RowDayHeader is a non-selectable date divider in the Vault's timeline
 	// (Label holds the day). RowVaultCampaign is a retired campaign shown as a
 	// single muted inline row at the top of the Vault. RowRuneQuest is a
@@ -43,6 +41,18 @@ const (
 	// the quest. BodyLineID identifies which body line it maps to; Ctrl+D marks
 	// that line done, which drops the row from the list.
 	RowWildsObjective
+	// RowLookout is one usage dashboard in the Tavern's Lookouts section;
+	// RowLookoutQuest is the collapsible quest header grouping that quest's
+	// lookouts (and, in the focused page, its tracks). RowTrack is one found
+	// tracking event listed under that header.
+	RowLookout
+	RowLookoutQuest
+	RowTrack
+	// RowVaultHeader is a collapsible "Vaulted (N)" sub-header shown at the
+	// bottom of a focused section page (Runes / Lookouts / Campaigns), grouping
+	// the same content for parked/archived quests. Section names the parent
+	// section; its expanded state lives under a synthetic collapsedProjects key.
+	RowVaultHeader
 )
 
 // Row is one visible line of the outline. Quest rows under a project don't
@@ -62,6 +72,8 @@ type Row struct {
 	Nested         bool
 	RuneKey        string // for RowRune: the LaunchDarkly flag key
 	BodyLineID     string // for RowWildsObjective: the quest body line it maps to
+	LookoutURL     string // for RowLookout: the dashboard URL
+	TrackEvent     string // for RowTrack: the tracking-event name
 }
 
 // Selectable reports whether a row can ever be the cursor target — spacers
@@ -69,7 +81,7 @@ type Row struct {
 // all button (see RowLabel in RenderRow), so it's selectable too.
 func (r Row) Selectable() bool {
 	switch r.Kind {
-	case RowProject, RowQuest, RowSection, RowNewProject, RowNewQuest, RowLabel, RowRune, RowNewRune, RowVaultCampaign, RowRuneQuest, RowWildsObjective:
+	case RowProject, RowQuest, RowSection, RowNewProject, RowNewQuest, RowLabel, RowRune, RowVaultCampaign, RowRuneQuest, RowWildsObjective, RowLookout, RowLookoutQuest, RowTrack, RowVaultHeader:
 		return true
 	}
 	return false
@@ -272,6 +284,7 @@ func BuildRows(s *store.Store, collapsedProjects, collapsedSections map[string]b
 	rows = append(rows, inboxRows(s, collapsedSections)...)
 	rows = append(rows, campaignRows(s, collapsedProjects)...)
 	rows = append(rows, runesRows(s, collapsedProjects, collapsedSections)...)
+	rows = append(rows, lookoutsRows(s, collapsedProjects, collapsedSections)...)
 	rows = append(rows, vaultRows(s, collapsedProjects, collapsedSections)...)
 	return addSpacers(rows)
 }
@@ -287,11 +300,13 @@ func SectionContent(s *store.Store, section string, collapsedProjects map[string
 	case "inbox":
 		full = inboxRows(s, nil)
 	case "runes":
-		full = runesRows(s, collapsedProjects, nil)
+		full = runesRowsOpt(s, collapsedProjects, nil, true)
+	case "lookouts":
+		full = lookoutsRowsOpt(s, collapsedProjects, nil, true)
 	case "someday":
 		full = vaultRows(s, collapsedProjects, nil)
 	case "campaigns":
-		full = BuildCampaignColumn(s, collapsedProjects)
+		full = appendVaultedGroups(s, BuildCampaignColumn(s, collapsedProjects), collapsedProjects, "campaigns")
 	}
 	if len(full) > 0 {
 		return full[1:] // drop the RowSection / RowLabel header
@@ -314,6 +329,7 @@ func BuildRailColumn(s *store.Store, collapsedProjects, collapsedSections map[st
 	var rows []Row
 	rows = append(rows, inboxRows(s, collapsedSections)...)
 	rows = append(rows, runesRows(s, collapsedProjects, collapsedSections)...)
+	rows = append(rows, lookoutsRows(s, collapsedProjects, collapsedSections)...)
 	rows = append(rows, vaultRows(s, collapsedProjects, collapsedSections)...)
 	return rows
 }
@@ -365,15 +381,29 @@ func campaignRows(s *store.Store, collapsedProjects map[string]bool) []Row {
 // quest group's collapse state is keyed by quest ID in collapsedProjects
 // (quest IDs never collide with project IDs).
 func runesRows(s *store.Store, collapsedProjects, collapsedSections map[string]bool) []Row {
+	return runesRowsOpt(s, collapsedProjects, collapsedSections, false)
+}
+
+func runesRowsOpt(s *store.Store, collapsedProjects, collapsedSections map[string]bool, includeVaulted bool) []Row {
 	collapsed := collapsedSections["runes"]
 	rows := []Row{{Kind: RowSection, Section: "runes", Collapsed: collapsed}}
 	if collapsed {
 		return rows
 	}
+	rows = appendRuneGroups(s, rows, collapsedProjects, false)
+	if includeVaulted {
+		rows = appendVaultedGroups(s, rows, collapsedProjects, "runes")
+	}
+	return rows
+}
+
+// appendRuneGroups appends one collapsible group per quest (matching vaulted)
+// that has runes: the quest header, then its rune rows.
+func appendRuneGroups(s *store.Store, rows []Row, collapsedProjects map[string]bool, vaulted bool) []Row {
 	first := true
 	for i := range s.Quests {
 		q := &s.Quests[i]
-		if len(q.Runes) == 0 || questVaulted(s, q) {
+		if len(q.Runes) == 0 || questVaulted(s, q) != vaulted {
 			continue
 		}
 		if !first {
@@ -413,6 +443,140 @@ func CountRunes(s *store.Store) int {
 	for i := range s.Quests {
 		if q := &s.Quests[i]; !questVaulted(s, q) {
 			n += len(q.Runes)
+		}
+	}
+	return n
+}
+
+// lookoutsRows draws the Lookouts section from every un-vaulted quest with
+// analytics — its Tracks (found events) and Lookouts (dashboards) — grouped
+// under a collapsible quest header. When includeVaulted is set (the focused
+// page), a collapsed "Vaulted" group of the same, for parked quests, follows.
+func lookoutsRows(s *store.Store, collapsedProjects, collapsedSections map[string]bool) []Row {
+	return lookoutsRowsOpt(s, collapsedProjects, collapsedSections, false)
+}
+
+func lookoutsRowsOpt(s *store.Store, collapsedProjects, collapsedSections map[string]bool, includeVaulted bool) []Row {
+	collapsed := collapsedSections["lookouts"]
+	rows := []Row{{Kind: RowSection, Section: "lookouts", Collapsed: collapsed}}
+	if collapsed {
+		return rows
+	}
+	// The compact Tavern rail lists only actual dashboards (Lookouts); Tracks
+	// surface only when the Lookouts page is expanded (includeVaulted == focused).
+	includeTracks := includeVaulted
+	rows = appendAnalyticsGroups(s, rows, collapsedProjects, false, includeTracks)
+	if includeVaulted {
+		rows = appendVaultedGroups(s, rows, collapsedProjects, "lookouts")
+	}
+	return rows
+}
+
+// appendAnalyticsGroups appends one collapsible group per quest (matching
+// vaulted) that has Lookouts (and, when includeTracks, Tracks too): the quest
+// header, then its Tracks, then its Lookouts. When includeTracks is false, a
+// quest needs at least one Lookout to appear at all — track-only quests are
+// hidden so the rail stays minimal.
+func appendAnalyticsGroups(s *store.Store, rows []Row, collapsedProjects map[string]bool, vaulted, includeTracks bool) []Row {
+	first := true
+	for i := range s.Quests {
+		q := &s.Quests[i]
+		relevant := len(q.Lookouts) > 0 || (includeTracks && len(q.Tracks) > 0)
+		if questVaulted(s, q) != vaulted || !relevant {
+			continue
+		}
+		if !first {
+			rows = append(rows, Row{Kind: RowSpacer})
+		}
+		first = false
+		qCollapsed := collapsedProjects[q.ID]
+		rows = append(rows, Row{Kind: RowLookoutQuest, Label: q.Title, QuestID: q.ID, Collapsed: qCollapsed})
+		if qCollapsed {
+			continue
+		}
+		if includeTracks {
+			for _, t := range q.Tracks {
+				rows = append(rows, Row{Kind: RowTrack, TrackEvent: t.Event, QuestID: q.ID})
+			}
+		}
+		for _, l := range q.Lookouts {
+			rows = append(rows, Row{Kind: RowLookout, LookoutURL: l.URL, QuestID: q.ID})
+		}
+	}
+	return rows
+}
+
+// VaultOpenKey is the synthetic collapsedProjects key that records whether a
+// focused section page's "Vaulted" group is expanded — present = expanded;
+// absent = collapsed (the default, so past items stay tucked away).
+func VaultOpenKey(section string) string { return "\x00vaultopen:" + section }
+
+// appendVaultedGroups appends a collapsible "Vaulted (N)" sub-header and, when
+// expanded, that section's content for parked/archived quests — so a focused
+// page can surface past items on demand.
+func appendVaultedGroups(s *store.Store, rows []Row, collapsedProjects map[string]bool, section string) []Row {
+	n := countVaulted(s, section)
+	if n == 0 {
+		return rows
+	}
+	expanded := collapsedProjects[VaultOpenKey(section)]
+	rows = append(rows,
+		Row{Kind: RowSpacer},
+		Row{Kind: RowVaultHeader, Section: section, Label: fmt.Sprintf("Vaulted (%d)", n), Collapsed: !expanded},
+	)
+	if !expanded {
+		return rows
+	}
+	switch section {
+	case "lookouts":
+		// Vaulted lookouts only render on the focused page, where tracks show.
+		rows = appendAnalyticsGroups(s, rows, collapsedProjects, true, true)
+	case "runes":
+		rows = appendRuneGroups(s, rows, collapsedProjects, true)
+	case "campaigns":
+		for i := range s.Projects {
+			if p := &s.Projects[i]; p.Archived {
+				rows = appendProject(s, rows, *p, collapsedProjects, true, false)
+			}
+		}
+	}
+	return rows
+}
+
+// countVaulted is how many items a section's Vaulted group would hold.
+func countVaulted(s *store.Store, section string) int {
+	n := 0
+	switch section {
+	case "lookouts":
+		for i := range s.Quests {
+			if q := &s.Quests[i]; questVaulted(s, q) && (len(q.Tracks) > 0 || len(q.Lookouts) > 0) {
+				n++
+			}
+		}
+	case "runes":
+		for i := range s.Quests {
+			if q := &s.Quests[i]; questVaulted(s, q) {
+				n += len(q.Runes)
+			}
+		}
+	case "campaigns":
+		for i := range s.Projects {
+			if s.Projects[i].Archived {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// CountLookouts is the number of usage dashboards across un-vaulted quests —
+// shown in the Tavern's Lookouts section header.
+func CountLookouts(s *store.Store) int {
+	n := 0
+	for i := range s.Quests {
+		q := &s.Quests[i]
+		if !questVaulted(s, q) {
+			n += len(q.Lookouts)
 		}
 	}
 	return n
@@ -568,6 +732,8 @@ func sectionInfo(s *store.Store, section string) (string, int) {
 		return "Vault", CountSomeday(s) + CountArchived(s)
 	case "runes":
 		return "Runes", CountRunes(s)
+	case "lookouts":
+		return "Lookouts", CountLookouts(s)
 	}
 	return section, 0
 }
@@ -587,10 +753,15 @@ func padRight(s string, width int) string {
 // after the row's content (before a campaign's right-aligned progress);
 // hintX reports the display column it starts at (-1 when absent) so its
 // parts can be made clickable.
-func RenderRow(row Row, s *store.Store, titleView string, isCursor bool, width int, hint string) (line string, hintX int) {
+func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, width int, hint string) (line string, hintX int) {
 	cursorMark := "  "
-	if isCursor {
+	switch {
+	case isCursor:
 		cursorMark = StyleCursor.Render(GlyphCursor)
+	case isNew:
+		// A quest just added via quick-add: a blue dot marks where it landed
+		// (until it's selected/opened). Same 2-col slot as the cursor mark.
+		cursorMark = StyleNew.Render(GlyphNew)
 	}
 	nestIndent := ""
 	if row.Nested {
@@ -699,12 +870,29 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor bool, width i
 		// quest header.
 		return withHint(fmt.Sprintf("%s  %s", cursorMark, titleView)), hintX
 
-	case RowNewRune:
-		return fmt.Sprintf("%s  %s", cursorMark, StyleMuted.Render("⚹ watch a rune")), -1
-
 	case RowRuneQuest:
 		// A collapsible quest header in the Runes section — white name (bold when
 		// selected), like a campaign but for the flag groups.
+		name := row.Label
+		if isCursor {
+			name = StyleTitle.Render(name)
+		} else {
+			name = StyleName.Render(name)
+		}
+		return withHint(fmt.Sprintf("%s%s %s", cursorMark, caret(row.Collapsed), name)), hintX
+
+	case RowLookout, RowTrack:
+		// titleView is the app-rendered "glyph label" content — indented under its
+		// quest header.
+		return withHint(fmt.Sprintf("%s  %s", cursorMark, titleView)), hintX
+
+	case RowVaultHeader:
+		// A muted collapsible "Vaulted (N)" sub-header at the bottom of a focused
+		// section page.
+		return withHint(cursorMark + StyleMuted.Render(caret(row.Collapsed)+" "+row.Label)), hintX
+
+	case RowLookoutQuest:
+		// A collapsible quest header in the Lookouts section, mirroring RowRuneQuest.
 		name := row.Label
 		if isCursor {
 			name = StyleTitle.Render(name)

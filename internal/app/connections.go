@@ -39,6 +39,15 @@ func (m *Model) questConnections(q *model.Quest) []connection {
 	for _, key := range q.Runes {
 		cs = append(cs, connection{kind: linkRune, code: key, url: ldFlagURL(m.ldProject, m.ldEnv, key)})
 	}
+	// Tracks (found events) show as titlebar emblems too, colored by production
+	// state (repo carries the source-PR code for that lookup — see
+	// trackConnStyle). Then Lookouts (usage dashboards), the monitoring surface.
+	for _, t := range q.Tracks {
+		cs = append(cs, connection{kind: linkTrack, code: t.Event, repo: t.SourcePR})
+	}
+	for _, l := range q.Lookouts {
+		cs = append(cs, connection{kind: linkLookout, code: l.URL, url: l.URL})
+	}
 	return cs
 }
 
@@ -47,7 +56,7 @@ func (m *Model) questConnections(q *model.Quest) []connection {
 // every surface behaves identically.
 func (m *Model) openConnection(c connection) tea.Cmd {
 	if c.kind == linkAgent {
-		return openAgent(c.code)
+		return m.openAgent(c.code)
 	}
 	return openURL(c.url)
 }
@@ -63,6 +72,10 @@ func connEmblem(kind linkKind) string {
 		return ui.GlyphConnTrail
 	case linkRune:
 		return ui.GlyphConnRune
+	case linkTrack:
+		return ui.GlyphConnTrack
+	case linkLookout:
+		return ui.GlyphConnLookout
 	}
 	return ""
 }
@@ -80,6 +93,10 @@ func (m *Model) connStatusStyle(c connection) lipgloss.Style {
 		return m.prConnStyle(c.code)
 	case linkRune:
 		return m.runeConnStyle(c.code)
+	case linkTrack:
+		return connStyle(m.trackProdColor(c.repo)) // c.repo carries the source PR
+	case linkLookout:
+		return connStyle(ui.ColorLookout)
 	}
 	return ui.StyleMuted
 }

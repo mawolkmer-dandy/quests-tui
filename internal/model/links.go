@@ -21,6 +21,9 @@ var (
 	// (e.g. "scanneros_impressions_smokescreen_lsr_enabled"); the trailing
 	// "/targeting?env=..." is consumed so the entire URL is stripped.
 	ldURLRE = regexp.MustCompile(`https?://app\.launchdarkly\.com/projects/[^/\s]+/flags/([A-Za-z0-9_.-]+)\S*`)
+	// dashboardURLRE matches an analytics dashboard URL on one of Dandy's tools
+	// (Amplitude / Fullstory / Hex), captured whole as a quest Lookout.
+	dashboardURLRE = regexp.MustCompile(`https?://[^\s]*(?:amplitude\.com|fullstory\.com|hex\.tech)[^\s]*`)
 )
 
 // LinkRef is one detected link and its short code — the code being what the
@@ -86,14 +89,24 @@ func DetectLDFlags(text string) []string {
 	return keys
 }
 
-// StripLinks removes every Jira browse, GitHub PR, and LaunchDarkly flag URL
-// from text and tidies the doubled / edge whitespace their removal leaves
-// behind, returning the cleaned text. Used by the paste-time capture path to
-// pull a pasted URL out of the line once it's been captured onto the quest.
+// DetectDashboards returns every analytics dashboard URL (Amplitude / Fullstory
+// / Hex) in text, in reading order — captured as quest Lookouts.
+func DetectDashboards(text string) []string {
+	return dashboardURLRE.FindAllString(text, -1)
+}
+
+// StripLinks removes every Jira browse, GitHub PR, LaunchDarkly flag, and
+// analytics dashboard URL from text and tidies the doubled / edge whitespace
+// their removal leaves behind, returning the cleaned text. Used by the
+// paste-time capture path to pull a pasted URL out of the line once it's been
+// captured onto the quest.
 func StripLinks(text string) string {
 	text = jiraURLRE.ReplaceAllString(text, "")
 	text = prURLRE.ReplaceAllString(text, "")
-	text = ldURLRE.ReplaceAllString(text, "")
+	// LaunchDarkly URLs are intentionally NOT stripped — runes are found from PR
+	// bodies now, not captured from a pasted link, so a pasted LD URL is left as
+	// visible text rather than silently removed.
+	text = dashboardURLRE.ReplaceAllString(text, "")
 	text = collapseSpacesRE.ReplaceAllString(text, " ")
 	return strings.TrimSpace(text)
 }

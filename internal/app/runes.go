@@ -3,17 +3,12 @@ package app
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
-
-// addRuneSentinel is a fake span URL marking the "+ attach a rune" line, so a
-// mouse click there opens the rune picker (see handleFocusMouse).
-const addRuneSentinel = "\x00add-rune"
 
 // ldFlagURL is the LaunchDarkly dashboard targeting page for a flag.
 func ldFlagURL(project, env, key string) string {
@@ -26,46 +21,11 @@ func ldFlagURL(project, env, key string) string {
 	return fmt.Sprintf("https://app.launchdarkly.com/projects/%s/flags/%s/targeting?env=%s&selected-env=%s", project, key, env, env)
 }
 
-// runeSearchMsg carries a rune-picker search's results back into Update.
-type runeSearchMsg struct {
-	query string
-	items []pickerItem
-}
-
-// runesMsg carries freshly-fetched rune statuses (immediate refresh after a
-// rune is attached/watched).
+// runesMsg carries freshly-fetched rune statuses (immediate refresh after
+// runes are found from a PR body).
 type runesMsg struct{ runes []RuneStatus }
 
-// runeSearchCmd searches LaunchDarkly flags matching query, off the UI thread.
-func runeSearchCmd(project, query string) tea.Cmd {
-	return func() tea.Msg {
-		if query == "" {
-			return runeSearchMsg{query: query}
-		}
-		out, err := runCmd("ldcli", "flags", "list", "--project", project, "--filter", "query:"+query, "--summary", "1")
-		if err != nil {
-			return runeSearchMsg{query: query}
-		}
-		var resp ldFlagsResponse
-		if json.Unmarshal(out, &resp) != nil {
-			return runeSearchMsg{query: query}
-		}
-		var items []pickerItem
-		for i, f := range resp.Items {
-			if i >= 25 {
-				break
-			}
-			label := f.Key
-			if f.Name != "" && f.Name != f.Key {
-				label = f.Key + "  —  " + f.Name
-			}
-			items = append(items, pickerItem{ID: f.Key, Label: label})
-		}
-		return runeSearchMsg{query: query, items: items}
-	}
-}
-
-// refreshRunesCmd fetches the given flags' status immediately (after attach).
+// refreshRunesCmd fetches the given flags' status immediately (after find).
 func refreshRunesCmd(project, env string, keys []string) tea.Cmd {
 	return func() tea.Msg {
 		var res runesMsg
@@ -78,44 +38,12 @@ func refreshRunesCmd(project, env string, keys []string) tea.Cmd {
 	}
 }
 
-// openRunePicker opens the flag-search picker. questID attaches the chosen
-// rune to that quest; "" watches it globally in the Tavern's Runes list.
-func (m *Model) openRunePicker(questID string) {
-	if m.modal != nil && m.modal.Kind == ModalQuestDetail {
-		m.commitBodyLine()
-	}
-	m.clearFocusLink()
-	m.pushModal(&Modal{Kind: ModalRunePicker, TargetQuestID: questID})
-}
-
-// attachRune links flag key to a quest (questID != "") or the Tavern's global
-// watched list (questID == ""), deduped, and persists.
-func (m *Model) attachRune(questID, key string) {
-	if key == "" {
-		return
-	}
-	if questID == "" {
-		if indexOfStr(m.store.Runes, key) < 0 {
-			m.store.Runes = append(m.store.Runes, key)
-		}
-		m.save()
-		return
-	}
-	if q := m.findQuest(questID); q != nil {
-		if indexOfStr(q.Runes, key) < 0 {
-			q.Runes = append(q.Runes, key)
-			q.UpdatedAt = time.Now()
-		}
-		m.save()
-	}
-}
-
 // LaunchDarkly "runes" — feature flags you're watching. A rune's live rollout
 // state is read via `ldcli` (see the launchdarkly reference): `on` + no rules
 // serves the fallthrough variation ("on"); `on` + rules is a targeted/partial
-// rollout ("partial"); `on: false` serves the off variation ("off"). Runes
-// attach to a quest (Quest.Runes) and/or sit in the Tavern's watched list
-// (Store.Runes); both are polled on the sync loop.
+// rollout ("partial"); `on: false` serves the off variation ("off"). Runes are
+// found from LaunchDarkly links in a PR's body during a track-find (see
+// find.go), stored on Quest.Runes, and polled on the sync loop.
 
 // RuneStatus is a flag's resolved state in production and test. The primary
 // State/Served are production (drive the glyph); StateTest/ServedTest are the
@@ -216,8 +144,20 @@ func envState(f ldFlag, env string) (state, served string, ok bool) {
 // runeRowContent is the "glyph key  state" text shown for one watched rune in
 // the Tavern's Runes section (spliced in as the row's titleView, since the
 // live rollout state lives here in the app, not in the ui package).
-func (m *Model) runeRowContent(key string) string {
-	return m.runeGlyph(key) + " " + key + "  " + ui.StyleMuted.Render(m.runeWord(key))
+func (m *Model) runeRowContent(questID, key string) string {
+	base := m.runeGlyph(key) + " " + key + "  " + ui.StyleMuted.Render(m.runeWord(key))
+	return base + ageDaysLabel(m.runeAgeDays(questID, key), true) // flags: colored past 30/90 days
+}
+
+// runeAgeDays is how many days the flag has been in production, from the merge
+// date of the PR whose body introduced it (see Quest.RuneSources) — or -1 when
+// unknown / not merged.
+func (m *Model) runeAgeDays(questID, key string) int {
+	q := m.findQuest(questID)
+	if q == nil {
+		return -1
+	}
+	return m.mergeAgeDays(q.RuneSources[key])
 }
 
 // unwatchRune detaches flag key from every quest (the Tavern Runes section is

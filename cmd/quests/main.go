@@ -174,6 +174,7 @@ func main() {
 		CfgPath:             config.Path(dir),
 		RailWidthRatio:      cfg.Layout.RailWidthRatio,
 		RailBoxRatios:       cfg.Layout.RailBoxRatios,
+		DetailWidthRatio:    cfg.Layout.DetailWidthRatio,
 		CollapsedSections:   cfg.Layout.CollapsedSections,
 		Sound:               cfg.Sound,
 	})

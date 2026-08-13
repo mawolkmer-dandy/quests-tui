@@ -3,11 +3,13 @@ package app
 import (
 	"os/exec"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
+	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
 
 // appendJiraCode adds code to q.JiraCodes unless it's already linked.
@@ -37,6 +39,71 @@ func appendPRLink(q *model.Quest, ref model.PRRef) {
 // currently active (sitting on a Jira/PR line above the body).
 func (m *Model) onFocusLink() bool {
 	return m.focusLinkIdx != noSelection
+}
+
+// bodyCaretActive reports whether the editable body owns the caret in a focus
+// view — i.e. no other pane is focused (not the title editor, not a Sigils
+// link, not a campaign's quest list). The body's active-line cursor mark and
+// the recorded screen caret must render only when this is true; otherwise two
+// panes would each draw a caret.
+func (m *Model) bodyCaretActive() bool {
+	if m.titleEditor != nil || m.onFocusLink() {
+		return false
+	}
+	if mod := m.modal; mod != nil && mod.InQuestList {
+		return false
+	}
+	return true
+}
+
+// focusLinkAtLine returns the index of the focus link on the given content row
+// (a sigil occupies its own row), or noSelection when the row has no link.
+func (m *Model) focusLinkAtLine(line int) int {
+	for i, l := range m.focusLinks {
+		if l.line == line {
+			return i
+		}
+	}
+	return noSelection
+}
+
+// sigilStatusLine is the action hint for the currently-focused sigil, shown on
+// a fixed status line below the Sigils box (never inline — an inline hint made
+// long rows wrap and shifted the layout). Empty when nothing is focused.
+func (m *Model) sigilStatusLine(q *model.Quest) string {
+	if !m.onFocusLink() || m.focusLinkIdx < 0 || m.focusLinkIdx >= len(m.focusLinks) {
+		return ""
+	}
+	if m.focusLinkConfirmID != "" {
+		return ui.StyleImportant.Render("remove this link? y/n")
+	}
+	del := strings.ToLower(Keys.Delete.Help().Key) // "ctrl+x"
+	switch m.focusLinks[m.focusLinkIdx].kind {
+	case linkAddAgent:
+		return keyHint("enter", "add")
+	case linkCopySection:
+		return keyHint("c", "copy all")
+	case linkTrack:
+		return joinHints(keyHint("enter", "write plans"), keyHint("c", "copy"), keyHint(del, "dismiss"))
+	case linkLookout:
+		return joinHints(keyHint("enter", "scry"), keyHint("c", "copy"), keyHint("r", "rename"), keyHint(del, "remove"))
+	case linkForge:
+		if m.plansBusyQuest == q.ID {
+			return ui.StyleMuted.Render("writing…")
+		}
+		return keyHint("enter", "write plans")
+	case linkFind:
+		if m.findingQuestID == q.ID {
+			return ui.StyleMuted.Render("finding…")
+		}
+		return keyHint("enter", "find")
+	case linkRestore:
+		return keyHint("enter", "restore")
+	case linkAgent: // status-only — no link to copy
+		return joinHints(keyHint("enter", "open"), keyHint(del, "remove"))
+	default: // linkJira/linkPR/linkRune
+		return joinHints(keyHint("enter", "open"), keyHint("c", "copy"), keyHint(del, "remove"))
+	}
 }
 
 // clearFocusLink drops the link cursor (and any armed removal), returning the
@@ -74,38 +141,63 @@ func (m *Model) handleFocusLinkKey(msg tea.KeyPressMsg, q *model.Quest) (tea.Cmd
 		m.commitBodyLine()
 		m.closeModal()
 		return nil, true
+	case msg.Code == tea.KeyRight:
+		// → leaves the Sigils pane (left) and returns to the body (right).
+		m.clearFocusLink()
+		m.seedBodyEditor(m.modal.BodyCursor, 0)
+		return nil, true
+	case msg.Code == tea.KeyLeft:
+		return nil, true // Sigils is the leftmost pane
 	case msg.String() == "up":
 		if m.focusLinkIdx > 0 {
 			m.focusLinkIdx--
+		} else {
+			// At the top of Sigils, Up jumps to the title for renaming.
+			m.beginTitleEdit()
 		}
 		return nil, true
 	case msg.String() == "down":
-		// Off the bottom link, return to the top body line.
-		if m.focusLinkIdx < m.focusLinkCount(q)-1 {
+		// Bound by the ACTUAL rendered stops (m.focusLinks), not the recomputed
+		// focusLinkCount — the latter omits the section-header copy stops, so it
+		// stopped Down early and left click-focused lines unreachable going down.
+		if m.focusLinkIdx < len(m.focusLinks)-1 {
 			m.focusLinkIdx++
-			return nil, true
 		}
-		m.clearFocusLink()
-		m.seedBodyEditor(0, 0)
 		return nil, true
+	case (link.kind == linkTrack || link.kind == linkForge) && msg.String() == "i":
+		// Write the Lookout's plans on demand (a cheap Claude call).
+		return m.forgePlans(q), true
+	case link.kind == linkLookout && msg.String() == "r":
+		// Rename the dashboard inline (its name can't be scraped from the URL).
+		m.beginLookoutRename(q.ID, link.code)
+		return nil, true
+	case msg.String() == "c":
+		// Copy: a section header → the whole section as a list; any other item
+		// → just its link.
+		return m.copyFocusLink(q, link), true
 	case msg.Code == tea.KeyEnter:
 		switch link.kind {
-		case linkToggleConn:
-			q.ConnectionsCollapsed = !q.ConnectionsCollapsed
-			m.save()
-			return nil, true
 		case linkAddAgent:
 			return m.openAgentPicker(), true
-		case linkAddRune:
-			m.openRunePicker(q.ID)
-			return nil, true
+		case linkFind:
+			return m.findTracksInTrails(q.ID), true
+		case linkRestore:
+			return m.restoreDismissedTracks(q.ID), true
+		case linkCopySection:
+			return m.copyFocusLink(q, link), true
+		case linkForge, linkTrack:
+			// Both write the quest's Lookout plans (a track's only action beyond
+			// dismiss is to contribute to the plans).
+			return m.forgePlans(q), true
+		case linkLookout:
+			return openURL(link.url), true
 		case linkAgent, linkJira, linkPR, linkRune:
 			// One shared "open" — agents focus their pane, the rest open in the
 			// browser — identical to the Tavern (see openConnection).
 			return m.openConnection(connection{kind: link.kind, code: link.code, url: link.url}), true
 		}
 	case key.Matches(msg, Keys.Delete):
-		if link.kind == linkAddAgent || link.kind == linkAddRune || link.kind == linkToggleConn {
+		if link.kind == linkAddAgent || link.kind == linkForge || link.kind == linkFind || link.kind == linkRestore || link.kind == linkCopySection {
 			return nil, true // nothing to remove on an affordance / header line
 		}
 		m.focusLinkConfirmID = link.code
@@ -154,6 +246,25 @@ func (m *Model) removeFocusLink(q *model.Quest, link focusLink) {
 			}
 		}
 		q.Runes = out
+	case linkTrack:
+		out := q.Tracks[:0]
+		for _, t := range q.Tracks {
+			if t.Event != link.code {
+				out = append(out, t)
+			}
+		}
+		q.Tracks = out
+		if indexOfStr(q.DismissedTracks, link.code) < 0 {
+			q.DismissedTracks = append(q.DismissedTracks, link.code) // don't re-harvest it
+		}
+	case linkLookout:
+		out := q.Lookouts[:0]
+		for _, l := range q.Lookouts {
+			if l.URL != link.code {
+				out = append(out, l)
+			}
+		}
+		q.Lookouts = out
 	}
 	m.touchBodyOwner()
 
@@ -186,24 +297,25 @@ func (m *Model) captureCurrentBodyLink(q *model.Quest) tea.Cmd {
 	}
 
 	value := mod.BodyEditor.Value()
-	stripped, codes, runes := m.captureAndStrip(q, value)
-	if len(codes) == 0 && len(runes) == 0 {
-		return nil
+	stripped, codes, runes, lookouts, prs, changed := m.captureAndStrip(q, value)
+	if !changed {
+		return nil // no link captured or shortened — leave the line (and its spaces) alone
 	}
 
-	// Reseed the line + editor with the URL removed entirely, keeping the caret
-	// at the end of what remains.
+	// Reseed the line + editor with captured URLs removed / long links shortened,
+	// keeping the caret at the end of what remains.
 	(*body)[mod.BodyCursor].Text = stripped
 	ed := m.newBodyEditor(stripped)
 	ed.CursorEnd()
 	mod.BodyEditor = ed
 	m.touchBodyOwner()
-	return m.captureSync(codes, runes)
+	return m.captureSync(q.ID, codes, runes, lookouts, prs)
 }
 
-// captureSync fetches the just-captured PR/Jira codes and refreshes the
-// just-captured runes, animating the "fetching" state meanwhile.
-func (m *Model) captureSync(codes, runes []string) tea.Cmd {
+// captureSync fetches the just-captured PR/Jira codes, refreshes the
+// just-captured runes, and registers just-captured dashboard Lookouts,
+// animating the "fetching" state meanwhile.
+func (m *Model) captureSync(questID string, codes, runes, lookouts []string, prs []model.PRLink) tea.Cmd {
 	var cmds []tea.Cmd
 	if len(codes) > 0 {
 		cmds = append(cmds, m.syncNow(codes))
@@ -211,13 +323,20 @@ func (m *Model) captureSync(codes, runes []string) tea.Cmd {
 	if len(runes) > 0 {
 		cmds = append(cmds, refreshRunesCmd(m.ldProject, m.ldEnv, runes), m.maybeStartSpinner())
 	}
-	if len(codes) > 0 || len(runes) > 0 {
-		// a Jira/PR/rune link was just captured: sound + a sparkle burst on its
-		// Sigils line (deferred to the next render — see pendingConnBurstCode).
-		if len(codes) > 0 {
+	// A pasted PR may be one rung of a Graphite stack — pull in its siblings.
+	for _, pr := range prs {
+		cmds = append(cmds, stackExpandCmd(questID, pr))
+	}
+	if len(codes) > 0 || len(runes) > 0 || len(lookouts) > 0 {
+		// a Jira/PR/rune/dashboard link was just captured: sound + a sparkle burst
+		// on its Sigils line (deferred to the next render — pendingConnBurstCode).
+		switch {
+		case len(codes) > 0:
 			m.pendingConnBurstCode = codes[0]
-		} else {
+		case len(runes) > 0:
 			m.pendingConnBurstCode = runes[0]
+		default:
+			m.pendingConnBurstCode = lookouts[0]
 		}
 		cmds = append(cmds, m.playSound(sndAddConnection), m.pokeOverlayTick())
 	}
@@ -245,16 +364,19 @@ func (m *Model) captureBodyLinesRange(q *model.Quest, start, end int) tea.Cmd {
 		end = len(*body) - 1
 	}
 
-	var allCodes, allRunes []string
+	var allCodes, allRunes, allLookouts []string
+	var allPRs []model.PRLink
+	changed := false
 	for i := start; i <= end; i++ {
 		text := (*body)[i].Text
 		if i == mod.BodyCursor {
 			text = mod.BodyEditor.Value()
 		}
-		stripped, codes, runes := m.captureAndStrip(q, text)
-		if len(codes) == 0 && len(runes) == 0 {
+		stripped, codes, runes, lookouts, prs, lineChanged := m.captureAndStrip(q, text)
+		if !lineChanged {
 			continue
 		}
+		changed = true
 		(*body)[i].Text = stripped
 		if i == mod.BodyCursor {
 			ed := m.newBodyEditor(stripped)
@@ -263,12 +385,14 @@ func (m *Model) captureBodyLinesRange(q *model.Quest, start, end int) tea.Cmd {
 		}
 		allCodes = append(allCodes, codes...)
 		allRunes = append(allRunes, runes...)
+		allLookouts = append(allLookouts, lookouts...)
+		allPRs = append(allPRs, prs...)
 	}
-	if len(allCodes) == 0 && len(allRunes) == 0 {
+	if !changed {
 		return nil
 	}
 	m.touchBodyOwner()
-	return m.captureSync(allCodes, allRunes)
+	return m.captureSync(q.ID, allCodes, allRunes, allLookouts, allPRs)
 }
 
 // captureAndStrip captures every Jira/PR/LaunchDarkly URL in text onto q
@@ -276,45 +400,60 @@ func (m *Model) captureBodyLinesRange(q *model.Quest, start, end int) tea.Cmd {
 // REMOVED entirely — a pasted link is pulled into the quest's connections, not
 // left inline. newCodes/newRunes list what was NEWLY captured this call (so a
 // re-detected, already-linked reference doesn't trigger a redundant fetch).
-func (m *Model) captureAndStrip(q *model.Quest, text string) (stripped string, newCodes, newRunes []string) {
+func (m *Model) captureAndStrip(q *model.Quest, text string) (stripped string, newCodes, newRunes, newLookouts []string, newPRs []model.PRLink, changed bool) {
 	stripped = model.StripLinks(text)
-	if stripped == text {
-		return text, nil, nil // no links found
-	}
 
-	for _, code := range model.DetectJiras(text) {
+	jiras := model.DetectJiras(text)
+	for _, code := range jiras {
 		before := len(q.JiraCodes)
 		appendJiraCode(q, code)
 		if len(q.JiraCodes) > before {
 			newCodes = append(newCodes, code)
 		}
 	}
-	for _, ref := range model.DetectPRs(text) {
+	prs := model.DetectPRs(text)
+	for _, ref := range prs {
 		before := len(q.PRs)
 		appendPRLink(q, ref)
 		if len(q.PRs) > before {
 			newCodes = append(newCodes, ref.Code)
+			newPRs = append(newPRs, model.PRLink{Code: ref.Code, Repo: ref.Repo})
 		}
 	}
-	for _, key := range model.DetectLDFlags(text) {
-		if indexOfStr(q.Runes, key) < 0 {
-			q.Runes = append(q.Runes, key)
-			newRunes = append(newRunes, key)
+	// Runes (LaunchDarkly flags) are no longer captured from a pasted link —
+	// they're found from a PR's body during a track-find (see find.go).
+	dashboards := model.DetectDashboards(text)
+	for _, url := range dashboards {
+		if lookoutIndexOf(q.Lookouts, url) < 0 {
+			q.Lookouts = append(q.Lookouts, model.Lookout{URL: url, Tool: inferTool(url), AddedAt: time.Now()})
+			newLookouts = append(newLookouts, url)
 		}
 	}
-	return stripped, newCodes, newRunes
+	// Any remaining bare URL (not captured to a sigil) is shortened inline and
+	// recorded in q.BodyLinks so it stays a compact, clickable link.
+	stripped, shortened := m.shortenBodyLinks(q, stripped)
+	// changed is true only when a link was captured (StripLinks removed a
+	// Jira/PR/dashboard URL, new or duplicate) or a free URL was shortened —
+	// NOT for StripLinks's cosmetic whitespace trimming, so an ordinary typed
+	// trailing space isn't eaten by a needless reseed.
+	changed = shortened || len(jiras) > 0 || len(prs) > 0 || len(dashboards) > 0
+	return stripped, newCodes, newRunes, newLookouts, newPRs, changed
 }
 
 // trackedCodeURLs maps each of q's tracked codes (Jira issues and PRs) to the
 // URL it opens — used to make the shortened codes left inline in the body
 // clickable (see renderBodyLineWrapped).
 func (m *Model) trackedCodeURLs(q *model.Quest) map[string]string {
-	out := make(map[string]string, len(q.JiraCodes)+len(q.PRs))
+	out := make(map[string]string, len(q.JiraCodes)+len(q.PRs)+len(q.BodyLinks))
 	for _, c := range q.JiraCodes {
 		out[c] = jiraURL(c, m.jiraBaseURL)
 	}
 	for _, pr := range q.PRs {
 		out[pr.Code] = prURL(pr.Repo, pr.Code)
+	}
+	// Shortened inline links (non-captured URLs) are clickable too.
+	for short, url := range q.BodyLinks {
+		out[short] = url
 	}
 	return out
 }

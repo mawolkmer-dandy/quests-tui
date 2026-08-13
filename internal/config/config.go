@@ -85,12 +85,16 @@ type Layout struct {
 	// RailWidthRatio is the left rail's fraction of the Tavern's content
 	// width; the campaigns column takes the remainder (minus the fixed gap).
 	RailWidthRatio float64 `toml:"rail_width_ratio"`
-	// RailBoxRatios are the three rail boxes' (Questboard, Runes, Vault)
-	// relative height weights, in that order.
-	RailBoxRatios [3]float64 `toml:"rail_box_ratios"`
+	// RailBoxRatios are the rail boxes' (Questboard, Runes, Lookouts, Vault)
+	// relative height weights, in that order. A slice (not a fixed array) so
+	// older 3-element configs still decode; the app normalizes the length.
+	RailBoxRatios []float64 `toml:"rail_box_ratios"`
 	// CollapsedSections lists which of "inbox" (Questboard) / "runes" /
-	// "someday" (Vault) are currently collapsed. Absent = expanded.
+	// "lookouts" / "someday" (Vault) are currently collapsed. Absent = expanded.
 	CollapsedSections []string `toml:"collapsed_sections"`
+	// DetailWidthRatio is the quest-detail Sigils box's fraction of the detail
+	// view's width (the body takes the rest) — set by dragging the divider.
+	DetailWidthRatio float64 `toml:"detail_width_ratio"`
 }
 
 // Keys rebind the Ctrl/F-key shortcuts, in bubbletea key syntax ("ctrl+d",
@@ -128,8 +132,9 @@ func Default() Config {
 			LDEnv:               "production",
 		},
 		Layout: Layout{
-			RailWidthRatio: 0.34,
-			RailBoxRatios:  [3]float64{1.0 / 3, 1.0 / 3, 1.0 / 3},
+			RailWidthRatio:   0.34,
+			RailBoxRatios:    []float64{0.25, 0.25, 0.25, 0.25},
+			DetailWidthRatio: 0.42,
 		},
 		Keys: Keys{
 			ToggleActive:    "ctrl+a",
@@ -243,14 +248,16 @@ sync_interval_secs = 60
 jira_base_url = "https://meetdandy.atlassian.net"
 
 [layout]
-# The two-column Tavern's rail/campaigns width split, the three rail boxes'
-# (Questboard/Runes/Vault) height split, and which of them are collapsed —
-# all written here automatically as you drag a border or click a chevron.
+# The two-column Tavern's rail/campaigns width split, the rail boxes'
+# (Questboard/Runes/Lookouts/Vault) height split, and which of them are collapsed
+# — all written here automatically as you drag a border or click a chevron.
 # Note that this rewrites this whole file, so any comments you've added
 # elsewhere won't survive a change.
 rail_width_ratio = 0.34
-rail_box_ratios = [0.333, 0.333, 0.333]
+rail_box_ratios = [0.25, 0.25, 0.25, 0.25]
 collapsed_sections = []
+# The quest detail page's Sigils/body split (drag the box border to resize).
+detail_width_ratio = 0.42
 
 [keys]
 # Rebind shortcuts using bubbletea key syntax ("ctrl+d", "f1"). Arrows,

@@ -101,30 +101,34 @@ func (m *Model) spawnCursorTrail(x, y int) {
 	})
 }
 
+// maybeStartOverlayTick (re)schedules the single overlay ticker whenever there
+// are particles to animate. It bumps the generation and returns a fresh tick
+// every time: any tick already in flight carries an older generation, so it
+// stops on its next fire (see onOverlayTick's guard). That guarantees exactly
+// one live ticker and — critically — makes it IMPOSSIBLE to end up believing a
+// ticker runs when it doesn't. The old flag-based version could strand that
+// belief and freeze particles on screen (a cursor "›" ghost stuck on every
+// row); keying off the generation alone is self-healing.
 func (m *Model) maybeStartOverlayTick() tea.Cmd {
-	if len(m.overlayParticles) == 0 || m.overlayTickOn {
+	if len(m.overlayParticles) == 0 {
 		return nil
 	}
-	m.overlayTickOn = true
 	m.overlayGen++
 	return overlayTick(m.overlayGen)
 }
 
-// pokeOverlayTick starts the ticker even with no particles yet — used when an
+// pokeOverlayTick schedules a tick even with no particles yet — used when an
 // effect will be spawned during the upcoming render (a deferred connection
-// burst), so the ticker is live to animate it once it appears.
+// burst), so the ticker is live to animate it once it appears. Same
+// generation-bump discipline as maybeStartOverlayTick.
 func (m *Model) pokeOverlayTick() tea.Cmd {
-	if m.overlayTickOn {
-		return nil
-	}
-	m.overlayTickOn = true
 	m.overlayGen++
 	return overlayTick(m.overlayGen)
 }
 
 func (m *Model) onOverlayTick(gen int) tea.Cmd {
 	if gen != m.overlayGen {
-		return nil
+		return nil // a newer tick superseded this one
 	}
 	const dt = 1.0 / overlayFPS
 	alive := m.overlayParticles[:0]
@@ -139,8 +143,7 @@ func (m *Model) onOverlayTick(gen int) tea.Cmd {
 	m.overlayParticles = alive
 	m.invalidateRender()
 	if len(m.overlayParticles) == 0 {
-		m.overlayTickOn = false
-		return nil
+		return nil // nothing left to animate; the next spawn restarts the ticker
 	}
 	return overlayTick(gen)
 }

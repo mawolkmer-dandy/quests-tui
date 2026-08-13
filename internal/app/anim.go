@@ -40,14 +40,22 @@ type clipboardToastExpireMsg struct{ gen int }
 // showClipboardToast briefly swaps the footer (or the focused view's
 // header) for a "copied to clipboard" indicator — see copySelection.
 func (m *Model) showClipboardToast() tea.Cmd {
+	return m.showClipboardToastText("")
+}
+
+// showClipboardToastText is showClipboardToast with a custom label (e.g. the
+// incantation confirmation); empty text falls back to "copied to clipboard".
+func (m *Model) showClipboardToastText(text string) tea.Cmd {
 	m.clipboardToastGen++
 	gen := m.clipboardToastGen
 	m.clipboardToastActive = true
+	m.clipboardToastText = text
 	return tea.Tick(clipboardToastDuration, func(time.Time) tea.Msg { return clipboardToastExpireMsg{gen: gen} })
 }
 
 func (m *Model) clearClipboardToastIfCurrent(gen int) {
 	if gen == m.clipboardToastGen {
 		m.clipboardToastActive = false
+		m.clipboardToastText = ""
 	}
 }

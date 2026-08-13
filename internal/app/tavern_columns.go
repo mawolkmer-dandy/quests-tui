@@ -29,11 +29,59 @@ const tavernTopPad = 2
 type resizeTarget int
 
 const (
-	resizeNone    resizeTarget = iota
-	resizeColumns              // vertical divider, rail vs. campaigns
-	resizeRail0                // between rail box 0 (Questboard) and box 1 (Runes)
-	resizeRail1                // between rail box 1 (Runes) and box 2 (Vault)
+	resizeNone      resizeTarget = iota
+	resizeColumns                // vertical divider, rail vs. campaigns
+	resizeRail0                  // between rail box 0 (Questboard) and box 1 (Runes)
+	resizeRail1                  // between rail box 1 (Runes) and box 2 (Wards)
+	resizeRail2                  // between rail box 2 (Wards) and box 3 (Vault)
+	resizeDetailCol              // the quest-detail Sigils/body divider (the box's right border)
 )
+
+// railBoxCount is the number of stacked boxes in the left rail: Questboard,
+// Runes, Wards, Vault — see BuildRailColumn.
+const railBoxCount = 4
+
+// railTargetIndex maps a rail divider target to the index of the box directly
+// above it (resizeRail0 -> 0, …); -1 for non-rail targets.
+func railTargetIndex(t resizeTarget) int {
+	if t >= resizeRail0 && t < resizeRail0+resizeTarget(railBoxCount-1) {
+		return int(t - resizeRail0)
+	}
+	return -1
+}
+
+// normalizeRailRatios coerces a stored ratio list (which older configs held
+// as 3 entries) to exactly railBoxCount positive weights summing to 1. Any
+// length mismatch or degenerate sum resets to an even split — layout is a
+// cosmetic preference, so a reset on a schema change is acceptable and never
+// touches quest data.
+func normalizeRailRatios(in []float64) []float64 {
+	even := func() []float64 {
+		out := make([]float64, railBoxCount)
+		for i := range out {
+			out[i] = 1.0 / float64(railBoxCount)
+		}
+		return out
+	}
+	if len(in) != railBoxCount {
+		return even()
+	}
+	sum := 0.0
+	for _, r := range in {
+		if r < 0 {
+			return even()
+		}
+		sum += r
+	}
+	if sum <= 0 {
+		return even()
+	}
+	out := make([]float64, railBoxCount)
+	for i, r := range in {
+		out[i] = r / sum
+	}
+	return out
+}
 
 type resizeDragState struct {
 	active bool
@@ -60,10 +108,23 @@ func (m *Model) tryStartResizeDrag(x, y int) (tea.Cmd, bool) {
 // terminal last delivered, the ratio snaps directly to what it implies, with
 // no compounding drift.
 func (m *Model) updateResizeDrag(x, y int) {
-	switch m.resizeDrag.target {
-	case resizeColumns:
+	if m.resizeDrag.target == resizeColumns {
 		m.railWidthRatio = ratioFromColumnDrag(x, m.leftMargin, m.tavernWidth())
-	case resizeRail0, resizeRail1:
+		m.invalidateRender()
+		return
+	}
+	if m.resizeDrag.target == resizeDetailCol {
+		cw := clampInt(m.width-8, 20, 150)
+		lm := (m.width - cw) / 2
+		if lm < 0 {
+			lm = 0
+		}
+		r := ratioFromColumnDrag(x, lm, cw)
+		m.detailWidthRatio = clampFloat(r, 0.22, 0.72)
+		m.invalidateRender()
+		return
+	}
+	if railTargetIndex(m.resizeDrag.target) >= 0 {
 		m.railBoxRatios = ratioFromRailDrag(m.resizeDrag.target, y, m.rowsScreenTop, m.lastRailHeights)
 	}
 	m.invalidateRender()
@@ -78,6 +139,139 @@ func (m *Model) endResizeDrag() {
 	}
 	m.resizeDrag = resizeDragState{}
 	m.saveLayoutConfig()
+}
+
+// railBoxSections is the rail's stacked boxes top-to-bottom, matching the
+// railBoxRatios indices — the sections a vertical keyboard-resize acts on.
+var railBoxSections = []string{"inbox", "runes", "lookouts", "someday"}
+
+func railBoxIndex(section string) int {
+	for i, s := range railBoxSections {
+		if s == section {
+			return i
+		}
+	}
+	return -1
+}
+
+// resizeStep is how much a single Ctrl+arrow keypress moves a divider ratio.
+const resizeStep = 0.04
+
+// currentRailBox is the index (0..3) of the rail box the cursor sits in, or -1
+// when it isn't in the rail (single column, campaigns focused). Walks up from
+// the cursor row to its section header.
+func (m *Model) currentRailBox() int {
+	if !m.twoColumn() || !m.railFocus {
+		return -1
+	}
+	rows := m.railColumnRows()
+	idx := findRowIndex(rows, m.cursor)
+	if idx < 0 {
+		return -1
+	}
+	for i := idx; i >= 0; i-- {
+		if rows[i].Kind == ui.RowSection {
+			return railBoxIndex(rows[i].Section)
+		}
+	}
+	return -1
+}
+
+// resizeColumnWidth grows (delta>0) or shrinks the LEFT section horizontally —
+// the quest-detail Sigils pane when a quest is open, else the Tavern's rail
+// column. A no-op in views without a horizontal split. Persisted like a drag.
+func (m *Model) resizeColumnWidth(delta float64) {
+	switch {
+	case m.modal != nil && m.modal.Kind == ModalQuestDetail:
+		m.detailWidthRatio = clampFloat(m.detailWidthRatio+delta, 0.22, 0.72)
+	case m.twoColumn():
+		m.railWidthRatio = clampFloat(m.railWidthRatio+delta, 0.2, 0.6)
+	default:
+		return
+	}
+	m.saveLayoutConfig()
+	m.invalidateRender()
+}
+
+// resizeCurrentRailBox grows (delta>0) or shrinks the focused rail box's height.
+// Tavern rail only (the detail panes are full height). Growing a collapsed box
+// also un-collapses it — otherwise a collapsed-and-squished section (which is
+// exactly how one gets stuck) couldn't be pulled back open from the keyboard.
+func (m *Model) resizeCurrentRailBox(delta float64) {
+	i := m.currentRailBox()
+	if i < 0 || i >= len(m.railBoxRatios) {
+		return
+	}
+	changed := false
+	if delta > 0 {
+		if sec := railBoxSections[i]; m.collapsedSections[sec] {
+			m.collapsedSections[sec] = false
+			changed = true
+		}
+	}
+	if resizeRailBox(m.railBoxRatios, i, delta) {
+		changed = true
+	}
+	if changed {
+		m.saveLayoutConfig()
+		m.invalidateRender()
+	}
+}
+
+// resizeRailBox moves height weight into (delta>0) or out of box i, trading with
+// the LARGEST other box so the weights still sum to 1 and none drops below a
+// floor. Trading with the biggest box — not just an adjacent one — means a box
+// squished next to another squished box can still be recovered (the earlier
+// adjacent-only version reversed when the neighbor was already at the floor).
+// Mutates ratios in place; reports whether anything changed. Pure/unit-testable.
+func resizeRailBox(ratios []float64, i int, delta float64) bool {
+	const floor = 0.08
+	if i < 0 || i >= len(ratios) || delta == 0 {
+		return false
+	}
+	largestOther := func() int {
+		best := -1
+		for k := range ratios {
+			if k == i {
+				continue
+			}
+			if best < 0 || ratios[k] > ratios[best] {
+				best = k
+			}
+		}
+		return best
+	}
+	if delta > 0 { // grow i by taking from the box with the most room
+		donor := largestOther()
+		if donor < 0 {
+			return false
+		}
+		d := delta
+		if ratios[donor]-d < floor {
+			d = ratios[donor] - floor
+		}
+		if d <= 0 {
+			return false
+		}
+		ratios[i] += d
+		ratios[donor] -= d
+		return true
+	}
+	// shrink i (delta<0) — never below the floor — giving the room to the largest.
+	d := -delta
+	if ratios[i]-d < floor {
+		d = ratios[i] - floor
+	}
+	if d <= 0 {
+		return false
+	}
+	recv := largestOther()
+	if recv < 0 {
+		return false
+	}
+	ratios[i] -= d
+	ratios[recv] += d
+	return true
 }
 
 // saveLayoutConfig persists the current rail/campaigns ratio, rail-box
@@ -95,6 +289,7 @@ func (m *Model) saveLayoutConfig() {
 	}
 	cfg.Layout.RailWidthRatio = m.railWidthRatio
 	cfg.Layout.RailBoxRatios = m.railBoxRatios
+	cfg.Layout.DetailWidthRatio = m.detailWidthRatio
 	cfg.Layout.CollapsedSections = m.collapsedSectionsList()
 	_ = config.Save(m.cfgPath, cfg)
 }
@@ -103,7 +298,7 @@ func (m *Model) saveLayoutConfig() {
 // persisting to config.toml.
 func (m *Model) collapsedSectionsList() []string {
 	var out []string
-	for _, sec := range [...]string{"inbox", "runes", "someday"} {
+	for _, sec := range [...]string{"inbox", "runes", "lookouts", "someday"} {
 		if m.collapsedSections[sec] {
 			out = append(out, sec)
 		}
@@ -135,11 +330,13 @@ func (m *Model) hitTestDivider(x, y int) resizeTarget {
 func (m *Model) hitTestRailDivider(y int) resizeTarget {
 	off := y - m.rowsScreenTop
 	heights := m.lastRailHeights
-	switch off {
-	case heights[0] - 1:
-		return resizeRail0
-	case heights[0] + heights[1] - 1:
-		return resizeRail1
+	cum := 0
+	// Each box but the last has a divider on its own bottom-border row.
+	for i := 0; i < len(heights)-1; i++ {
+		cum += heights[i]
+		if off == cum-1 {
+			return resizeRail0 + resizeTarget(i)
+		}
 	}
 	return resizeNone
 }
@@ -163,32 +360,42 @@ func ratioFromColumnDrag(x, leftMargin, contentWidth int) float64 {
 // the boundary there, or the far side of the clamp silently keeps growing
 // disconnected from the cursor once the near side hits its floor (the "drags
 // past the limit and grows the wrong box" bug).
-func ratioFromRailDrag(target resizeTarget, y, rowsScreenTop int, heights [3]int) [3]float64 {
+func ratioFromRailDrag(target resizeTarget, y, rowsScreenTop int, heights []int) []float64 {
 	const minH = 4
-	total := heights[0] + heights[1] + heights[2]
-	if total <= 0 {
-		return [3]float64{1.0 / 3, 1.0 / 3, 1.0 / 3}
+	ti := railTargetIndex(target)
+	total := 0
+	for _, h := range heights {
+		total += h
+	}
+	if ti < 0 || ti+1 >= len(heights) || total <= 0 {
+		return normalizeRailRatios(nil)
 	}
 	off := clampInt(y-rowsScreenTop, 0, total)
 
-	h := heights
-	switch target {
-	case resizeRail0:
-		combined := heights[0] + heights[1]
-		boundary := splitBoundary(off, combined, minH)
-		h[0] = boundary
-		h[1] = combined - boundary
-	case resizeRail1:
-		combined := heights[1] + heights[2]
-		boundary := splitBoundary(off-heights[0], combined, minH)
-		h[1] = boundary
-		h[2] = combined - boundary
+	h := append([]int(nil), heights...)
+	// Rows above the dragged pair keep their share; the divider only moves the
+	// boundary between box ti and box ti+1.
+	above := 0
+	for i := 0; i < ti; i++ {
+		above += heights[i]
 	}
-	sum := float64(h[0] + h[1] + h[2])
+	combined := heights[ti] + heights[ti+1]
+	boundary := splitBoundary(off-above, combined, minH)
+	h[ti] = boundary
+	h[ti+1] = combined - boundary
+
+	sum := 0
+	for _, v := range h {
+		sum += v
+	}
 	if sum <= 0 {
-		return [3]float64{1.0 / 3, 1.0 / 3, 1.0 / 3}
+		return normalizeRailRatios(nil)
 	}
-	return [3]float64{float64(h[0]) / sum, float64(h[1]) / sum, float64(h[2]) / sum}
+	out := make([]float64, len(h))
+	for i, v := range h {
+		out[i] = float64(v) / float64(sum)
+	}
+	return out
 }
 
 // splitBoundary clamps a proposed split point of `combined` rows so BOTH
@@ -298,6 +505,8 @@ func (m *Model) sectionLabelCount(section string) (string, int) {
 		return "Questboard", ui.CountInbox(m.store)
 	case "runes":
 		return "Runes", ui.CountRunes(m.store)
+	case "lookouts":
+		return "Lookouts", ui.CountLookouts(m.store)
 	case "someday":
 		return "Vault", ui.CountSomeday(m.store) + ui.CountArchived(m.store)
 	}
@@ -309,6 +518,8 @@ func sectionColor(section string) color.Color {
 	switch section {
 	case "runes":
 		return ui.ColorRune
+	case "lookouts":
+		return ui.ColorLookout
 	case "someday":
 		return ui.ColorRust
 	case "campaigns":
@@ -325,6 +536,8 @@ func sectionMotif(section string) string {
 		return "\U000f00e5" // nf-md-bulletin_board
 	case "runes":
 		return "\U000f0b2f" // nf-md-crystal_ball
+	case "lookouts":
+		return "\U000f0a00" // nf-md-lighthouse_on
 	case "someday":
 		return "\U000f0726" // nf-md-treasure_chest
 	case "campaigns":
@@ -429,22 +642,21 @@ func (m *Model) wrapItems(rows []ui.Row, start, end, activeIdx, innerW, xBase in
 }
 
 // renderBoxItemLine renders one item row inside a rail box, cursor mark only
-// when it's the active column's cursor.
+// when it's the active column's cursor. Row content + emblems come from the
+// shared helpers (rowTitleView / withConnectionIcons) so a rail quest looks
+// exactly like it does everywhere else.
 func (m *Model) renderBoxItemLine(rows []ui.Row, i, activeIdx, innerW int) string {
 	row := rows[i]
 	isCursor := i == activeIdx
-	titleView := ""
-	if isCursor && m.editor != nil {
-		titleView = m.renderEditableStyled(m.editor, m.cursorTitleStyle(row))
-	} else if row.Kind == ui.RowRune {
-		titleView = m.runeRowContent(row.RuneKey)
-	}
+	titleView := m.rowTitleView(row, isCursor)
+	// Action hints live on the bottom status line (see statusBar), not inline —
+	// only the delete confirm prompt stays on the row (row-specific state).
 	hint := ""
 	if isCursor && m.confirmDeleteID != "" && rowMatchesConfirmDelete(row, m.confirmDeleteID) {
 		hint = "  " + ui.StyleImportant.Render(m.confirmDeleteHint(row))
 	}
-	line, _ := ui.RenderRow(row, m.store, titleView, isCursor, innerW, hint)
-	return line
+	line, _ := ui.RenderRow(row, m.store, titleView, isCursor, m.isNewQuest(row), innerW, hint)
+	return m.withConnectionIcons(line, row)
 }
 
 // boxCacheEntry is one section's cached wrapped content + clickable spans,
@@ -509,22 +721,12 @@ func (m *Model) boxContent(section string, rows []ui.Row, headerIdx, itemStart, 
 	return content, contentRows
 }
 
-// sectionTitleWithHint is a section box's title plus, when the section is the
-// cursor's or the mouse is hovering its title, the open/collapse hint — the
-// fuller hint if it fits the box, otherwise a compact "↵ open", otherwise none.
+// sectionTitleWithHint is a section box's title. Action hints (open/collapse)
+// now render on the bottom status line (see statusBar), not on the box title —
+// so hint text is presented one consistent way across every view.
 func (m *Model) sectionTitleWithHint(section string, header ui.Row, active bool, colW int) string {
-	title := m.boxTitle(section, header, active)
-	if m.hideHoverTips || !(active || m.hoverSection == section) {
-		return title
-	}
-	avail := colW - lipgloss.Width(title) - 6 // corners + spaces + motif budget
-	if full := renderHintParts(actionHintParts(header)); lipgloss.Width(full) <= avail {
-		return title + full
-	}
-	if short := "  " + ui.StyleMuted.Render("↵ open"); lipgloss.Width(short) <= avail {
-		return title + short
-	}
-	return title
+	_ = colW
+	return m.boxTitle(section, header, active)
 }
 
 // updateSectionHover sets hoverSection when the mouse is over a section title
@@ -773,6 +975,7 @@ func (m *Model) viewTwoColumn(contentWidth int, margin, footer string, logoLines
 		}
 	}
 	m.modeToggleRow = tavernTopPad
+	m.tavernHelpRow = m.modeToggleRow // F1 help sits on the header row
 	m.chipLineRow = tavernTopPad + len(logoLines) + 1
 
 	clip := lipgloss.NewStyle().MaxWidth(m.width)
@@ -823,7 +1026,7 @@ func (m *Model) renderRail(rows []ui.Row, activeIdx, colW, height int, reveal fl
 	// disproportionately bigger than the 1-column gap; touching borders plus
 	// an on-hover recolor of the seam is the closer visual match).
 	var heights []int
-	if len(spans) == 3 {
+	if len(spans) == len(m.railBoxRatios) {
 		// A collapsed box always gets a fixed height (title bar only); the
 		// REST of the rail's height is split among the non-collapsed boxes by
 		// their own relative ratios — so collapsing one section visibly hands
@@ -831,7 +1034,7 @@ func (m *Model) renderRail(rows []ui.Row, activeIdx, colW, height int, reveal fl
 		// space below the stack. m.railBoxRatios itself is never touched
 		// here (only read), so un-collapsing later restores that box's exact
 		// prior share rather than leaving it squished to its floor.
-		var collapsed [3]bool
+		collapsed := make([]bool, len(spans))
 		collapsedCount := 0
 		for i, sp := range spans {
 			collapsed[i] = rows[sp[0]].Collapsed
@@ -840,7 +1043,7 @@ func (m *Model) renderRail(rows []ui.Row, activeIdx, colW, height int, reveal fl
 			}
 		}
 		open := distributeOpenHeights(m.railBoxRatios, collapsed, height-2*collapsedCount, minH)
-		heights = make([]int, 3)
+		heights = make([]int, len(spans))
 		for i := range heights {
 			if collapsed[i] {
 				heights[i] = 2
@@ -873,9 +1076,7 @@ func (m *Model) renderRail(rows []ui.Row, activeIdx, colW, height int, reveal fl
 		total--
 	}
 
-	if len(spans) == 3 {
-		m.lastRailHeights = [3]int{heights[0], heights[1], heights[2]}
-	}
+	m.lastRailHeights = append([]int(nil), heights...)
 
 	var lines []string
 	var lineMap []int
@@ -886,11 +1087,8 @@ func (m *Model) renderRail(rows []ui.Row, activeIdx, colW, height int, reveal fl
 		// This box's bottom border IS the divider below it — recolor just
 		// that one line to accent while it's hovered/dragged, the same
 		// "line indicates you can grab it" cue the column gap uses.
-		if len(spans) == 3 && i < 2 {
-			target := resizeRail0
-			if i == 1 {
-				target = resizeRail1
-			}
+		if len(spans) == len(m.railBoxRatios) && i < len(spans)-1 {
+			target := resizeRail0 + resizeTarget(i)
 			if m.resizeDrag.target == target || m.resizeHover == target {
 				box[len(box)-1] = highlightBottomBorder(sec, colW)
 			}
@@ -937,7 +1135,8 @@ func (m *Model) columnGap() string {
 // minH. Falls back to an even split among the open boxes if their ratios are
 // degenerate (e.g. a hand-edited config.toml summing to 0). Collapsed slots
 // are left at the zero value; the caller fills those in separately.
-func distributeOpenHeights(ratios [3]float64, collapsed [3]bool, total, minH int) [3]int {
+func distributeOpenHeights(ratios []float64, collapsed []bool, total, minH int) []int {
+	ratios = append([]float64(nil), ratios...)
 	var sum float64
 	openCount := 0
 	for i, c := range collapsed {
@@ -946,7 +1145,7 @@ func distributeOpenHeights(ratios [3]float64, collapsed [3]bool, total, minH int
 			openCount++
 		}
 	}
-	var out [3]int
+	out := make([]int, len(collapsed))
 	if openCount == 0 {
 		return out
 	}
@@ -1029,7 +1228,7 @@ func (m *Model) restoreColumnCursor() {
 }
 
 func (m *Model) jumpToSection(section string) {
-	toRail := section == "inbox" || section == "runes" || section == "someday"
+	toRail := section == "inbox" || section == "runes" || section == "lookouts" || section == "someday"
 	if m.twoColumn() && toRail != m.railFocus {
 		m.commitEdit()
 		m.rememberColumnCursor()
@@ -1065,8 +1264,8 @@ func (m *Model) caretAtEnd() bool {
 	return m.editor == nil || m.editor.Position() >= len([]rune(m.editor.Value()))
 }
 
-// sectionAtPoint is the Tavern section the pointer is over: "campaigns" for
-// the right column, or the rail section (from railLineSection) for the left.
+// sectionAtPoint is the Tavern section the pointer is over: "campaigns" for the
+// right column, or the rail section (from railLineSection) for the left.
 func (m *Model) sectionAtPoint(msg tea.Mouse) string {
 	if msg.X >= m.leftMargin+m.leftColWidth+twoColGap {
 		return "campaigns"
@@ -1078,10 +1277,9 @@ func (m *Model) sectionAtPoint(msg tea.Mouse) string {
 	return ""
 }
 
-// cursorSection is the section the cursor currently lives in.
-// wheelSection scrolls a section's own scroll view by delta (clamped), leaving
-// the cursor where it is — like a real viewport. The cursor is re-centered only
-// when the user next moves it by keyboard (see assembleBox / cursorMoved).
+// wheelSection scrolls a section's own viewport by delta (clamped), leaving the
+// cursor where it is. The cursor is re-centered only when the user next moves
+// it by keyboard (see assembleBox / cursorMoved), so a wheel scroll sticks.
 func (m *Model) wheelSection(section string, delta int) {
 	if section == "" {
 		return
@@ -1094,6 +1292,7 @@ func (m *Model) wheelSection(section string, delta int) {
 		next = max
 	}
 	m.sectionScroll[section] = next
+	m.invalidateRender()
 }
 
 // handleTwoColumnClick routes a left-press to the column it landed in and the

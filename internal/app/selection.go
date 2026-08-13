@@ -147,11 +147,37 @@ func clampInt(v, lo, hi int) int {
 	return v
 }
 
+func clampFloat(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
 // renderEditableText renders ti's value with the active selection
 // highlighted and a block cursor, replacing ti.View() — bubbles/textinput
 // has no concept of a selection range to draw.
 func (m *Model) renderEditableText(ti *textinput.Model) string {
 	return m.renderEditableStyled(ti, lipgloss.NewStyle())
+}
+
+// renderEditableFixedWidth is renderEditableStyled that ALWAYS reserves the
+// trailing end-of-text caret cell: renderEditableStyled draws the caret as an
+// extra block cell only when it's at the end of the text (width N+1) but on an
+// existing rune mid-text (width N), so content that follows an editable field
+// would shift by one column as the caret moves. This pads the mid-text case to
+// the same N+1 width. Use it wherever an editable field is followed by inline
+// content (a title's chip/progress, a lookout's age) so nothing jumps. ONE
+// definition — the list and detail titles share it (see docs/ui-consistency.md).
+func (m *Model) renderEditableFixedWidth(ti *textinput.Model, base lipgloss.Style) string {
+	tv := m.renderEditableStyled(ti, base)
+	if ti.Position() < len([]rune(ti.Value())) {
+		tv += " "
+	}
+	return tv
 }
 
 // renderEditableStyled is renderEditableText with a base text style applied
@@ -201,9 +227,12 @@ func (m *Model) cursorTitleStyle(row ui.Row) lipgloss.Style {
 
 // renderClipboardToast is the "● copied to clipboard" indicator shown
 // briefly (see showClipboardToast) in place of the footer/header pointer.
-func renderClipboardToast() string {
+func renderClipboardToast(text string) string {
+	if text == "" {
+		text = "copied to clipboard"
+	}
 	bullet := lipgloss.NewStyle().Bold(true).Foreground(ui.ColorHeading).Render("●")
-	return bullet + " " + ui.StyleMuted.Render("copied to clipboard")
+	return bullet + " " + ui.StyleMuted.Render(text)
 }
 
 // --- multiline selection (focus-view bodies only) -----------------------
@@ -475,6 +504,10 @@ func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, wid
 	if kind == model.BodyObjective {
 		lead = ui.ObjectiveCheckbox(l.Done) + " "
 	}
+	// Inline links (tracked codes + shortened URLs) render blue + bold — in both
+	// the static and the editing paths, so a link keeps its style while the caret
+	// is on its line (just like a heading keeps StyleHeading).
+	linkStyle := lipgloss.NewStyle().Foreground(ui.ColorSide).Bold(true)
 
 	addRow := func(rawOffset int) {
 		m.focusRowLine = append(m.focusRowLine, i)
@@ -523,6 +556,7 @@ func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, wid
 			addRow(0)
 			return []string{head(0, true) + lipgloss.NewStyle().Reverse(true).Render(" ")}, 0
 		}
+		linkURL := m.bodyCodeLinkURLs(raw)
 		segs := wrapSegments(raw, effWidth)
 		// The caret's visual row — boundary between two wrapped rows
 		// resolves to the later one, matching currentVisualRow.
@@ -536,6 +570,9 @@ func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, wid
 			var b strings.Builder
 			for j := seg[0]; j < seg[1]; j++ {
 				st := base
+				if j < len(linkURL) && linkURL[j] != "" {
+					st = linkStyle
+				}
 				if hasSel && j >= selLo && j < selHi {
 					st = st.Background(ui.ColorSelected)
 				}
@@ -577,7 +614,6 @@ func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, wid
 	// click in the expanded view opens the URL. linkURL[j] is the URL for rune
 	// j, or "" when it isn't part of a tracked code.
 	linkURL := m.bodyCodeLinkURLs(dr)
-	linkStyle := lipgloss.NewStyle().Foreground(ui.ColorSide)
 	headW := 4 + 2*l.Indent
 
 	segs := wrapSegments(dr, effWidth)
@@ -664,4 +700,22 @@ func (m *Model) bodyCodeLinkURLs(dr []rune) []string {
 
 func isWordish(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+// bodyLinkAt returns the URL of an inline link (shortened link or tracked code)
+// at raw rune offset rawPos on body line bodyIdx, or "" if none — used to route
+// a click there to copy/open instead of moving the caret.
+func (m *Model) bodyLinkAt(bodyIdx, rawPos int) string {
+	body := m.currentBody()
+	if body == nil || bodyIdx < 0 || bodyIdx >= len(*body) {
+		return ""
+	}
+	_, display := model.ClassifyBodyLine((*body)[bodyIdx].Text)
+	dr := []rune(display)
+	strip := len([]rune((*body)[bodyIdx].Text)) - len(dr)
+	p := rawPos - strip
+	if p < 0 || p >= len(dr) {
+		return ""
+	}
+	return m.bodyCodeLinkURLs(dr)[p]
 }

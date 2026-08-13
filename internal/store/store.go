@@ -97,6 +97,18 @@ func Load(path string) (*Store, error) {
 		// any old worktree pins (no reliable worktree→workspace mapping).
 		s.Quests[i].AgentWorktrees = nil
 		s.Quests[i].AgentWorktree = ""
+
+		// Migrate deprecated Wards (combined event+dashboard) into the split
+		// Tracks (events) + Lookouts (dashboards); clear so they drop on save.
+		for _, w := range s.Quests[i].Wards {
+			if w.Event != "" {
+				s.Quests[i].Tracks = append(s.Quests[i].Tracks, model.Track{Event: w.Event, Marks: w.Marks})
+			}
+			if w.Dashboard != "" {
+				s.Quests[i].Lookouts = append(s.Quests[i].Lookouts, model.Lookout{URL: w.Dashboard, Tool: w.Tool})
+			}
+		}
+		s.Quests[i].Wards = nil
 	}
 	return &s, nil
 }

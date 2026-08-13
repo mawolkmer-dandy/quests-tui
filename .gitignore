@@ -1,3 +1,4 @@
 /questlog
 *.tmp
 /quests
+.DS_Store

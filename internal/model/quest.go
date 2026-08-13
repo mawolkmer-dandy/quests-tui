@@ -104,6 +104,33 @@ type Quest struct {
 	// live rollout state (on / partial / off) on the quest (see app/runes.go).
 	Runes []string `json:"runes,omitempty"`
 
+	// Tracks are analytics tracking events harvested from this quest's linked
+	// PRs (see app/harvest.go) — each an event name plus the property keys
+	// ("marks") worth analyzing. Harvest-only; never entered by hand.
+	Tracks []Track `json:"tracks,omitempty"`
+
+	// Lookouts are the per-quest usage dashboards (Amplitude/Fullstory/Hex) you
+	// monitor the quest's Tracks in — captured by pasting a dashboard URL into
+	// the body. A quest can hold several (adoption, funnel, retention…).
+	Lookouts []Lookout `json:"lookouts,omitempty"`
+
+	// DismissedTracks are event names the user removed (Ctrl+X on a Track), so
+	// auto-harvest won't resurrect them.
+	DismissedTracks []string `json:"dismissedTracks,omitempty"`
+
+	// RuneSources maps a rune key → the "#code" of the PR whose body introduced
+	// it (recorded during a find), so a rune can be aged by that PR's merge date.
+	RuneSources map[string]string `json:"runeSources,omitempty"`
+
+	// BodyLinks maps a shortened link display (left inline in the body when a
+	// non-captured URL is pasted, e.g. "docs.google.com/…") → its full URL, so
+	// the body stays compact while the link is still clickable/copyable.
+	BodyLinks map[string]string `json:"bodyLinks,omitempty"`
+
+	// Wards is the deprecated pre-Tracks/Lookouts field, migrated on load (see
+	// store.Load) then cleared so it drops out on the next save.
+	Wards []Ward `json:"wards,omitempty"`
+
 	// ConnectionsCollapsed hides this quest's connections section in its detail
 	// view (body only) — a per-quest preference.
 	ConnectionsCollapsed bool `json:"connectionsCollapsed,omitempty"`
@@ -125,6 +152,40 @@ type Quest struct {
 type PRLink struct {
 	Code string `json:"code"`
 	Repo string `json:"repo"`
+}
+
+// Track is a harvested analytics tracking event: the event name exactly as it
+// appears in the analytics schema (e.g. "Practice - Checkout - Navigation
+// Changed") and the property keys ("marks") worth breaking usage down by.
+type Track struct {
+	Event string   `json:"event"`
+	Marks []string `json:"marks,omitempty"`
+	// SourcePR is the "#code" of the PR whose diff introduced this event — used
+	// to color the track by production state (merged = live). Empty for tracks
+	// found before provenance was recorded.
+	SourcePR string `json:"sourcePR,omitempty"`
+}
+
+// Lookout is one per-quest usage dashboard: the URL to "scry" (open), the tool
+// it lives in (amplitude | fullstory | hex, inferred from the host and used to
+// tailor the incantation), and an optional custom label.
+type Lookout struct {
+	URL   string `json:"url"`
+	Tool  string `json:"tool,omitempty"`
+	Label string `json:"label,omitempty"`
+	// AddedAt is when the dashboard was captured — used to show its age (a
+	// dashboard has no PR, so it ages from creation).
+	AddedAt time.Time `json:"addedAt,omitempty"`
+}
+
+// Ward is the deprecated combined event+dashboard type, kept only so pre-split
+// data migrates on load (store.Load) into a Track (+ a Lookout when it carried
+// a dashboard URL).
+type Ward struct {
+	Event     string   `json:"event"`
+	Marks     []string `json:"marks,omitempty"`
+	Dashboard string   `json:"dashboard,omitempty"`
+	Tool      string   `json:"tool,omitempty"`
 }
 
 // InQuestboard reports whether a quest is currently an untriaged notice on

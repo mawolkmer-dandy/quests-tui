@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -22,7 +23,6 @@ const (
 	ModalSectionDetail
 	ModalProjectPicker
 	ModalAgentPicker
-	ModalRunePicker
 	ModalHelp
 	ModalDetailHelp
 )
@@ -42,7 +42,7 @@ func isFocusModal(k ModalKind) bool {
 // isPickerModal reports whether kind is one of the small filtered-list dialogs
 // that support click-to-select and wheel-to-scroll (see handlePickerClick).
 func isPickerModal(k ModalKind) bool {
-	return k == ModalProjectPicker || k == ModalAgentPicker || k == ModalRunePicker
+	return k == ModalProjectPicker || k == ModalAgentPicker
 }
 
 // handlePickerClick resolves a left-click on a picker list item to its index,
@@ -105,14 +105,6 @@ type Modal struct {
 	PickerIndex   int
 	PickerFilter  string // fuzzy-search query typed into the picker
 	SourceRowIdx  int    // the moved quest's row index in the source list, to relocate the cursor after the move
-
-	// ModalRunePicker: SearchQuery is the query last sent to LaunchDarkly
-	// (PickerItems holds its results). While PickerFilter (what's typed now)
-	// differs from SearchQuery, Enter runs a new search; once they match, Enter
-	// attaches the highlighted flag. RuneSearching is true while a search is in
-	// flight.
-	SearchQuery   string
-	RuneSearching bool
 
 	// ModalSectionDetail: which section ("inbox" | "someday") this page shows.
 	Section string
@@ -436,6 +428,16 @@ func (m *Model) seedBodyEditor(idx, col int) {
 	mod.BodyEditor = ed
 }
 
+// bodyCaretAtStart reports whether the body editor's caret is at the start of
+// its line — the condition for ← to cross into the Sigils pane.
+func (m *Model) bodyCaretAtStart() bool {
+	mod := m.modal
+	if mod == nil {
+		return false
+	}
+	return mod.BodyEditor.Position() == 0
+}
+
 // handleBodyOutlineKey handles the body-outline editing keys shared by
 // ModalQuestDetail and ModalCampaignDetail — the line split/merge/exit
 // behaviors of a normal multiline editor (modeled on Obsidian/Notion list
@@ -544,22 +546,36 @@ func (m *Model) handleBodyOutlineKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	case msg.String() == "ctrl+d":
 		m.commitBodyLine()
 		body = m.currentBody()
-		kind, _ := model.ClassifyBodyLine((*body)[mod.BodyCursor].Text)
-		var cmd tea.Cmd
-		if kind == model.BodyObjective {
-			done := !(*body)[mod.BodyCursor].Done
-			(*body)[mod.BodyCursor].Done = done
-			m.touchBodyOwner()
-			if done { // same check-off feedback as the Wilds: sparkle burst + sound
-				m.spawnSparkleBurst(m.cursorScreenX+bodyObjCol+2*(*body)[mod.BodyCursor].Indent, m.cursorScreenY, 10)
-				cmd = tea.Batch(m.playSound(sndObjectiveDone), m.maybeStartOverlayTick())
-			}
-		}
+		burstX := m.cursorScreenX + bodyObjCol + 2*(*body)[mod.BodyCursor].Indent
+		cmd := m.toggleBodyObjective(mod.BodyCursor, burstX, m.cursorScreenY)
 		mod.BodyEditor = m.newBodyEditor((*body)[mod.BodyCursor].Text)
 		return cmd, true
 	}
 
 	return nil, false
+}
+
+// toggleBodyObjective checks/unchecks the objective at body line idx (a no-op
+// on a non-objective line), firing the same check-off burst + sound as the
+// Wilds when it becomes done, at (burstX, burstY). Shared by Ctrl+D (cursor
+// cell) and a checkbox click (clicked cell) — one definition so both behave
+// identically (see docs/ui-consistency.md).
+func (m *Model) toggleBodyObjective(idx, burstX, burstY int) tea.Cmd {
+	body := m.currentBody()
+	if body == nil || idx < 0 || idx >= len(*body) {
+		return nil
+	}
+	if kind, _ := model.ClassifyBodyLine((*body)[idx].Text); kind != model.BodyObjective {
+		return nil
+	}
+	done := !(*body)[idx].Done
+	(*body)[idx].Done = done
+	m.touchBodyOwner()
+	if !done {
+		return nil
+	}
+	m.spawnSparkleBurst(burstX, burstY, 10)
+	return tea.Batch(m.playSound(sndObjectiveDone), m.maybeStartOverlayTick())
 }
 
 // indentBodyLine nudges the current line's nesting in or out by one level.
@@ -636,6 +652,18 @@ func (m *Model) pasteBodyLines(text string) (start, end int) {
 // KeyMsg) to whichever field the open modal is actually editing.
 func (m *Model) pasteIntoModal(msg tea.PasteMsg) tea.Cmd {
 	mod := m.modal
+	// A paste while renaming a title goes into the title editor, not the body.
+	if m.titleEditor != nil && isFocusModal(mod.Kind) {
+		var cmd tea.Cmd
+		*m.titleEditor, cmd = m.titleEditor.Update(msg)
+		return cmd
+	}
+	// Likewise for an inline Lookout rename.
+	if m.lookoutEditor != nil && mod.Kind == ModalQuestDetail {
+		var cmd tea.Cmd
+		*m.lookoutEditor, cmd = m.lookoutEditor.Update(msg)
+		return cmd
+	}
 	switch mod.Kind {
 	case ModalQuestDetail:
 		start, end := m.pasteBodyLines(msg.Content)
@@ -661,7 +689,7 @@ func (m *Model) pasteIntoModal(msg tea.PasteMsg) tea.Cmd {
 		var cmd tea.Cmd
 		*m.editor, cmd = m.editor.Update(msg)
 		return cmd
-	case ModalProjectPicker, ModalAgentPicker, ModalRunePicker:
+	case ModalProjectPicker, ModalAgentPicker:
 		mod.PickerFilter += msg.Content
 		mod.PickerIndex = 0
 		return nil
@@ -685,8 +713,124 @@ func (m *Model) focusScrollBy(down bool, n int) tea.Cmd {
 	return cmd
 }
 
+// beginTitleEdit opens an inline editor over a detail page's title so it can
+// be renamed in place. Only quests and campaigns have editable titles; section
+// pages are fixed and ignore it.
+func (m *Model) beginTitleEdit() {
+	mod := m.modal
+	if mod == nil {
+		return
+	}
+	var cur string
+	switch mod.Kind {
+	case ModalQuestDetail:
+		q := m.findQuest(mod.QuestID)
+		if q == nil {
+			return
+		}
+		cur = q.Title
+	case ModalCampaignDetail:
+		p := m.findProject(mod.CampaignID)
+		if p == nil {
+			return
+		}
+		cur = p.Name
+	default:
+		return
+	}
+	m.titleEditFromSigils = m.onFocusLink() // so Down returns to the right pane
+	m.commitBodyLine()                      // persist any in-flight body edit before switching focus
+	m.clearFocusLink()                      // leave whichever pane owned the caret
+	ti := textinput.New()
+	ti.Prompt = ""
+	ti.SetValue(cur)
+	ti.CursorEnd()
+	_ = ti.Focus()
+	m.titleEditor = &ti
+	m.clearSelection()
+	m.invalidateRender()
+}
+
+// commitTitleEdit writes the inline title editor back to the quest/campaign
+// (ignoring an all-whitespace value so a title can't be blanked out) and closes
+// the editor.
+func (m *Model) commitTitleEdit() {
+	if m.titleEditor == nil {
+		return
+	}
+	value := strings.TrimSpace(m.titleEditor.Value())
+	if mod := m.modal; mod != nil && value != "" {
+		switch mod.Kind {
+		case ModalQuestDetail:
+			if q := m.findQuest(mod.QuestID); q != nil {
+				q.Title = value
+				q.UpdatedAt = time.Now()
+			}
+		case ModalCampaignDetail:
+			if p := m.findProject(mod.CampaignID); p != nil {
+				p.Name = value
+			}
+		}
+		m.save()
+	}
+	m.titleEditor = nil
+	m.clearSelection()
+	m.invalidateRender()
+}
+
+// cancelTitleEdit closes the inline title editor without saving.
+func (m *Model) cancelTitleEdit() {
+	m.titleEditor = nil
+	m.clearSelection()
+	m.invalidateRender()
+}
+
+// returnFromTitleEdit hands focus back to whichever pane the title editor was
+// entered from — the top of Sigils, or the top of the body.
+func (m *Model) returnFromTitleEdit() {
+	if m.titleEditFromSigils && m.integrationsEnabled {
+		m.focusLinkIdx = 0
+		return
+	}
+	m.clearFocusLink()
+	if mod := m.modal; mod != nil {
+		mod.InQuestList = false
+	}
+	if body := m.currentBody(); body != nil && len(*body) > 0 {
+		m.seedBodyEditor(0, 0)
+	}
+}
+
 func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 	mod := m.modal
+
+	// An inline title rename owns every key while it's open.
+	if m.titleEditor != nil && isFocusModal(mod.Kind) {
+		switch msg.Code {
+		case tea.KeyEsc:
+			m.cancelTitleEdit()
+			return nil
+		case tea.KeyEnter:
+			m.commitTitleEdit()
+			return nil
+		case tea.KeyDown:
+			// Down commits and returns to the top of the pane it came from.
+			m.commitTitleEdit()
+			m.returnFromTitleEdit()
+			return nil
+		}
+		if handled, cmd := m.applySelectionKey(m.titleEditor, msg); handled {
+			return cmd
+		}
+		var cmd tea.Cmd
+		*m.titleEditor, cmd = m.titleEditor.Update(msg)
+		return cmd
+	}
+	// F2 starts an inline rename of the current detail page's title.
+	if isFocusModal(mod.Kind) && key.Matches(msg, Keys.Rename) {
+		m.beginTitleEdit()
+		return nil
+	}
 
 	// PageUp/PageDown scroll a focused quest/campaign by half a screen.
 	if isFocusModal(mod.Kind) && (msg.Code == tea.KeyPgUp || msg.Code == tea.KeyPgDown) {
@@ -788,60 +932,65 @@ func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 
-	case ModalRunePicker:
-		switch msg.String() {
-		case "up":
-			if mod.PickerIndex > 0 {
-				mod.PickerIndex--
-			}
-		case "down":
-			if mod.PickerIndex < len(mod.PickerItems)-1 {
-				mod.PickerIndex++
-			}
-		case "enter":
-			// Enter searches while the typed query differs from the last one
-			// sent to LD; once results are showing for that query, Enter
-			// attaches the highlighted flag.
-			if mod.PickerFilter != mod.SearchQuery {
-				mod.SearchQuery = mod.PickerFilter
-				mod.RuneSearching = true
-				mod.PickerIndex = 0
-				return runeSearchCmd(m.ldProject, mod.PickerFilter)
-			}
-			if len(mod.PickerItems) == 0 {
-				return nil
-			}
-			key := mod.PickerItems[mod.PickerIndex].ID
-			m.attachRune(mod.TargetQuestID, key)
-			m.closeModal()
-			m.pendingConnBurstCode = key
-			return tea.Batch(refreshRunesCmd(m.ldProject, m.ldEnv, []string{key}), m.maybeStartSpinner(), m.playSound(sndAddConnection), m.pokeOverlayTick())
-		case "esc":
-			m.closeModal()
-		case "backspace":
-			if r := []rune(mod.PickerFilter); len(r) > 0 {
-				mod.PickerFilter = string(r[:len(r)-1])
-			}
-		default:
-			if msg.Text != "" {
-				mod.PickerFilter += msg.Text
-			}
-		}
-		return nil
-
 	case ModalQuestDetail:
 		q := m.findQuest(mod.QuestID)
 		if q == nil {
 			m.closeModal()
 			return nil
 		}
-		// The link cursor (Jira/PR lines above the body) owns navigation when
-		// it's active — Enter opens, Ctrl+X arms removal, up/down step through
-		// the links and hand back to the body off the bottom.
+		// An inline Lookout rename owns every key while it's open (shared logic).
+		if cmd, handled := m.handleLookoutRenameKey(msg); handled {
+			return cmd
+		}
+		// Alt+←/→ resize the Sigils/body split (the keyboard twin of dragging the
+		// divider); →/↓ grow the Sigils pane, ←/↑ shrink it. Alt+↑/↓ only resize
+		// while a Sigil is focused (in the body they stay move-line) — and many
+		// macOS terminals only deliver Option+↑/↓ as alt-arrows (Option+←/→ become
+		// word-motion), so accepting ↑/↓ here guarantees a working key in Sigils.
+		switch msg.String() {
+		case "alt+right":
+			m.resizeColumnWidth(resizeStep)
+			return nil
+		case "alt+left":
+			m.resizeColumnWidth(-resizeStep)
+			return nil
+		case "alt+down":
+			if m.onFocusLink() {
+				m.resizeColumnWidth(resizeStep)
+				return nil
+			}
+		case "alt+up":
+			if m.onFocusLink() {
+				m.resizeColumnWidth(-resizeStep)
+				return nil
+			}
+		}
+		m.cursorMoved = true // a keypress re-centers the active pane on its caret
+		// Ctrl+1 / Ctrl+2 jump between the two panes (Sigils / body).
+		if m.integrationsEnabled && m.focusLinkCount(q) > 0 {
+			switch msg.String() {
+			case "ctrl+1":
+				m.commitBodyLine()
+				m.focusLinkIdx = 0
+				return nil
+			case "ctrl+2":
+				if m.onFocusLink() {
+					m.clearFocusLink()
+					m.seedBodyEditor(mod.BodyCursor, 0)
+				}
+				return nil
+			}
+		}
+		// The link cursor owns navigation while a Sigils link is focused — Enter
+		// opens, Ctrl+X arms removal, up/down step through the links, → returns
+		// to the body.
 		if m.onFocusLink() {
 			if cmd, handled := m.handleFocusLinkKey(msg, q); handled {
 				return cmd
 			}
+		}
+		if key.Matches(msg, Keys.Find) {
+			return m.findTracksInTrails(q.ID)
 		}
 		if msg.Code == tea.KeyEsc {
 			m.commitBodyLine()
@@ -851,10 +1000,16 @@ func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 		if handled, cmd := m.applyBodySelectionKey(msg); handled {
 			return cmd
 		}
+		// ← at the start of a body line crosses left into the Sigils pane.
+		if msg.Code == tea.KeyLeft && m.bodyCaretAtStart() && m.integrationsEnabled && m.focusLinkCount(q) > 0 {
+			m.commitBodyLine()
+			m.focusLinkIdx = 0
+			return nil
+		}
 		if msg.String() == "up" {
-			// Off the top of the body, step onto the bottom-most link line.
-			if !m.moveBodyCursor(-1) && m.integrationsEnabled && m.focusLinkCount(q) > 0 {
-				m.focusLinkIdx = m.focusLinkCount(q) - 1
+			// At the top visual row, Up jumps to the title for renaming.
+			if !m.moveBodyCursor(-1) {
+				m.beginTitleEdit()
 			}
 			return nil
 		}
@@ -936,7 +1091,10 @@ func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 			return nil
 		}
 		if msg.String() == "up" {
-			m.moveBodyCursor(-1)
+			// At the top visual row, Up jumps to the title for renaming.
+			if !m.moveBodyCursor(-1) {
+				m.beginTitleEdit()
+			}
 			return nil
 		}
 		if cmd, handled := m.handleBodyOutlineKey(msg); handled {
@@ -999,12 +1157,15 @@ func (m *Model) renderModal() string {
 
 		b.WriteString(ui.StyleSectionHeader.Render("Sections"))
 		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("Ctrl+1–4 jump to one; Ctrl+Shift+1–3 collapse a rail section."))
+		b.WriteString(ui.StyleMuted.Render("Ctrl+1–5 jump to one; Ctrl+Shift+1–4 collapse a rail section."))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("Alt+←/→ resize the rail width; Alt+↑/↓ resize the focused box's height."))
 		b.WriteString("\n")
 		fmt.Fprintf(&b, "%-9s%-13s%s\n", "Ctrl+1", "Questboard", ui.StyleMuted.Render("your inbox — new quests with no campaign yet"))
 		fmt.Fprintf(&b, "%-9s%-13s%s\n", "Ctrl+2", "Runes", ui.StyleMuted.Render("feature flags you're watching, grouped by quest"))
-		fmt.Fprintf(&b, "%-9s%-13s%s\n", "Ctrl+3", "Vault", ui.StyleMuted.Render("your archive — parked quests and retired campaigns"))
-		fmt.Fprintf(&b, "%-9s%-13s%s\n", "Ctrl+4", "Campaigns", ui.StyleMuted.Render("your projects — each lists its own quests"))
+		fmt.Fprintf(&b, "%-9s%-13s%s\n", "Ctrl+3", "Lookouts", ui.StyleMuted.Render("usage dashboards you're monitoring, grouped by quest"))
+		fmt.Fprintf(&b, "%-9s%-13s%s\n", "Ctrl+4", "Vault", ui.StyleMuted.Render("your archive — parked quests and retired campaigns"))
+		fmt.Fprintf(&b, "%-9s%-13s%s\n", "Ctrl+5", "Campaigns", ui.StyleMuted.Render("your projects — each lists its own quests"))
 		b.WriteString("\n")
 
 		b.WriteString(ui.StyleSectionHeader.Render("Data"))
@@ -1035,6 +1196,8 @@ func (m *Model) renderModal() string {
 		fmt.Fprintf(&b, "%-14s%s\n", "GitHub PR", ui.StyleMuted.Render("paste a PR URL into the quest body"))
 		fmt.Fprintf(&b, "%-14s%s\n", "LaunchDarkly", ui.StyleMuted.Render("watch a flag — in the Runes section or a quest's detail"))
 		fmt.Fprintf(&b, "%-14s%s\n", "herdr", ui.StyleMuted.Render("pin a Claude agent from a quest's detail view"))
+		fmt.Fprintf(&b, "%-14s%s\n", "Analytics", ui.StyleMuted.Render("find Tracks in a quest's PRs; paste a dashboard URL"))
+		fmt.Fprintf(&b, "%-14s%s\n", "", ui.StyleMuted.Render("as a Lookout — monitored here in the Lookouts section"))
 		b.WriteString(ui.StyleMuted.Render("Jira/PR live status needs gh and acli logged in locally."))
 		b.WriteString("\n\n")
 
@@ -1097,7 +1260,7 @@ func (m *Model) renderModal() string {
 			// selection highlight so its color survives), then "<workspace> ·
 			// <tab>" — workspace emphasized, tab muted. Look the agent up by its
 			// pinned terminal id for the live status/labels.
-			ag, _ := m.agentByID(item.ID)
+			ag, _ := m.matchAgent(item.ID)
 			icon := m.agentGlyph(ag.Status)
 			ws, tab := ag.Workspace, ag.Tab
 			var body string
@@ -1113,47 +1276,15 @@ func (m *Model) renderModal() string {
 		b.WriteString("\n" + ui.StyleMuted.Render("type to filter · ↑↓ choose · enter pin · esc cancel"))
 		content = b.String()
 
-	case ModalRunePicker:
-		var b strings.Builder
-		b.WriteString(ui.StyleTitle.Render("Attach a rune"))
-		b.WriteString("\n")
-		b.WriteString(ui.StyleMuted.Render("search LaunchDarkly flags by key or name"))
-		b.WriteString("\n")
-		query := mod.PickerFilter
-		if query == "" {
-			query = ui.StyleMuted.Render("type a flag key…")
-		}
-		b.WriteString(ui.StyleMuted.Render("› ") + query + "\n\n")
-		switch {
-		case mod.RuneSearching:
-			b.WriteString(ui.StyleMuted.Render("  searching…") + "\n")
-		case mod.PickerFilter == "" && mod.SearchQuery == "":
-			b.WriteString(ui.StyleMuted.Render("  start typing, then enter to search") + "\n")
-		case mod.PickerFilter != mod.SearchQuery:
-			b.WriteString(ui.StyleMuted.Render("  press enter to search") + "\n")
-		case len(mod.PickerItems) == 0:
-			b.WriteString(ui.StyleMuted.Render("  (no flags match)") + "\n")
-		default:
-			pickerFirstLine, pickerItemCount = strings.Count(b.String(), "\n"), len(mod.PickerItems)
-			for i, item := range mod.PickerItems {
-				label := clipLabel(item.Label, 54)
-				line := "  " + label
-				if i == mod.PickerIndex {
-					line = ui.StyleSelectedRow.Render("> " + label)
-				}
-				b.WriteString(line + "\n")
-			}
-		}
-		b.WriteString("\n" + ui.StyleMuted.Render("type · enter search/attach · ↑↓ choose · esc cancel"))
-		content = b.String()
-
 	case ModalDetailHelp:
 		var b strings.Builder
 		b.WriteString(ui.StyleTitle.Render("Quest & campaign details"))
 		b.WriteString("\n\n")
 
-		b.WriteString(ui.StyleSectionHeader.Render("Formatting the body"))
+		b.WriteString(ui.StyleSectionHeader.Render("Title & body"))
 		b.WriteString("\n")
+		fmt.Fprintf(&b, "%-12s%s\n", "F2", ui.StyleMuted.Render("rename the title (or click it); Enter saves, Esc cancels"))
+		fmt.Fprintf(&b, "%-12s%s\n", "Alt+←/→", ui.StyleMuted.Render("resize the Sigils / body split (Alt+↑/↓ too when in Sigils)"))
 		fmt.Fprintf(&b, "%-12s%s\n", `# `, ui.StyleMuted.Render("start a line with this for a heading"))
 		fmt.Fprintf(&b, "%-12s%s\n", `- `, ui.StyleMuted.Render("start an objective; Ctrl+D checks it off"))
 		b.WriteString("\n")
@@ -1165,9 +1296,20 @@ func (m *Model) renderModal() string {
 		fmt.Fprintf(&b, "%-14s%s\n", "GitHub PR", ui.StyleMuted.Render("CI + review state, unresolved comments, merged;"))
 		fmt.Fprintf(&b, "%-14s%s\n", "", ui.StyleMuted.Render("several linked PRs order into a Graphite stack"))
 		fmt.Fprintf(&b, "%-14s%s\n", "Jira", ui.StyleMuted.Render("issue status — todo / in progress / done"))
-		fmt.Fprintf(&b, "%-14s%s\n", "LaunchDarkly", ui.StyleMuted.Render("\"+ watch a rune\" tracks a flag's on/off state"))
+		fmt.Fprintf(&b, "%-14s%s\n", "LaunchDarkly", ui.StyleMuted.Render("Runes — flag on/off state, found from LD links in PR bodies"))
 		fmt.Fprintf(&b, "%-14s%s\n", "herdr", ui.StyleMuted.Render("\"+ add agent\" pins a Claude agent; Enter jumps to it"))
-		b.WriteString(ui.StyleMuted.Render("On a link line: ↑/↓ focus it, Enter opens, Ctrl+X removes. Needs gh + acli."))
+		fmt.Fprintf(&b, "%-14s%s\n", "Find", ui.StyleMuted.Render("Ctrl+R (or the affordance) finds Tracks + flags/issues in"))
+		fmt.Fprintf(&b, "%-14s%s\n", "", ui.StyleMuted.Render("the quest's Trails; also runs on sync when a PR changes"))
+		fmt.Fprintf(&b, "%-14s%s\n", "Track", ui.StyleMuted.Render("a found event (green = live in prod, amber = pending);"))
+		fmt.Fprintf(&b, "%-14s%s\n", "", ui.StyleMuted.Render("Ctrl+X dismisses it, \"N dismissed\" restores by mistake"))
+		fmt.Fprintf(&b, "%-14s%s\n", "Lookout", ui.StyleMuted.Render("paste a dashboard URL to monitor usage; Enter scries, r renames"))
+		fmt.Fprintf(&b, "%-14s%s\n", "Plans", ui.StyleMuted.Render("\"write the Lookout's plans\" (i) → a dashboard-build"))
+		fmt.Fprintf(&b, "%-14s%s\n", "", ui.StyleMuted.Render("prompt covering all the quest's Tracks, copied to paste"))
+		b.WriteString(ui.StyleMuted.Render("On a link: ↑/↓ focus, c copies (a section header copies the whole"))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("list to share), Enter opens, Ctrl+X removes. Click a link to copy,"))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("double-click to open. Pasted links shorten inline. Needs gh + acli."))
 		b.WriteString("\n\n")
 
 		b.WriteString(ui.StyleSectionHeader.Render("Quest list (in a campaign)"))
@@ -1223,12 +1365,272 @@ func (m *Model) renderModal() string {
 // thing. "← back (esc)" is the only way out; every other interaction
 // (editing, adding/removing quests, toggling done, etc.) works exactly as
 // it does in the main outline.
+// viewQuestDetail renders the two-pane quest detail: a bordered, independently
+// scrollable "Sigils" box on the left and the borderless, independently
+// scrollable body on the right, split by a draggable divider (the box's right
+// border). Reuses drawBox + scrollWindow + scrollWithMargin; the divider drag
+// reuses the resizeDrag machinery (see updateResizeDrag/endResizeDrag).
+func (m *Model) viewQuestDetail() string {
+	mod := m.modal
+	q := m.findQuest(mod.QuestID)
+	if q == nil {
+		return ""
+	}
+
+	contentWidth := clampInt(m.width-8, 20, 150)
+	leftMargin := (m.width - contentWidth) / 2
+	if leftMargin < 0 {
+		leftMargin = 0
+	}
+	margin := strings.Repeat(" ", leftMargin)
+
+	// Header (back / help), clickable.
+	back := ui.StyleMuted.Render("← back (esc)")
+	right := ui.StyleMuted.Render("F1 help")
+	if m.clipboardToastActive {
+		right = renderClipboardToast(m.clipboardToastText)
+	}
+	hpad := contentWidth - lipgloss.Width(back) - lipgloss.Width(right)
+	if hpad < 1 {
+		hpad = 1
+	}
+	headerLine := back + strings.Repeat(" ", hpad) + right
+	m.focusLeftMargin = leftMargin // the back-click hit-test (handleFocusPointer) reads this
+	m.focusBackWidth = lipgloss.Width(back)
+	m.focusHelpX = leftMargin + m.focusBackWidth + hpad
+	m.focusHelpWidth = lipgloss.Width(right)
+	if m.clipboardToastActive {
+		m.focusHelpWidth = 0
+	}
+
+	// Title + type/status/progress chip.
+	glyph, glyphStyle := ui.QuestGlyph(q)
+	title := q.Title
+	if title == "" {
+		title = "Untitled quest"
+	}
+	chip := "  " + questTypeLabel(q) + " · " + m.questStatusLabel(q)
+	if done, total := q.ObjectiveProgress(); total > 0 {
+		chip += fmt.Sprintf(" · %d/%d", done, total)
+	}
+	// A 2-col cursor-mark slot (like every outline row) leads the title; it
+	// shows the accent "› " while the title is being renamed, blank otherwise.
+	mark := "  "
+	if m.titleEditor != nil {
+		mark = ui.StyleCursor.Render(ui.GlyphCursor)
+	}
+	glyphLead := glyphStyle.Render(glyph) + " "
+	m.focusTitleX = leftMargin + lipgloss.Width(mark) + lipgloss.Width(glyphLead)
+	m.focusTitleWidth = lipgloss.Width(ui.StyleTitle.Render(title))
+	// Constant width whether renaming or not (same as the Tavern list), so the
+	// chip after the title never shifts on select or as the caret moves.
+	titleText := m.constantWidthTitle(title, m.titleEditor, ui.StyleTitle, ui.StyleTitle)
+	// The type/status/progress chip stays visible even while renaming — the chip
+	// reflects quest metadata, not the title text, so there's no reason to hide it.
+	titleLine := mark + glyphLead + titleText + ui.StyleMuted.Render(chip)
+
+	// Column geometry (draggable ratio).
+	const gap = 1
+	detailW := clampInt(int(float64(contentWidth)*m.detailWidthRatio+0.5), 26, contentWidth-24)
+	if detailW < 20 {
+		detailW = 20
+	}
+	bodyW := contentWidth - detailW - gap
+	if bodyW < 12 {
+		bodyW = 12
+	}
+	detailInnerW := detailW - 4
+	if detailInnerW < 4 {
+		detailInnerW = 4
+	}
+	bodyWrapW := bodyW - 4
+	if bodyWrapW < 8 {
+		bodyWrapW = 8
+	}
+	// Up/Down navigation (moveBodyCursor → bodyVisualRows → focusWrapWidth) must
+	// wrap at the SAME width the body is rendered at, or the caret lands mid-line.
+	m.focusTextWidth = bodyWrapW
+	m.focusDetailX = leftMargin + 2           // box interior left (border + space)
+	m.focusBodyX = leftMargin + detailW + gap // body column left
+	m.focusBodyW = bodyW
+	m.detailDividerX = leftMargin + detailW - 1 // the box's right border = divider
+
+	// Pane height.
+	vpad := viewVPad
+	if maxPad := m.height / 4; vpad > maxPad {
+		vpad = maxPad
+	}
+	if vpad < 0 {
+		vpad = 0
+	}
+	paneHeight := m.height - 2*vpad - 5 // header + blank + title + blank + status line
+	if paneHeight < 5 {
+		paneHeight = 5
+	}
+	interiorH := paneHeight - 2 // box top + bottom border
+	if interiorH < 2 {
+		interiorH = 2
+	}
+	contentH := interiorH - 1 // reserve one interior row as top padding
+
+	// Sigils content: focusCodeLines (spans relative to the box interior) then
+	// wrap to the inner width, remapping the recorded link/span rows.
+	m.focusLinks = nil
+	m.focusCodeSpans = nil
+	raw := m.focusCodeLines(q, 0, m.focusDetailX)
+	detailLines := make([]string, 0, len(raw))
+	remap := make([]int, len(raw))
+	ws := lipgloss.NewStyle().Width(detailInnerW)
+	for i, dl := range raw {
+		remap[i] = len(detailLines)
+		detailLines = append(detailLines, strings.Split(ws.Render(dl), "\n")...)
+	}
+	remapRow := func(r int) int {
+		if r >= 0 && r < len(remap) {
+			return remap[r]
+		}
+		return r
+	}
+	for i := range m.focusLinks {
+		m.focusLinks[i].line = remapRow(m.focusLinks[i].line)
+	}
+	for i := range m.focusCodeSpans {
+		m.focusCodeSpans[i].line = remapRow(m.focusCodeSpans[i].line)
+	}
+	detailRows := make([]int, len(detailLines))
+	for i := range detailRows {
+		detailRows[i] = i
+	}
+
+	// Sigils scroll: follow the focused link.
+	activeRow := -1
+	if m.onFocusLink() && m.focusLinkIdx >= 0 && m.focusLinkIdx < len(m.focusLinks) {
+		activeRow = m.focusLinks[m.focusLinkIdx].line
+	}
+	maxS := len(detailLines) - contentH
+	if maxS < 0 {
+		maxS = 0
+	}
+	sScroll := m.sectionScroll["sigils"]
+	if activeRow >= 0 && m.cursorMoved {
+		sScroll = scrollWithMargin(activeRow, sScroll, contentH, len(detailLines))
+	}
+	sScroll = clampInt(sScroll, 0, maxS)
+	m.sectionScroll["sigils"] = sScroll
+	m.sectionMaxScroll["sigils"] = maxS
+	sWin, _ := scrollWindow(detailLines, detailRows, sScroll, contentH)
+	sTitle := ui.StyleMuted.Render("Sigils")
+	if m.onFocusLink() {
+		sTitle = ui.StyleTitle.Render("Sigils")
+	}
+	// Prepend a blank interior row as top padding.
+	box := drawBox(sTitle, "", append([]string{""}, sWin...), detailW, lipgloss.RoundedBorder(), ui.StyleMuted)
+
+	// Body: wrapped lines + own scroll (drop inline body-code spans — they're
+	// recorded at the wrong column for this layout and are a niche feature).
+	spanCut := len(m.focusCodeSpans)
+	m.focusRowLine = m.focusRowLine[:0]
+	m.focusRowOffset = m.focusRowOffset[:0]
+	var bodyLines []string
+	bodyCaretRow := 0
+	for i, l := range q.Body {
+		rows, caret := m.renderBodyLineWrapped(i, l, m.bodyCaretActive() && i == mod.BodyCursor, bodyWrapW, len(bodyLines))
+		for ri, row := range rows {
+			if m.bodyCaretActive() && ri == caret {
+				bodyCaretRow = len(bodyLines)
+			}
+			bodyLines = append(bodyLines, row)
+		}
+	}
+	m.focusCodeSpans = m.focusCodeSpans[:spanCut]
+	bodyRows := make([]int, len(bodyLines))
+	for i := range bodyRows {
+		bodyRows[i] = i
+	}
+	maxB := len(bodyLines) - contentH
+	if maxB < 0 {
+		maxB = 0
+	}
+	bScroll := m.sectionScroll["qbody"]
+	if m.bodyCaretActive() && m.cursorMoved {
+		bScroll = scrollWithMargin(bodyCaretRow, bScroll, contentH, len(bodyLines))
+	}
+	bScroll = clampInt(bScroll, 0, maxB)
+	m.sectionScroll["qbody"] = bScroll
+	m.sectionMaxScroll["qbody"] = maxB
+	bWin, _ := scrollWindow(bodyLines, bodyRows, bScroll, contentH)
+
+	// Compose: box lines, with the body aligned to the box interior content
+	// (box line 0 = top border, 1 = top-pad blank, 2.. = content). The 1-col gap
+	// after the box's right border becomes an accent line while the divider is
+	// hovered or dragged — the same "you can grab this" cue the Tavern uses.
+	gapStr := strings.Repeat(" ", gap)
+	if m.resizeDrag.target == resizeDetailCol || m.resizeHover == resizeDetailCol {
+		gapStr = lipgloss.NewStyle().Foreground(ui.ColorAccent).Render("│")
+	}
+	clip := lipgloss.NewStyle().MaxWidth(m.width)
+	var b strings.Builder
+	for i := 0; i < vpad; i++ {
+		b.WriteString("\n")
+	}
+	b.WriteString(clip.Render(margin+headerLine) + "\n\n")
+	b.WriteString(clip.Render(margin+titleLine) + "\n\n")
+	for i := 0; i < len(box); i++ {
+		bodyPart := ""
+		if i >= 2 && i-2 < len(bWin) {
+			bodyPart = bWin[i-2]
+		}
+		b.WriteString(clip.Render(margin+box[i]+gapStr+bodyPart) + "\n")
+	}
+	// Fixed status line under the box: the focused sigil's actions — the same
+	// bottom-status-line treatment every view uses (see statusHint/statusBar).
+	// Always present so it never reflows the panes.
+	b.WriteString(clip.Render(margin+"  "+m.statusHint()) + "\n")
+
+	// Screen coordinates for clicks/caret/sparkle.
+	m.focusHeaderRow = vpad
+	m.focusTitleRow = vpad + 2 // header (vpad) + blank + title
+	paneTop := vpad + 4
+	m.detailPaneTop = paneTop
+	m.detailPaneBottom = paneTop + len(box) - 1
+	interiorTop := paneTop + 2                 // first content row (below top border + top pad)
+	m.focusContentTop = interiorTop - sScroll  // detail span at content row r → interiorTop + (r - sScroll)
+	m.focusBodyBaseRow = interiorTop - bScroll // body content row r → interiorTop + (r - bScroll)
+	m.cursorScreenY = -1
+	if m.bodyCaretActive() {
+		if vis := bodyCaretRow - bScroll; vis >= 0 && vis < contentH {
+			m.cursorScreenY = interiorTop + vis
+			m.cursorScreenX = m.focusBodyX
+		}
+	}
+	if m.pendingConnBurstCode != "" {
+		code := m.pendingConnBurstCode
+		m.pendingConnBurstCode = ""
+		for _, l := range m.focusLinks {
+			if l.code == code {
+				if vis := l.line - sScroll; vis >= 0 && vis < contentH {
+					m.spawnSparkleBurst(m.focusDetailX+2, interiorTop+vis, 10)
+				}
+				break
+			}
+		}
+	}
+	m.cursorMoved = false // consumed; the wheel scrolls freely until the next key move
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func (m *Model) renderFocusView() string {
 	// Leave comfortable breathing room: at least ~4 columns each side, and
 	// a blank row top and bottom (see vpad below).
+	// The quest detail is two-column (details + body), so it wants more width;
+	// the single-column campaign/section pages stay narrow for readability.
+	maxW := 80
+	if m.modal != nil && m.modal.Kind == ModalQuestDetail {
+		maxW = 150
+	}
 	contentWidth := m.width - 8
-	if contentWidth > 80 {
-		contentWidth = 80
+	if contentWidth > maxW {
+		contentWidth = maxW
 	}
 	if contentWidth < 20 {
 		contentWidth = 20
@@ -1238,11 +1640,15 @@ func (m *Model) renderFocusView() string {
 		leftMargin = 0
 	}
 	margin := strings.Repeat(" ", leftMargin)
+	// Defaults (single column); the quest case overrides these to place the
+	// body in its right-hand column.
+	m.focusDetailX = leftMargin
+	m.focusBodyX = leftMargin
 
 	back := ui.StyleMuted.Render("← back (esc)")
 	right := ui.StyleMuted.Render("F1 help")
 	if m.clipboardToastActive {
-		right = renderClipboardToast()
+		right = renderClipboardToast(m.clipboardToastText)
 	}
 	pad := contentWidth - lipgloss.Width(back) - lipgloss.Width(right)
 	if pad < 1 {
@@ -1281,17 +1687,20 @@ func (m *Model) renderFocusView() string {
 		topPad = vpad + (avail-len(lines))/2
 		m.focusScroll = 0
 	} else {
-		caretAbs := 2 + m.focusCaretLine
-		switch {
-		case caretAbs < avail:
-			m.focusScroll = 0 // caret in the first screenful: show from the top (header visible)
-		case caretAbs < m.focusScroll:
-			m.focusScroll = caretAbs // scrolled above the window: bring it to the top edge
-		case caretAbs >= m.focusScroll+avail:
-			m.focusScroll = caretAbs - avail + 1 // below the window: bring it to the bottom edge
+		// Re-center on the caret only when it moved (keyboard); a wheel scroll
+		// leaves the caret put and must stick.
+		if m.cursorMoved {
+			caretAbs := 2 + m.focusCaretLine
+			switch {
+			case caretAbs < avail:
+				m.focusScroll = 0 // caret in the first screenful: show from the top (header visible)
+			case caretAbs < m.focusScroll:
+				m.focusScroll = caretAbs // scrolled above the window: bring it to the top edge
+			case caretAbs >= m.focusScroll+avail:
+				m.focusScroll = caretAbs - avail + 1 // below the window: bring it to the bottom edge
+			}
 		}
-		maxScroll := len(lines) - avail
-		m.focusScroll = clampInt(m.focusScroll, 0, maxScroll)
+		m.focusScroll = clampInt(m.focusScroll, 0, len(lines)-avail)
 		scroll = m.focusScroll
 	}
 
@@ -1304,18 +1713,23 @@ func (m *Model) renderFocusView() string {
 	m.focusContentTop = topPad + 2 - scroll
 	m.focusBodyBaseRow = m.focusContentTop + m.focusBodyLineStart
 	m.focusHeaderRow = topPad - scroll
+	m.focusTitleRow = m.focusContentTop // campaign/section title is content line 0
 	// Record the body caret's screen cell so a completion burst (Ctrl+D on an
 	// objective here) fires at the checkbox — same overlay path as the outline.
 	m.cursorScreenY = m.focusContentTop + m.focusCaretLine
-	m.cursorScreenX = leftMargin // the body caret's marker column
+	m.cursorScreenX = m.focusBodyX // the body caret's marker column
 	// A connection was just added: burst on its own line in the Sigils section
 	// (m.focusLinks was populated by renderFocusContent above).
 	if m.pendingConnBurstCode != "" {
 		code := m.pendingConnBurstCode
 		m.pendingConnBurstCode = ""
+		burstX := m.focusDetailX + 2 // the details column's connection glyph
+		if burstX <= 0 {
+			burstX = leftMargin + 6
+		}
 		for _, l := range m.focusLinks {
 			if l.code == code {
-				m.spawnSparkleBurst(leftMargin+6, m.focusContentTop+l.line, 10)
+				m.spawnSparkleBurst(burstX, m.focusContentTop+l.line, 10)
 				break
 			}
 		}
@@ -1350,6 +1764,12 @@ func (m *Model) renderFocusView() string {
 	if end < len(lines) {
 		b.WriteString(foldHint(margin, contentWidth) + "\n")
 	}
+	// Fixed bottom status line — the cursor row's actions, same as every other
+	// view (Tavern, Wilds, quest detail).
+	if status := m.statusHint(); status != "" {
+		b.WriteString(clip.Render(margin+strings.TrimPrefix(status, "  ")) + "\n")
+	}
+	m.cursorMoved = false // consumed; the wheel scrolls freely until the next key move
 	return strings.TrimRight(b.String(), "\n")
 }
 
@@ -1370,7 +1790,33 @@ func foldHint(margin string, width int) string {
 // own message type, dispatched separately from Update.
 func (m *Model) handleFocusWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	mouse := msg.Mouse()
-	return m.focusScrollBy(mouse.Button == tea.MouseWheelDown, 1)
+	delta := -1
+	if mouse.Button == tea.MouseWheelDown {
+		delta = 1
+	}
+	// The wheel scrolls the VIEWPORT only — never the cursor/caret (same rule as
+	// every other list). The quest detail has two independently-scrolled panes;
+	// the wheel scrolls whichever the pointer is over. The section/campaign focus
+	// page has one scroll offset.
+	if m.modal != nil && m.modal.Kind == ModalQuestDetail {
+		section := "qbody"
+		if mouse.X < m.focusBodyX {
+			section = "sigils"
+		}
+		next := m.sectionScroll[section] + delta
+		if next < 0 {
+			next = 0
+		}
+		if max := m.sectionMaxScroll[section]; next > max {
+			next = max
+		}
+		m.sectionScroll[section] = next
+		m.invalidateRender()
+		return nil
+	}
+	m.focusScroll += delta // section/campaign page viewport; renderFocusView clamps
+	m.invalidateRender()
+	return nil
 }
 
 // handleFocusClick is a left mouse press inside a focus view.
@@ -1382,16 +1828,46 @@ func (m *Model) handleFocusClick(msg tea.MouseClickMsg) tea.Cmd {
 	if mouse.Button != tea.MouseLeft {
 		return nil
 	}
+	// Grab the Sigils box's right border (or the accent gap beside it) to drag
+	// the pane divider.
+	if m.overDetailDivider(mouse) {
+		m.resizeDrag = resizeDragState{active: true, target: resizeDetailCol}
+		return nil
+	}
 	return m.handleFocusPointer(mouse, true)
 }
 
-// handleFocusMotion is mouse movement inside a focus view — a drag extending
-// the body selection when one is armed (m.selAnchor), otherwise a no-op.
+// overDetailDivider reports whether the pointer is on the quest-detail divider
+// grab target (the box's right border or the gap column beside it).
+func (m *Model) overDetailDivider(mouse tea.Mouse) bool {
+	return m.modal != nil && m.modal.Kind == ModalQuestDetail &&
+		(mouse.X == m.detailDividerX || mouse.X == m.detailDividerX+1) &&
+		mouse.Y >= m.detailPaneTop && mouse.Y <= m.detailPaneBottom
+}
+
+// handleFocusMotion is mouse movement inside a focus view — a divider drag, a
+// divider-hover highlight, or a drag extending the body selection (m.selAnchor).
 func (m *Model) handleFocusMotion(msg tea.MouseMotionMsg) tea.Cmd {
 	if m.modal == nil {
 		return nil
 	}
-	return m.handleFocusPointer(msg.Mouse(), false)
+	mouse := msg.Mouse()
+	if m.resizeDrag.active && m.resizeDrag.target == resizeDetailCol {
+		m.updateResizeDrag(mouse.X, mouse.Y)
+		return nil
+	}
+	// Divider hover highlight (quest detail).
+	if m.modal.Kind == ModalQuestDetail {
+		want := resizeNone
+		if m.overDetailDivider(mouse) {
+			want = resizeDetailCol
+		}
+		if m.resizeHover != want {
+			m.resizeHover = want
+			m.invalidateRender()
+		}
+	}
+	return m.handleFocusPointer(mouse, false)
 }
 
 // handleFocusPointer is the shared logic behind handleFocusClick/
@@ -1411,36 +1887,87 @@ func (m *Model) handleFocusPointer(mouse tea.Mouse, press bool) tea.Cmd {
 		return nil
 	}
 
+	// Inline title rename: any click while renaming commits first; a click on
+	// the title text opens the editor.
+	if press && m.titleEditor != nil {
+		m.commitTitleEdit()
+		return nil
+	}
+	if press && m.focusTitleWidth > 0 && mouse.Y == m.focusTitleRow &&
+		mouse.X >= m.focusTitleX && mouse.X < m.focusTitleX+m.focusTitleWidth {
+		m.beginTitleEdit()
+		return nil
+	}
+
 	// A click on an integration code (Jira/PR) opens its URL; a click on the
 	// "+ add Claude agent" affordance opens the picker.
 	if press {
 		for _, sp := range m.focusCodeSpans {
 			if mouse.Y == m.focusContentTop+sp.line && mouse.X >= sp.x0 && mouse.X < sp.x1 {
+				// Clicking a sigil focuses it (so r/c/Ctrl+X act on it), then
+				// performs the click's own action below.
+				if idx := m.focusLinkAtLine(sp.line); idx != noSelection {
+					m.focusLinkIdx = idx
+				}
 				if sp.url == addAgentSentinel {
 					return m.openAgentPicker()
 				}
-				if sp.url == addRuneSentinel {
-					if q := m.findQuest(mod.QuestID); q != nil {
-						m.openRunePicker(q.ID)
-					}
-					return nil
-				}
-				if sp.url == toggleConnSentinel {
-					if q := m.findQuest(mod.QuestID); q != nil {
-						q.ConnectionsCollapsed = !q.ConnectionsCollapsed
-						m.save()
-					}
-					return nil
-				}
 				if strings.HasPrefix(sp.url, agentFocusPrefix) {
-					return openAgent(strings.TrimPrefix(sp.url, agentFocusPrefix))
+					return m.openAgent(strings.TrimPrefix(sp.url, agentFocusPrefix))
 				}
-				return openURL(sp.url)
+				if sp.url == forgeSentinel {
+					if q := m.findQuest(mod.QuestID); q != nil {
+						return m.forgePlans(q)
+					}
+					return nil
+				}
+				if sp.url == findSentinel {
+					if q := m.findQuest(mod.QuestID); q != nil {
+						return m.findTracksInTrails(q.ID)
+					}
+					return nil
+				}
+				if sp.url == restoreSentinel {
+					if q := m.findQuest(mod.QuestID); q != nil {
+						return m.restoreDismissedTracks(q.ID)
+					}
+					return nil
+				}
+				if key, ok := strings.CutPrefix(sp.url, copySectionSentinel); ok {
+					if q := m.findQuest(mod.QuestID); q != nil {
+						return m.copyToClipboard(m.copySection(q, key), "section copied")
+					}
+					return nil
+				}
+				if event, ok := strings.CutPrefix(sp.url, copyTrackSentinel); ok {
+					return m.copyTrack(mod.QuestID, event)
+				}
+				// A real link: single click copies, a fast second click opens.
+				return m.clickLink(sp.url)
 			}
 		}
 	}
 
-	if mod.Kind == ModalCampaignDetail && mod.InQuestList {
+	// Campaign detail's "Quests" list: route a click on a quest row through the
+	// SAME shared row-click handler the outline uses — so select, double-click
+	// to open, and checkbox-to-toggle-done all work identically here. A click
+	// above the list drops back to editing the campaign description.
+	if mod.Kind == ModalCampaignDetail {
+		qrows := campaignQuestRows(m.store, mod.CampaignID)
+		qi := (mouse.Y - m.focusContentTop) - m.focusQuestListStart
+		if qi >= 0 && qi < len(qrows) {
+			if !press {
+				return nil
+			}
+			mod.InQuestList = true
+			return m.clickRowAt(qrows, qi, mouse, m.focusLeftMargin)
+		}
+		mod.InQuestList = false // clicked the description area
+	}
+	// The body column starts at focusBodyX (== the content margin for
+	// single-column pages). A click to its left is in the details column, not
+	// the body — the details spans above already had their chance.
+	if mouse.X < m.focusBodyX {
 		return nil
 	}
 	body := m.currentBody()
@@ -1459,14 +1986,33 @@ func (m *Model) handleFocusPointer(mouse tea.Mouse, press bool) tea.Cmd {
 		return nil
 	}
 
-	// Body text starts at column 4 + 2·indent (cursor mark + indent + lead).
-	textCol := m.focusLeftMargin + 4 + 2*(*body)[bodyIdx].Indent
+	// Body text starts at column 4 + 2·indent (cursor mark + indent + lead)
+	// within the body column (right column in the quest detail).
+	textCol := m.focusBodyX + 4 + 2*(*body)[bodyIdx].Indent
 
 	if press {
-		m.clearFocusLink() // clicking into the body takes the caret out of the links
-		m.commitBodyLine()
 		raw := []rune((*body)[bodyIdx].Text)
 		pos := clampInt(m.focusRowOffset[bodyRow]+mouse.X-textCol, 0, len(raw))
+		// A click on an objective's checkbox toggles it done — same as the Wilds.
+		// The checkbox (lead glyph) occupies the two columns just before the text.
+		if kind, _ := model.ClassifyBodyLine((*body)[bodyIdx].Text); kind == model.BodyObjective {
+			checkboxStart := m.focusBodyX + bodyObjCol + 2*(*body)[bodyIdx].Indent
+			if mouse.X >= checkboxStart && mouse.X < textCol {
+				m.clearFocusLink()
+				m.commitBodyLine()
+				cmd := m.toggleBodyObjective(bodyIdx, checkboxStart, mouse.Y)
+				mod.BodyCursor = bodyIdx
+				mod.BodyEditor = m.newBodyEditor((*body)[bodyIdx].Text)
+				return cmd
+			}
+		}
+		// A click landing on a shortened inline link copies/opens it (the box
+		// layout drops body-link spans, so resolve the link from the text here).
+		if url := m.bodyLinkAt(bodyIdx, pos); url != "" {
+			return m.clickLink(url)
+		}
+		m.clearFocusLink() // clicking into the body takes the caret out of the links
+		m.commitBodyLine()
 		if bodyIdx != mod.BodyCursor {
 			mod.BodyCursor = bodyIdx
 			mod.BodyEditor = bodyLineEditor(string(raw))
@@ -1477,8 +2023,11 @@ func (m *Model) handleFocusPointer(mouse tea.Mouse, press bool) tea.Cmd {
 		return nil
 	}
 
-	// drag — extend the selection, following the mouse across lines
-	if m.selAnchor == noSelection {
+	// drag — extend the selection, following the mouse across lines. Only while
+	// the left button is actually held: v2 motion events don't carry button
+	// state, so without this guard mere mouse movement after a click (the anchor
+	// persists past release) kept extending the selection.
+	if !m.leftDown || m.selAnchor == noSelection {
 		return nil
 	}
 	if bodyIdx != mod.BodyCursor {
@@ -1499,6 +2048,7 @@ func (m *Model) renderFocusContent() string {
 	m.focusCodeSpans = nil
 	m.focusLinks = nil
 	m.focusBodyLineStart = 0
+	m.focusTitleWidth = 0 // set by the quest/campaign cases; 0 = title not clickable
 
 	var b strings.Builder
 	ln := 0 // lines emitted so far, so we can record where the caret lands
@@ -1509,45 +2059,6 @@ func (m *Model) renderFocusContent() string {
 	}
 
 	switch mod.Kind {
-	case ModalQuestDetail:
-		q := m.findQuest(mod.QuestID)
-		if q == nil {
-			return ""
-		}
-		glyph, glyphStyle := ui.QuestGlyph(q)
-		title := q.Title
-		if title == "" {
-			title = "Untitled quest"
-		}
-		emit(glyphStyle.Render(glyph) + " " + ui.StyleTitle.Render(title))
-		emit("")
-		// Integration codes stacked vertically under the title, then a blank
-		// gap before the body (see the design). Clickable spans are recorded
-		// against their content-line index for handleFocusMouse.
-		if m.integrationsEnabled {
-			codeLines := m.focusCodeLines(q, ln)
-			for _, line := range codeLines {
-				emit(line)
-			}
-			if len(codeLines) > 0 {
-				emit("")
-			}
-		}
-		m.focusBodyLineStart = ln
-		for i, l := range q.Body {
-			// While the link cursor owns the caret, the body line isn't the
-			// caret line — focusCodeLines already recorded the focused link's
-			// line, so don't let the body's own cursor overwrite it.
-			rows, caret := m.renderBodyLineWrapped(i, l, !m.onFocusLink() && i == mod.BodyCursor, m.focusTextWidth, ln)
-			for ri, row := range rows {
-				if !m.onFocusLink() && ri == caret {
-					m.focusCaretLine = ln
-				}
-				emit(row)
-			}
-		}
-		return strings.TrimRight(b.String(), "\n")
-
 	case ModalCampaignDetail:
 		p := m.findProject(mod.CampaignID)
 		if p == nil {
@@ -1560,11 +2071,18 @@ func (m *Model) renderFocusContent() string {
 		done, total := ui.ProjectProgress(m.store, p.ID)
 		progress := ui.StyleMuted.Render(fmt.Sprintf(" %s %d/%d", model.ProgressBucket(done, total), done, total))
 
-		emit(ui.StyleTitle.Render(name) + progress)
+		mark := "  "
+		if m.titleEditor != nil {
+			mark = ui.StyleCursor.Render(ui.GlyphCursor)
+		}
+		m.focusTitleX = m.focusLeftMargin + lipgloss.Width(mark)
+		m.focusTitleWidth = lipgloss.Width(ui.StyleTitle.Render(name))
+		// Constant width whether renaming or not, so the progress never shifts.
+		emit(mark + m.constantWidthTitle(name, m.titleEditor, ui.StyleTitle, ui.StyleTitle) + progress)
 		emit("")
 		m.focusBodyLineStart = ln
 		for i, l := range p.Body {
-			editing := !mod.InQuestList && i == mod.BodyCursor
+			editing := m.bodyCaretActive() && i == mod.BodyCursor
 			rows, caret := m.renderBodyLineWrapped(i, l, editing, m.focusTextWidth, ln)
 			for ri, row := range rows {
 				if ri == caret {
@@ -1576,27 +2094,13 @@ func (m *Model) renderFocusContent() string {
 
 		emit("")
 		emit(ui.StyleSectionHeader.Render("Quests"))
+		m.focusQuestListStart = ln // content line of the first quest row (click map)
 		for _, row := range campaignQuestRows(m.store, p.ID) {
 			isCursor := mod.InQuestList && m.cursor.matches(row)
-			confirming := isCursor && m.confirmDeleteID != "" && rowMatchesConfirmDelete(row, m.confirmDeleteID)
-			warning := m.warningText != "" && m.warningTarget.matches(row)
-			titleView := ""
-			if warning {
-				titleView = ui.StyleMuted.Render(m.warningText)
-			} else if isCursor && m.editor != nil {
-				titleView = m.renderEditableStyled(m.editor, m.cursorTitleStyle(row))
-			}
-			hint := ""
-			if confirming {
-				hint = "  " + ui.StyleImportant.Render(m.confirmDeleteHint(row))
-			} else if !warning {
-				hint = m.actionHint(row, isCursor)
-			}
-			line, _ := ui.RenderRow(row, m.store, titleView, isCursor, 80, hint)
 			if isCursor {
 				m.focusCaretLine = ln
 			}
-			emit(line)
+			emit(m.renderFocusListRow(row, isCursor))
 		}
 		return strings.TrimRight(b.String(), "\n")
 
@@ -1610,31 +2114,37 @@ func (m *Model) renderFocusContent() string {
 		}
 		for _, row := range rows {
 			isCursor := m.cursor.matches(row)
-			confirming := isCursor && m.confirmDeleteID != "" && rowMatchesConfirmDelete(row, m.confirmDeleteID)
-			warning := m.warningText != "" && m.warningTarget.matches(row)
-			titleView := ""
-			if warning {
-				titleView = ui.StyleMuted.Render(m.warningText)
-			} else if isCursor && m.editor != nil {
-				titleView = m.renderEditableStyled(m.editor, m.cursorTitleStyle(row))
-			} else if row.Kind == ui.RowRune {
-				titleView = m.runeRowContent(row.RuneKey)
-			}
-			hint := ""
-			if confirming {
-				hint = "  " + ui.StyleImportant.Render(m.confirmDeleteHint(row))
-			} else if !warning {
-				hint = m.actionHint(row, isCursor)
-			}
-			line, _ := ui.RenderRow(row, m.store, titleView, isCursor, 80, hint)
 			if isCursor {
 				m.focusCaretLine = ln
 			}
-			emit(line)
+			emit(m.renderFocusListRow(row, isCursor))
 		}
 		return strings.TrimRight(b.String(), "\n")
 	}
 	return ""
+}
+
+// renderFocusListRow renders one row of a focus page's list (campaign quest
+// list, section page) exactly like the outline and Tavern do — shared title
+// content, inline emblems, and the same delete-confirm inline prompt. One
+// definition so these lists never drift from the others again.
+func (m *Model) renderFocusListRow(row ui.Row, isCursor bool) string {
+	warning := m.warningText != "" && m.warningTarget.matches(row)
+	titleView := ""
+	if warning {
+		titleView = ui.StyleMuted.Render(m.warningText)
+	} else {
+		titleView = m.rowTitleView(row, isCursor)
+	}
+	hint := ""
+	if isCursor && m.confirmDeleteID != "" && rowMatchesConfirmDelete(row, m.confirmDeleteID) {
+		hint = "  " + ui.StyleImportant.Render(m.confirmDeleteHint(row))
+	}
+	line, _ := ui.RenderRow(row, m.store, titleView, isCursor, m.isNewQuest(row), 80, hint)
+	if warning {
+		return line
+	}
+	return m.withConnectionIcons(line, row)
 }
 
 func minInt(a, b int) int {

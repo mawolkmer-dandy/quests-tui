@@ -40,6 +40,7 @@ var (
 	GlyphExpanded  = "▾"
 	GlyphCollapsed = "▸"
 	GlyphCursor    = "› "
+	GlyphNew       = "● " // blue dot marking a just-added quick-add quest
 
 	// Tavern ornaments (two-column layout). Campaign banners get a small
 	// fleur/flourish; the Vault is framed with green foliage sprigs so the old
@@ -89,10 +90,13 @@ var (
 	// the detail view. NPC = a pinned Claude agent, Scrolls = Jira specs,
 	// Trails = GitHub PRs, Runes = LaunchDarkly flags — real brand/semantic
 	// Nerd Font glyphs instead of abstract dingbats.
-	GlyphConnNPC    = "\U000f06a9" // nf-md-robot — NPC — a pinned agent
-	GlyphConnScroll = "\U000f0303" // nf-md-jira — Scrolls — a Jira spec
-	GlyphConnTrail  = "\uf407"     // nf-oct-git_pull_request — Trails — a GitHub PR
-	GlyphConnRune   = "\U000f0521" // nf-md-toggle_switch — Runes — a LaunchDarkly flag
+	GlyphConnNPC     = "\U000f06a9" // nf-md-robot — NPC — a pinned agent
+	GlyphConnScroll  = "\U000f0303" // nf-md-jira — Scrolls — a Jira spec
+	GlyphConnTrail   = "\uf407"     // nf-oct-git_pull_request — Trails — a GitHub PR
+	GlyphConnRune    = "\U000f0521" // nf-md-toggle_switch — Runes — a LaunchDarkly flag
+	GlyphConnTrack   = "\U000f0f52" // nf-md-foot_print — Tracks — a found tracking event
+	GlyphConnLookout = "\U000f0682" // nf-md-tower_fire — Lookouts — a usage dashboard (watchtower)
+	GlyphFind        = "\U000f0984" // nf-md-map_search — find tracks in a quest's trails
 
 	// Claude-agent status icons (see internal/app/agents.go), traffic-light
 	// colored: blocked/waiting-for-input is red and demands attention, working
@@ -137,6 +141,12 @@ var (
 	// section holds the cursor.
 	ColorRune     color.Color
 	ColorCampaign color.Color
+	// ColorTrack tints harvested tracking events (an earthy tan — tracks in the
+	// dirt); ColorLookout tints the usage dashboards (a teal, reading as
+	// "observation / telemetry").
+	ColorTrack   color.Color
+	ColorLookout color.Color
+	ColorKey     color.Color // muted orange for keyboard keys in hints
 
 	StyleTitle = lipgloss.NewStyle().Bold(true)
 	// StyleName is a non-bold quest/campaign name (the resting state); only the
@@ -147,6 +157,8 @@ var (
 	StyleMain           lipgloss.Style
 	StyleSide           lipgloss.Style
 	StyleCursor         lipgloss.Style
+	StyleNew            lipgloss.Style // quick-add "new" dot (blue)
+	StyleKey            lipgloss.Style // a keyboard key in a hint ("enter to open") — muted orange
 	StyleImportant      lipgloss.Style // high priority
 	StylePriorityMedium lipgloss.Style // medium priority
 	StyleRunning        lipgloss.Style // integration "running" state
@@ -201,11 +213,18 @@ func Init(darkBg bool) {
 	ColorRust = ld(lipgloss.Color("#B4703A"), lipgloss.Color("#A9764F"))
 	ColorRune = ld(lipgloss.Color("#8839EF"), lipgloss.Color("#CBA6F7"))
 	ColorCampaign = ld(lipgloss.Color("#6C6F85"), lipgloss.Color("#9399B2"))
+	ColorTrack = ld(lipgloss.Color("#8C5A2B"), lipgloss.Color("#D4A373"))
+	ColorLookout = ld(lipgloss.Color("#179299"), lipgloss.Color("#94E2D5"))
+	// ColorKey tints a keyboard key inside a hint ("enter to open") — a soft,
+	// desaturated orange that reads as "this is a key" without pulling focus.
+	ColorKey = ld(lipgloss.Color("#BC803A"), lipgloss.Color("#D0A671"))
 	introShineHighlight = ld(lipgloss.Color("#B8860B"), lipgloss.Color("#FFD54F"))
 
 	StyleMain = lipgloss.NewStyle().Foreground(ColorAccent)
 	StyleSide = lipgloss.NewStyle().Foreground(ColorSide)
 	StyleCursor = lipgloss.NewStyle().Foreground(ColorAccent)
+	StyleNew = lipgloss.NewStyle().Foreground(ColorSide) // blue quick-add "new" dot
+	StyleKey = lipgloss.NewStyle().Foreground(ColorKey)  // keyboard key in a hint
 	StyleImportant = lipgloss.NewStyle().Bold(true).Foreground(ColorImportant)
 	StylePriorityMedium = lipgloss.NewStyle().Bold(true).Foreground(ColorPriorityMedium)
 	StyleRunning = lipgloss.NewStyle().Foreground(ColorRunning)
