@@ -73,19 +73,22 @@ func ClassifyBodyLine(text string) (kind BodyLineKind, display string) {
 }
 
 type Quest struct {
-	ID          string      `json:"id"`
-	Title       string      `json:"title"`
-	Type        QuestType   `json:"type"`
-	Status      QuestStatus `json:"status"`
-	Vaulted     bool        `json:"vaulted"`
-	Priority    Priority    `json:"priority,omitempty"`  // optional emphasis, shown with a left arrow; orthogonal to type/status
-	Important   bool        `json:"important,omitempty"` // deprecated: migrated to Priority=High on load
-	ProjectID   string      `json:"projectId"`
-	Body        []BodyLine  `json:"body"`
-	CreatedAt   time.Time   `json:"createdAt"`
-	UpdatedAt   time.Time   `json:"updatedAt"`
-	CompletedAt *time.Time  `json:"completedAt,omitempty"`
-	VaultedAt   *time.Time  `json:"vaultedAt,omitempty"` // when the quest was moved to the Vault; drives the Vault's day timeline
+	ID        string      `json:"id"`
+	Title     string      `json:"title"`
+	Type      QuestType   `json:"type"`
+	Status    QuestStatus `json:"status"`
+	Vaulted   bool        `json:"vaulted"`
+	Priority  Priority    `json:"priority,omitempty"`  // optional emphasis, shown with a left arrow; orthogonal to type/status
+	Important bool        `json:"important,omitempty"` // deprecated: migrated to Priority=High on load
+	ProjectID string      `json:"projectId"`
+	// BannerID, set together with an empty ProjectID, marks a quest that lives
+	// loose directly under a Banner (ongoing area work, not part of any campaign).
+	BannerID    string     `json:"bannerId,omitempty"`
+	Body        []BodyLine `json:"body"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+	CompletedAt *time.Time `json:"completedAt,omitempty"`
+	VaultedAt   *time.Time `json:"vaultedAt,omitempty"` // when the quest was moved to the Vault; drives the Vault's day timeline
 
 	// Integration links, captured from URLs pasted into the body (see
 	// internal/model/links.go and internal/app/links.go). JiraCodes holds every
@@ -193,7 +196,7 @@ type Ward struct {
 // Questboard quests are listing-only: no active/done/canceled status
 // applies until they're picked up (moved to a campaign).
 func (q *Quest) InQuestboard() bool {
-	return q.ProjectID == "" && !q.Vaulted
+	return q.ProjectID == "" && q.BannerID == "" && !q.Vaulted
 }
 
 // ObjectiveProgress returns (done, total) counting only lines that classify

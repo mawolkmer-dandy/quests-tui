@@ -44,19 +44,34 @@ var TavernGreetings = []string{
 	"Rumors and requests crowd the board.",
 }
 
-// WildsGreetings are the subtitles shown out on the road (the Wilds view),
-// picked fresh each time you set out.
+// CampGreetings are the subtitles shown at Camp — the staging area where your
+// taken-up quests are gathered before you head out. Calm, "plan the next push".
+var CampGreetings = []string{
+	"Camp's set. What's the next push?",
+	"Your taken quests, gathered by the fire.",
+	"Boots by the fire, the day's work laid out.",
+	"Everything you've taken up, in one place.",
+	"Rest a moment, then pick your next quest.",
+	"The kit's packed. Choose your fight.",
+	"One fire, your quests, a quiet plan.",
+	"Gathered at camp, ready to move.",
+	"Catch your breath. Then, onward.",
+	"What are we running down next?",
+}
+
+// WildsGreetings are the subtitles shown deep in the Wilds — venturing out with
+// a single quest, distraction-free. Focused, "just you and the task".
 var WildsGreetings = []string{
-	"The road unspools before you.",
-	"Boots on the trail, objectives ahead.",
 	"No walls here — only the task.",
-	"The wilds are patient. Your quests are not.",
+	"Just you and the trail ahead.",
 	"Head down, blade ready.",
 	"The tavern's behind you. Onward.",
-	"Wind at your back, work ahead.",
-	"Mud, miles, and a list to clear.",
+	"One quest. Nothing else.",
+	"The world narrows to this.",
 	"Daylight's burning — move.",
 	"One foot, then the next.",
+	"Eyes on the path. Everything else waits.",
+	"Deep in it now. Finish the work.",
 }
 
 // RandomGreeting picks one tavern subtitle line.
@@ -64,7 +79,12 @@ func RandomGreeting() string {
 	return TavernGreetings[rand.Intn(len(TavernGreetings))]
 }
 
-// RandomWildsGreeting picks one adventure subtitle line.
+// RandomCampGreeting picks one Camp (staging) subtitle line.
+func RandomCampGreeting() string {
+	return CampGreetings[rand.Intn(len(CampGreetings))]
+}
+
+// RandomWildsGreeting picks one Wilds (focus) subtitle line.
 func RandomWildsGreeting() string {
 	return WildsGreetings[rand.Intn(len(WildsGreetings))]
 }

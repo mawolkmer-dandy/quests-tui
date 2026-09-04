@@ -53,6 +53,12 @@ const (
 	// the same content for parked/archived quests. Section names the parent
 	// section; its expanded state lives under a synthetic collapsedProjects key.
 	RowVaultHeader
+	// RowBanner is a Banner (Area) header in the campaigns hall; its campaigns
+	// nest beneath it, collapsible (keyed by banner ID in collapsedProjects,
+	// which never collides with project/quest IDs). RowNewBanner is the
+	// "+ New Banner" affordance.
+	RowBanner
+	RowNewBanner
 )
 
 // Row is one visible line of the outline. Quest rows under a project don't
@@ -74,6 +80,18 @@ type Row struct {
 	BodyLineID     string // for RowWildsObjective: the quest body line it maps to
 	LookoutURL     string // for RowLookout: the dashboard URL
 	TrackEvent     string // for RowTrack: the tracking-event name
+	BannerID       string // for RowBanner; also on a RowNewProject to create the campaign inside that banner
+	// Bare drops the collapse chevron on a RowBanner/RowProject that isn't
+	// collapsible in context — a banner title, or a campaign shown as a
+	// drill-in row (Enter opens it, it doesn't expand in place).
+	Bare bool
+	// Dim mutes a quest/campaign row that's in a "Later" (inactive) group, so
+	// active work reads brighter than the backlog beside it.
+	Dim bool
+	// Header marks the campaign row that titles its own pane — rendered as a
+	// page title (bold, UPPERCASED, campaign-accent) a tier below the banner
+	// title, so it doesn't read like just another body row.
+	Header bool
 }
 
 // Selectable reports whether a row can ever be the cursor target — spacers
@@ -81,7 +99,7 @@ type Row struct {
 // all button (see RowLabel in RenderRow), so it's selectable too.
 func (r Row) Selectable() bool {
 	switch r.Kind {
-	case RowProject, RowQuest, RowSection, RowNewProject, RowNewQuest, RowLabel, RowRune, RowVaultCampaign, RowRuneQuest, RowWildsObjective, RowLookout, RowLookoutQuest, RowTrack, RowVaultHeader:
+	case RowProject, RowQuest, RowSection, RowNewProject, RowNewQuest, RowLabel, RowRune, RowVaultCampaign, RowRuneQuest, RowWildsObjective, RowLookout, RowLookoutQuest, RowTrack, RowVaultHeader, RowBanner, RowNewBanner:
 		return true
 	}
 	return false
@@ -212,7 +230,7 @@ func questsForProject(s *store.Store, projectID string) []model.Quest {
 func questsForInbox(s *store.Store) []model.Quest {
 	var out []model.Quest
 	for _, q := range s.Quests {
-		if q.ProjectID == "" && !q.Vaulted {
+		if q.InQuestboard() { // no campaign AND no banner — a truly unfiled notice
 			out = append(out, q)
 		}
 	}
@@ -264,7 +282,7 @@ func CountSomeday(s *store.Store) int { return len(questsForSomeday(s)) }
 func CountArchived(s *store.Store) int {
 	n := 0
 	for _, p := range s.Projects {
-		if p.Archived {
+		if p.Archived { // only vaulted campaigns live in the Vault
 			n++
 		}
 	}
@@ -308,10 +326,18 @@ func SectionContent(s *store.Store, section string, collapsedProjects map[string
 	case "campaigns":
 		full = appendVaultedGroups(s, BuildCampaignColumn(s, collapsedProjects), collapsedProjects, "campaigns")
 	}
-	if len(full) > 0 {
-		return full[1:] // drop the RowSection / RowLabel header
+	if len(full) == 0 {
+		return nil
 	}
-	return nil
+	rows := full[1:] // drop the RowSection / RowLabel header
+	// The campaigns list puts a spacer after its "Campaigns" label; with the
+	// label dropped that spacer becomes a blank line above the first campaign,
+	// which no other section has. Drop it so every room's first row sits at the
+	// same top.
+	if len(rows) > 0 && rows[0].Kind == RowSpacer {
+		rows = rows[1:]
+	}
+	return rows
 }
 
 // BuildCampaignColumn is the two-column Tavern's campaigns column (the right
@@ -367,12 +393,76 @@ func inboxRows(s *store.Store, collapsedSections map[string]bool) []Row {
 
 func campaignRows(s *store.Store, collapsedProjects map[string]bool) []Row {
 	rows := []Row{{Kind: RowLabel, Label: "Campaigns", Collapsed: allCampaignsCollapsed(s, collapsedProjects)}}
-	for _, p := range s.Projects {
-		if !p.Archived {
-			rows = appendProject(s, rows, p, collapsedProjects, false, true)
+	// A campaign shows in the hall unless it's been vaulted (archived). Completed
+	// campaigns STAY here (done-styled, like a done quest) until you send them to
+	// the Vault yourself with Ctrl+V — nothing auto-moves.
+	live := func(p model.Project) bool { return !p.Archived }
+	emit := func(bannerID string, nested bool) {
+		for _, p := range s.Projects {
+			if live(p) && p.BannerID == bannerID {
+				rows = appendProject(s, rows, p, collapsedProjects, nested, true)
+			}
 		}
 	}
+	// Banners, each grouping its campaigns (indented beneath it); a collapsed
+	// banner hides them.
+	for _, b := range s.Banners {
+		collapsed := collapsedProjects[b.ID]
+		rows = append(rows, Row{Kind: RowBanner, BannerID: b.ID, Label: b.Name, Collapsed: collapsed})
+		if collapsed {
+			continue
+		}
+		// Loose quests living directly under the banner (ongoing area work) come
+		// first, then a "+ New Quest" for them, then the banner's campaigns.
+		for _, q := range looseQuestsUnderBanner(s, b.ID) {
+			rows = append(rows, Row{Kind: RowQuest, QuestID: q.ID, Nested: true})
+		}
+		rows = append(rows, Row{Kind: RowNewQuest, BannerID: b.ID, Nested: true})
+		emit(b.ID, true)
+		rows = append(rows, Row{Kind: RowNewProject, BannerID: b.ID, Nested: true}) // + New Campaign here
+	}
+	// Ungrouped campaigns (no banner) fall at the end, above the global "+ New".
+	emit("", false)
+	rows = append(rows, Row{Kind: RowNewBanner})
 	return append(rows, Row{Kind: RowNewProject})
+}
+
+// findBanner returns the banner with the given ID, or nil.
+func findBanner(s *store.Store, id string) *model.Banner {
+	for i := range s.Banners {
+		if s.Banners[i].ID == id {
+			return &s.Banners[i]
+		}
+	}
+	return nil
+}
+
+// looseQuestsUnderBanner is the quests that live directly under a banner — no
+// campaign (empty ProjectID), not parked — in store order.
+func looseQuestsUnderBanner(s *store.Store, bannerID string) []model.Quest {
+	var out []model.Quest
+	for _, q := range s.Quests {
+		if q.ProjectID == "" && q.BannerID == bannerID && !q.Vaulted {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// BannerCampaignCount exposes bannerCampaignCount for the Tavern hall.
+func BannerCampaignCount(s *store.Store, bannerID string) int {
+	return bannerCampaignCount(s, bannerID)
+}
+
+// bannerCampaignCount is how many live (un-vaulted) campaigns fly under a banner.
+func bannerCampaignCount(s *store.Store, bannerID string) int {
+	n := 0
+	for i := range s.Projects {
+		if p := s.Projects[i]; !p.Archived && p.BannerID == bannerID {
+			n++
+		}
+	}
+	return n
 }
 
 // runesRows draws the Runes section from every un-vaulted quest's attached
@@ -692,8 +782,15 @@ func daysBetween(t, now time.Time) int {
 func addSpacers(rows []Row) []Row {
 	out := make([]Row, 0, len(rows)+8)
 	for i, r := range rows {
-		if i > 0 && (r.Kind == RowProject || r.Kind == RowNewProject || r.Kind == RowSection || r.Kind == RowLabel) {
-			out = append(out, Row{Kind: RowSpacer})
+		if i > 0 {
+			prev := rows[i-1]
+			groupStart := r.Kind == RowProject || r.Kind == RowNewProject || r.Kind == RowSection || r.Kind == RowLabel || r.Kind == RowBanner || r.Kind == RowNewBanner
+			// A banner's first campaign hugs its header (no separating blank), so
+			// the group reads as one block; everything else gets breathing room.
+			hugsBanner := (r.Kind == RowProject || r.Kind == RowNewProject) && prev.Kind == RowBanner
+			if groupStart && !hugsBanner {
+				out = append(out, Row{Kind: RowSpacer})
+			}
 		}
 		out = append(out, r)
 	}
@@ -784,11 +881,37 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, 
 		}
 		name := titleView
 		if name == "" {
-			name = StyleName.Render(p.Name)
+			switch {
+			case row.Header:
+				// The campaign's own pane title — a tier below the banner header:
+				// bold + UPPERCASED in the campaign accent (real-case while editing,
+				// which is when titleView is non-empty and skips this branch).
+				name = StyleCampaignTitle.Render(strings.ToUpper(p.Name))
+			case p.IsCompleted():
+				name = StyleDone.Render(p.Name) // done, but stays until you Ctrl+V it
+			case row.Dim:
+				name = StyleMuted.Render(p.Name) // inactive/later campaign reads dimmer
+			default:
+				name = StyleName.Render(p.Name)
+			}
 		}
 		done, total := projectProgress(s, p.ID)
-		progress := StyleMuted.Render(fmt.Sprintf("%s %d/%d", model.ProgressBucket(done, total), done, total))
-		line = withHint(fmt.Sprintf("%s%s%s %s", cursorMark, nestIndent, caret(row.Collapsed), name))
+		var progress string
+		if row.Bare {
+			// A drill-in campaign row: a progress ring leads instead of a
+			// chevron, and the right shows a plain count. As a pane title the
+			// ring picks up the campaign accent so the whole line reads as one.
+			ringStyle := StyleMuted
+			if row.Header {
+				ringStyle = StyleCampaignTitle
+			}
+			ring := ringStyle.Render(model.ProgressBucket(done, total))
+			line = withHint(fmt.Sprintf("%s%s%s %s", cursorMark, nestIndent, ring, name))
+			progress = StyleMuted.Render(fmt.Sprintf("%d/%d", done, total))
+		} else {
+			progress = StyleMuted.Render(fmt.Sprintf("%s %d/%d", model.ProgressBucket(done, total), done, total))
+			line = withHint(fmt.Sprintf("%s%s%s %s", cursorMark, nestIndent, caret(row.Collapsed), name))
+		}
 		pad := width - lipgloss.Width(progress) - 1
 		if pad < lipgloss.Width(line) {
 			return line + " " + progress, hintX
@@ -802,11 +925,17 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, 
 		}
 		glyph, glyphStyle := QuestGlyph(q)
 		iconView := glyphStyle.Render(glyph)
+		if row.Dim {
+			iconView = StyleMuted.Render(glyph)
+		}
 		title := titleView
 		if title == "" {
-			if q.Status == model.StatusDone {
+			switch {
+			case q.Status == model.StatusDone:
 				title = StyleDone.Render(q.Title)
-			} else {
+			case row.Dim:
+				title = StyleMuted.Render(q.Title) // inactive backlog reads dimmer than active work
+			default:
 				title = StyleName.Render(q.Title)
 			}
 		}
@@ -820,10 +949,15 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, 
 		if done, total := q.ObjectiveProgress(); total > 0 {
 			progress = StyleMuted.Render(fmt.Sprintf(" %d/%d", done, total))
 		}
-		// The 4-col slot before the glyph holds the priority arrow (up for
-		// medium/high, a muted down-arrow for low), else stays blank — either
-		// way 4 wide, so glyphs stay column-aligned across the list.
-		return withHint(fmt.Sprintf("%s%s%s%s %s%s%s", cursorMark, nestIndent, priorityIndicator(q.Priority), iconView, title, tag, progress)), hintX
+		// The 2-col slot before the glyph holds the priority arrow (up for
+		// medium/high, a muted down-arrow for low), else stays blank — so glyphs
+		// stay column-aligned across the list. In the Tavern overview panes
+		// (Bare) it's dropped so quests align flush with campaign rows.
+		prio := priorityIndicator(q.Priority)
+		if row.Bare {
+			prio = ""
+		}
+		return withHint(fmt.Sprintf("%s%s%s%s %s%s%s", cursorMark, nestIndent, prio, iconView, title, tag, progress)), hintX
 
 	case RowSection:
 		label, count := sectionInfo(s, row.Section)
@@ -835,11 +969,46 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, 
 		}
 		return withHint(StyleSectionHeader.Render(fmt.Sprintf("%s%s %s (%d)", cursorMark, caret(row.Collapsed), label, count))), hintX
 
+	case RowBanner:
+		nm := row.Label
+		if b := findBanner(s, row.BannerID); b != nil {
+			nm = b.Name
+		}
+		// A Banner reads as an AREA header — bold, accent-colored, UPPERCASED, with
+		// a flag emblem — visually a tier above the plain-white campaigns nested
+		// under it.
+		bannerStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorHeading)
+		name := titleView
+		if name == "" {
+			name = bannerStyle.Render(strings.ToUpper(nm))
+		}
+		glyph := "\U000f023b" // nf-md-flag (a banner); the banner's own icon overrides
+		if b := findBanner(s, row.BannerID); b != nil && b.Icon != "" {
+			glyph = b.Icon
+		}
+		count := StyleMuted.Render(fmt.Sprintf(" (%d)", bannerCampaignCount(s, row.BannerID)))
+		if row.Bare {
+			// A banner title (not collapsible) — no chevron.
+			return withHint(fmt.Sprintf("%s%s %s%s", cursorMark, bannerStyle.Render(glyph), name, count)), hintX
+		}
+		return withHint(fmt.Sprintf("%s%s %s %s%s", cursorMark, caret(row.Collapsed), bannerStyle.Render(glyph), name, count)), hintX
+
+	case RowNewBanner:
+		return cursorMark + StyleMuted.Render("+ New Banner"), -1
+
 	case RowNewProject:
-		return cursorMark + StyleMuted.Render("+ New Campaign"), -1
+		label := row.Label
+		if label == "" {
+			label = "+ New Campaign"
+		}
+		return cursorMark + nestIndent + StyleMuted.Render(label), -1
 
 	case RowNewQuest:
-		return fmt.Sprintf("%s%s    %s", cursorMark, nestIndent, StyleMuted.Render("+ New Quest")), -1
+		label := row.Label
+		if label == "" {
+			label = "+ New Quest"
+		}
+		return fmt.Sprintf("%s%s%s", cursorMark, nestIndent, StyleMuted.Render(label)), -1
 
 	case RowWildsObjective:
 		q := findQuest(s, row.QuestID)
@@ -862,7 +1031,11 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, 
 		// reads as a child; the checkbox sits under the quest title.
 		indent := strings.Repeat(" ", 6+extraIndent)
 		check := ObjectiveCheckbox(false) // the Wilds only lists pending objectives
-		return withHint(fmt.Sprintf("%s%s%s %s", cursorMark, indent, check, StyleMuted.Render(display))), hintX
+		text := StyleMuted.Render(display)
+		if titleView != "" {
+			text = titleView // live editor when this objective is being renamed
+		}
+		return withHint(fmt.Sprintf("%s%s%s %s", cursorMark, indent, check, text)), hintX
 
 	case RowRune:
 		// titleView is the app-rendered "glyph key  state" content (the live
@@ -902,7 +1075,9 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, 
 		return withHint(fmt.Sprintf("%s%s %s", cursorMark, caret(row.Collapsed), name)), hintX
 
 	case RowDayHeader:
-		return StyleMuted.Render(row.Label), -1
+		// Indented past the cursor-mark gutter so a group label ("Later", a
+		// Vault day) lines up with the banner title and the items beneath it.
+		return "  " + StyleMuted.Render(row.Label), -1
 
 	case RowVaultCampaign:
 		p := findProject(s, row.ProjectID)

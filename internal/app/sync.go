@@ -812,14 +812,6 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn, baseX int) []string {
 		lines = append(lines, linePrefix(li)+hdr+hintFor(li, linkCopySection))
 		ln++
 	}
-	// pasteHint emits a muted "add by pasting a link" affordance (non-navigable —
-	// every connection is added by pasting its URL into the body). Only shown
-	// for an empty section; once there's a connection the hint drops away.
-	pasteHint := func(what string) {
-		lines = append(lines, agentPrefix+strings.Repeat(" ", 2)+ui.StyleMuted.Render("+ paste a "+what+" link"))
-		ln++
-	}
-
 	// NPCs (pinned agents).
 	sectionHeader(ui.GlyphConnNPC, "NPCs", secNPCs, len(q.AgentWorkspaces))
 	for _, id := range q.AgentWorkspaces {
@@ -851,145 +843,157 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn, baseX int) []string {
 		ln++
 	}
 
-	// Scrolls (Jira).
-	sectionHeader(ui.GlyphConnScroll, "Scrolls", secScrolls, len(q.JiraCodes))
-	for _, code := range q.JiraCodes {
-		text := ui.StyleMuted.Render(m.jiraStatusWord(code))
-		addLink("", m.jiraGlyph(code), code, text, linkJira, jiraURL(code, m.jiraBaseURL))
-	}
-	if len(q.JiraCodes) == 0 {
-		pasteHint("Jira")
+	// Scrolls (Jira) — hidden when empty; paste a Jira link into the body to add.
+	if len(q.JiraCodes) > 0 || m.showHiddenSigils {
+		sectionHeader(ui.GlyphConnScroll, "Scrolls", secScrolls, len(q.JiraCodes))
+		for _, code := range q.JiraCodes {
+			text := ui.StyleMuted.Render(m.jiraStatusWord(code))
+			addLink("", m.jiraGlyph(code), code, text, linkJira, jiraURL(code, m.jiraBaseURL))
+		}
 	}
 
-	// Trails (GitHub PRs).
-	sectionHeader(ui.GlyphConnTrail, "Trails", secTrails, len(stack))
-	for i, node := range stack {
-		pr := node.link
-		glyph, _ := m.prGlyph(pr.Code)
-		text := ui.StyleMuted.Render(m.prStatusWord(pr.Code) + " · " + m.prCommentsText(pr.Code))
-		marker := ""
-		if node.stacked {
-			marker = ui.GlyphStackBranchMid
-			if i == len(stack)-1 || stack[i+1].depth == 0 {
-				marker = ui.GlyphStackBranchEnd
+	// Trails (GitHub PRs) — hidden when empty; paste a PR link into the body to add.
+	if len(stack) > 0 || m.showHiddenSigils {
+		sectionHeader(ui.GlyphConnTrail, "Trails", secTrails, len(stack))
+		for i, node := range stack {
+			pr := node.link
+			glyph, _ := m.prGlyph(pr.Code)
+			text := ui.StyleMuted.Render(m.prStatusWord(pr.Code) + " · " + m.prCommentsText(pr.Code))
+			marker := ""
+			if node.stacked {
+				marker = ui.GlyphStackBranchMid
+				if i == len(stack)-1 || stack[i+1].depth == 0 {
+					marker = ui.GlyphStackBranchEnd
+				}
 			}
+			addLink(marker, glyph, pr.Code, text, linkPR, prURL(pr.Repo, pr.Code))
 		}
-		addLink(marker, glyph, pr.Code, text, linkPR, prURL(pr.Repo, pr.Code))
-	}
-	if len(stack) == 0 {
-		pasteHint("GitHub")
-	}
-	// Find affordance — scan the Trails for Tracks (events) + flags/issues.
-	// Only shown when there are trails to search; status while busy.
-	if len(stack) > 0 {
-		li := len(m.focusLinks)
-		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkFind})
-		if m.focusLinkIdx == li {
-			m.focusCaretLine = ln
-		}
-		label := ui.GlyphFind + " find tracks in trails"
-		x0 := baseX + gutterW + 2
-		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: findSentinel})
-		lines = append(lines, linePrefix(li)+"  "+ui.StyleMuted.Render(label)+hintFor(li, linkFind))
-		ln++
-	}
-
-	// Runes (LaunchDarkly flags) — added by pasting an LD link, same as the
-	// others (no picker).
-	sectionHeader(ui.GlyphConnRune, "Runes", secRunes, len(q.Runes))
-	for _, key := range q.Runes {
-		li := len(m.focusLinks)
-		url := ldFlagURL(m.ldProject, m.ldEnv, key)
-		glyph := m.runeGlyph(key)
-		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkRune, code: key, url: url})
-		if m.focusLinkIdx == li {
-			m.focusCaretLine = ln
-		}
-		body := ui.StyleName.Render(key) + "  " + ui.StyleMuted.Render(m.runeWord(key)) + ageDaysLabel(m.runeAgeDays(q.ID, key), true)
-		// Register the clickable span (the rune loop is bespoke — no codeW
-		// padding — so it can't use addLink; without this a click did nothing).
-		x := baseX + gutterW + lipgloss.Width(glyph) + 1
-		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: url})
-		lines = append(lines, linePrefix(li)+glyph+" "+body+hintFor(li, linkRune))
-		ln++
-	}
-	if len(q.Runes) == 0 {
-		lines = append(lines, agentPrefix+strings.Repeat(" ", 2)+ui.StyleMuted.Render("found from trails (flags declared in launch-darkly.types.ts)"))
-		ln++
-	}
-
-	// Tracks (tracking events, found from the Trails — no manual entry). The
-	// glyph is colored by whether the event's source PR is merged (in
-	// production) or still pending.
-	sectionHeader(ui.GlyphConnTrack, "Tracks", secTracks, len(q.Tracks))
-	for _, t := range q.Tracks {
-		li := len(m.focusLinks)
-		glyph := m.trackGlyph(t)
-		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkTrack, code: t.Event})
-		if m.focusLinkIdx == li {
-			m.focusCaretLine = ln
-		}
-		body := ui.StyleName.Render(t.Event) + "  " + ui.StyleMuted.Render(m.trackWord(t))
-		x := baseX + gutterW + lipgloss.Width(glyph) + 1
-		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: copyTrackSentinel + t.Event})
-		lines = append(lines, linePrefix(li)+glyph+" "+body+hintFor(li, linkTrack))
-		ln++
-	}
-	if len(q.Tracks) == 0 {
-		lines = append(lines, agentPrefix+strings.Repeat(" ", 2)+ui.StyleMuted.Render("find tracks in a trail to gather them"))
-		ln++
-	} else {
-		// Write the Lookout's plans (a per-quest dashboard build-plan).
-		li := len(m.focusLinks)
-		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkForge})
-		if m.focusLinkIdx == li {
-			m.focusCaretLine = ln
-		}
-		label := ui.GlyphVine + " write the Lookout's plans"
-		x0 := baseX + gutterW + 2
-		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: forgeSentinel})
-		lines = append(lines, linePrefix(li)+"  "+ui.StyleMuted.Render(label)+hintFor(li, linkForge))
-		ln++
-	}
-	// Restore affordance — bring back tracks dismissed by mistake.
-	if len(q.DismissedTracks) > 0 {
-		li := len(m.focusLinks)
-		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkRestore})
-		if m.focusLinkIdx == li {
-			m.focusCaretLine = ln
-		}
-		label := fmt.Sprintf("⌀ %d dismissed", len(q.DismissedTracks))
-		x0 := baseX + gutterW + 2
-		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: restoreSentinel})
-		lines = append(lines, linePrefix(li)+"  "+ui.StyleMuted.Render(label)+hintFor(li, linkRestore))
-		ln++
-	}
-
-	// Lookouts (usage dashboards) — added by pasting a dashboard URL.
-	sectionHeader(ui.GlyphConnLookout, "Lookouts", secLookouts, len(q.Lookouts))
-	for _, l := range q.Lookouts {
-		li := len(m.focusLinks)
-		glyph := lookoutGlyph()
-		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkLookout, code: l.URL, url: l.URL})
-		if m.focusLinkIdx == li {
-			m.focusCaretLine = ln
-		}
-		x := baseX + gutterW + lipgloss.Width(glyph) + 1
-		if m.lookoutEditor != nil && m.lookoutEditURL == l.URL {
-			// Inline rename in progress — render the editor in place of the label.
-			lines = append(lines, linePrefix(li)+glyph+" "+m.renderEditableStyled(m.lookoutEditor, ui.StyleName))
+		if len(stack) > 0 {
+			// Find affordance — scan the Trails for Tracks (events) + flags/issues.
+			li := len(m.focusLinks)
+			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkFind})
+			if m.focusLinkIdx == li {
+				m.focusCaretLine = ln
+			}
+			label := ui.GlyphFind + " find tracks in trails"
+			x0 := baseX + gutterW + 2
+			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: findSentinel})
+			lines = append(lines, linePrefix(li)+"  "+ui.StyleMuted.Render(label)+hintFor(li, linkFind))
 			ln++
-			continue
 		}
-		body := ui.StyleName.Render(lookoutLabel(l)) + ageDaysLabel(daysSince(l.AddedAt), false)
-		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: l.URL})
-		lines = append(lines, linePrefix(li)+glyph+" "+body+hintFor(li, linkLookout))
-		ln++
 	}
-	if len(q.Lookouts) == 0 {
-		pasteHint("dashboard")
+
+	// Runes (LaunchDarkly flags) — hidden when empty; found from Trails.
+	if len(q.Runes) > 0 || m.showHiddenSigils {
+		sectionHeader(ui.GlyphConnRune, "Runes", secRunes, len(q.Runes))
+		for _, key := range q.Runes {
+			li := len(m.focusLinks)
+			url := ldFlagURL(m.ldProject, m.ldEnv, key)
+			glyph := m.runeGlyph(key)
+			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkRune, code: key, url: url})
+			if m.focusLinkIdx == li {
+				m.focusCaretLine = ln
+			}
+			body := ui.StyleName.Render(key) + "  " + ui.StyleMuted.Render(m.runeWord(key)) + ageDaysLabel(m.runeAgeDays(q.ID, key), true)
+			// Register the clickable span (the rune loop is bespoke — no codeW
+			// padding — so it can't use addLink; without this a click did nothing).
+			x := baseX + gutterW + lipgloss.Width(glyph) + 1
+			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: url})
+			lines = append(lines, linePrefix(li)+glyph+" "+body+hintFor(li, linkRune))
+			ln++
+		}
+	}
+
+	// Tracks (found from the Trails — no manual entry) — hidden when empty unless
+	// there are dismissed tracks to restore. The glyph is colored by whether the
+	// event's source PR is merged (in production) or still pending.
+	if len(q.Tracks) > 0 || len(q.DismissedTracks) > 0 || m.showHiddenSigils {
+		sectionHeader(ui.GlyphConnTrack, "Tracks", secTracks, len(q.Tracks))
+		for _, t := range q.Tracks {
+			li := len(m.focusLinks)
+			glyph := m.trackGlyph(t)
+			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkTrack, code: t.Event})
+			if m.focusLinkIdx == li {
+				m.focusCaretLine = ln
+			}
+			body := ui.StyleName.Render(t.Event) + "  " + ui.StyleMuted.Render(m.trackWord(t))
+			x := baseX + gutterW + lipgloss.Width(glyph) + 1
+			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: copyTrackSentinel + t.Event})
+			lines = append(lines, linePrefix(li)+glyph+" "+body+hintFor(li, linkTrack))
+			ln++
+		}
+		if len(q.Tracks) > 0 {
+			// Write the Lookout's plans (a per-quest dashboard build-plan).
+			li := len(m.focusLinks)
+			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkForge})
+			if m.focusLinkIdx == li {
+				m.focusCaretLine = ln
+			}
+			label := ui.GlyphVine + " write the Lookout's plans"
+			x0 := baseX + gutterW + 2
+			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: forgeSentinel})
+			lines = append(lines, linePrefix(li)+"  "+ui.StyleMuted.Render(label)+hintFor(li, linkForge))
+			ln++
+		}
+		// Restore affordance — bring back tracks dismissed by mistake.
+		if len(q.DismissedTracks) > 0 {
+			li := len(m.focusLinks)
+			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkRestore})
+			if m.focusLinkIdx == li {
+				m.focusCaretLine = ln
+			}
+			label := fmt.Sprintf("⌀ %d dismissed", len(q.DismissedTracks))
+			x0 := baseX + gutterW + 2
+			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: restoreSentinel})
+			lines = append(lines, linePrefix(li)+"  "+ui.StyleMuted.Render(label)+hintFor(li, linkRestore))
+			ln++
+		}
+	}
+
+	// Lookouts (usage dashboards) — hidden when empty; paste a dashboard URL to add.
+	if len(q.Lookouts) > 0 || m.showHiddenSigils {
+		sectionHeader(ui.GlyphConnLookout, "Lookouts", secLookouts, len(q.Lookouts))
+		for _, l := range q.Lookouts {
+			li := len(m.focusLinks)
+			glyph := lookoutGlyph()
+			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkLookout, code: l.URL, url: l.URL})
+			if m.focusLinkIdx == li {
+				m.focusCaretLine = ln
+			}
+			x := baseX + gutterW + lipgloss.Width(glyph) + 1
+			if m.lookoutEditor != nil && m.lookoutEditURL == l.URL {
+				// Inline rename in progress — render the editor in place of the label.
+				lines = append(lines, linePrefix(li)+glyph+" "+m.renderEditableStyled(m.lookoutEditor, ui.StyleName))
+				ln++
+				continue
+			}
+			body := ui.StyleName.Render(lookoutLabel(l)) + ageDaysLabel(daysSince(l.AddedAt), false)
+			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: l.URL})
+			lines = append(lines, linePrefix(li)+glyph+" "+body+hintFor(li, linkLookout))
+			ln++
+		}
+	}
+
+	// A muted, non-navigable hint to reveal/hide the empty connection sections
+	// (F3). Only shown when there's actually something hidden to reveal.
+	if m.sigilsHaveHidden(q) {
+		label := "＋ show hidden sigils"
+		if m.showHiddenSigils {
+			label = "－ hide empty sigils"
+		}
+		lines = append(lines, "")
+		lines = append(lines, agentPrefix+ui.StyleMuted.Render(label+"  F3"))
+		ln += 2
 	}
 	return lines
+}
+
+// sigilsHaveHidden reports whether any hideable connection section is currently
+// empty — i.e. there's something for Ctrl+E to reveal. NPCs is excluded: it
+// always shows (its picker is the only way to add an agent).
+func (m *Model) sigilsHaveHidden(q *model.Quest) bool {
+	return len(q.JiraCodes) == 0 || len(m.prStack(q.PRs)) == 0 || len(q.Runes) == 0 ||
+		(len(q.Tracks) == 0 && len(q.DismissedTracks) == 0) || len(q.Lookouts) == 0
 }
 
 // addAgentSentinel is a fake span URL marking the "+ add Claude agent" line, so

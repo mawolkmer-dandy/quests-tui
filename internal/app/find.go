@@ -265,6 +265,61 @@ func stackExpandCmd(questID string, pr model.PRLink) tea.Cmd {
 	}
 }
 
+// autoStackExpandCmd re-reads each active quest's Graphite stack on every sync
+// pass, so a PR stacked onto the chain AFTER the quest was first linked gets
+// pulled in too — captureSync only expands the stack as it stood when a rung
+// was pasted. Graphite posts the same "Current stack" comment on every member,
+// so one still-open member's comment lists the whole current stack; we query a
+// single representative per quest (see stackExpandSeed). Vaulted quests and
+// fully-settled stacks (every linked PR merged/closed) are skipped — a finished
+// stack can't grow, so it costs no `gh` calls. The stackMsg handler dedupes, so
+// an unchanged stack adds nothing and stays silent on a background pass.
+func (m *Model) autoStackExpandCmd() tea.Cmd {
+	if !m.integrationsEnabled {
+		return nil
+	}
+	var cmds []tea.Cmd
+	for i := range m.store.Quests {
+		q := &m.store.Quests[i]
+		if m.isVaulted(q) || len(q.PRs) == 0 {
+			continue
+		}
+		seed, ok := m.stackExpandSeed(q)
+		if !ok {
+			continue // every linked PR is settled — the stack is stable
+		}
+		cmds = append(cmds, stackExpandCmd(q.ID, seed))
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+// stackExpandSeed picks the PR whose Graphite stack comment a quest's current
+// stack should be read from: the first linked PR that isn't known merged/closed
+// (its comment is the one Graphite still updates), or — when none has a cached
+// status yet (e.g. just linked) — the first such unknown PR. Returns ok=false
+// only when every linked PR is confirmed settled, so a finished stack triggers
+// no `gh` call.
+func (m *Model) stackExpandSeed(q *model.Quest) (model.PRLink, bool) {
+	var fallback model.PRLink
+	haveFallback := false
+	for _, pr := range q.PRs {
+		st, ok := m.prStatus[pr.Code]
+		if !ok {
+			if !haveFallback {
+				fallback, haveFallback = pr, true // status not fetched yet — usable seed
+			}
+			continue
+		}
+		if st.Status != "merged" && st.Status != "closed" {
+			return pr, true // an open member — freshest stack comment
+		}
+	}
+	return fallback, haveFallback
+}
+
 // restoreDismissedTracks clears a quest's dismissed set and re-finds, so any
 // track dismissed by mistake comes back.
 func (m *Model) restoreDismissedTracks(questID string) tea.Cmd {

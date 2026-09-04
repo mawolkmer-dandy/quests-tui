@@ -179,6 +179,8 @@ var (
 	StyleRailFrame   lipgloss.Style
 	StyleVaultFrame  lipgloss.Style
 	StyleActiveQuest lipgloss.Style
+	// StyleCampaignTitle titles a campaign's own pane (bold, campaign accent).
+	StyleCampaignTitle lipgloss.Style
 
 	// Ornament styles: warm accent flourishes on campaign banners, green
 	// foliage around the Vault.
@@ -234,6 +236,7 @@ func Init(darkBg bool) {
 	StyleRailFrame = lipgloss.NewStyle().Foreground(ColorAccent)
 	StyleVaultFrame = lipgloss.NewStyle().Faint(true).Foreground(ColorRust)
 	StyleActiveQuest = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+	StyleCampaignTitle = lipgloss.NewStyle().Bold(true).Foreground(ColorCampaign)
 	StyleOrnament = lipgloss.NewStyle().Foreground(ColorAccent)
 	StyleFoliage = lipgloss.NewStyle().Foreground(ColorHeading)
 }

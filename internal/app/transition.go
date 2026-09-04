@@ -33,12 +33,12 @@ const (
 )
 
 const (
-	listFramesSlow  = 7
+	listFramesSlow  = 8
 	listFramesFast  = 5
-	headerFramesN   = 10
-	subFramesN      = 15 // subtitle typewriter (a touch slower)
-	leadBeat        = 3  // beat after the subtitle finishes before the list starts
-	pauseFramesSlow = 3
+	headerFramesN   = 8
+	subFramesN      = 10 // subtitle typewriter
+	leadBeat        = 2  // short beat before the list starts revealing
+	pauseFramesSlow = 2
 	pauseFramesFast = 1
 	burnTrail       = 3 // trailing columns dimmed (burning) before they vanish
 )
@@ -47,7 +47,7 @@ const (
 // each word's own length).
 const (
 	tavernLabel = "TAVERN"
-	wildsLabel  = "WILDS"
+	wildsLabel  = "CAMP"
 )
 
 var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
@@ -64,12 +64,16 @@ const (
 	kindMode transKind = iota
 	kindFilter
 	kindStartup
+	// kindVenture is the Camp⇄Wilds focus transition — slow like a mode switch,
+	// but with a static header (the Wilds/Camp label swaps rather than the
+	// TAVERN/CAMP letters animating).
+	kindVenture
 )
 
 type transTickMsg struct{ gen int }
 
 func transTick(fast bool, gen int) tea.Cmd {
-	d := 38 * time.Millisecond
+	d := 40 * time.Millisecond
 	if fast {
 		d = 16 * time.Millisecond
 	}
@@ -83,9 +87,9 @@ func (m *Model) beginTransition(oldLines []string, kind transKind) tea.Cmd {
 	}
 	m.transOld = oldLines
 	m.transKind = kind
+	m.transAbsolute = false // callers that capture margin-baked lines set this after
 	m.transFast = kind == kindFilter
 	m.transFrame = 0
-	m.transOldTwoColumn = false // set by the caller (setWilds) when leaving the Tavern
 	// Startup has no previous view to burn away — reveal straight in.
 	if kind == kindStartup {
 		m.transPhase = transReveal
@@ -140,18 +144,16 @@ func (m *Model) listLead() int {
 	if m.transKind == kindFilter {
 		return 0
 	}
-	// Let the subtitle fully type in, then a short beat, before the list.
-	return m.subFrames() + leadBeat
+	// A short beat before the list starts, so the header/subtitle lead slightly
+	// but the body doesn't wait for the whole subtitle to finish typing.
+	return leadBeat
 }
 
 // dissolvePhaseFrames / revealPhaseFrames: how long each half runs. The
 // dissolve burns everything concurrently; the reveal staggers the list after
 // the header/subtitle.
 func (m *Model) dissolvePhaseFrames() int {
-	if m.transFast {
-		return m.listFrames()
-	}
-	return m.subFrames()
+	return m.listFrames()
 }
 
 func (m *Model) revealPhaseFrames() int {
@@ -245,6 +247,9 @@ func (m *Model) dissolveLines() []string {
 // (matching the lab's "List reveal") rather than popping in whole.
 func (m *Model) revealLines() []string {
 	all := m.currentRowLines()
+	if m.transAbsolute {
+		all = m.currentBodyAbsolute() // the arriving view's margin-baked body (Tavern hall+pane, or Camp)
+	}
 	if len(all) == 0 {
 		return nil
 	}
@@ -315,59 +320,6 @@ func (m *Model) transitionSubtitle() string {
 
 func (m *Model) transitioning() bool { return m.transPhase != transNone }
 
-// tavernRevealFrac is how much of each Tavern section's content to show during
-// a transition: 0 while the old view dissolves/pauses (boxes sit empty), then
-// ramping 0→1 as the text reveals — the same reveal curve the single-column
-// list uses, applied per section.
-func (m *Model) tavernRevealFrac() float64 {
-	if !m.transitioning() {
-		return 1
-	}
-	if m.transPhase == transReveal {
-		return frac(max0(m.transFrame-m.listLead()), m.listFrames())
-	}
-	return 0
-}
-
-// animatedHeaderLines is the header (mode toggle + subtitle) with the
-// letter-lighting / typing animation applied — used by the Tavern's reveal.
-func (m *Model) animatedHeaderLines(width int) []string {
-	litTav, litWild := m.animatedModeLetters()
-	return []string{
-		m.renderModeLine(width, litTav, litWild),
-		ui.CenterText(ui.StyleMuted.Render(m.transitionSubtitle()), width),
-	}
-}
-
-// tavernDissolveReveal is the inverse of the reveal curve: 1 while the dissolve
-// starts, ramping to 0 as the old Tavern empties out (0 during the pause).
-func (m *Model) tavernDissolveReveal() float64 {
-	if m.transPhase == transDissolve {
-		return 1 - frac(m.transFrame, m.dissolvePhaseFrames())
-	}
-	return 0 // pause
-}
-
-// viewTavernTransition renders the two-column Tavern mid-transition (animated
-// header + a per-section reveal fraction), reusing the resting layout code.
-func (m *Model) viewTavernTransition(reveal float64) string {
-	contentWidth := m.tavernWidth()
-	m.leftMargin = (m.width - contentWidth) / 2
-	if m.leftMargin < 0 {
-		m.leftMargin = 0
-	}
-	margin := strings.Repeat(" ", m.leftMargin)
-
-	footer := indentLines(m.statusBar(contentWidth), margin)
-	availableHeight := m.height - lipgloss.Height(footer)
-	if availableHeight < 1 {
-		availableHeight = 1
-	}
-	logoLines := m.animatedHeaderLines(contentWidth)
-	logoHeight := len(logoLines) + 3
-	return m.viewTwoColumn(contentWidth, margin, footer, logoLines, logoHeight, availableHeight, reveal)
-}
-
 // modeSpan is a TAVERN/WILDS header label's clickable extent.
 type modeSpan struct {
 	x0, x1 int
@@ -404,8 +356,9 @@ func litFromRight(n, k int, set bool) []bool {
 func (m *Model) animatedModeLetters() (tav, wild []bool) {
 	nt, nw := len([]rune(tavernLabel)), len([]rune(wildsLabel))
 	toWilds := m.wilds
-	if m.transKind == kindFilter {
-		// Filter changes don't switch mode — keep the header static.
+	if m.transKind == kindFilter || m.transKind == kindVenture {
+		// Filter/venture changes don't switch the TAVERN/CAMP mode — keep the
+		// letters static (venture swaps to its own WILDS header separately).
 		return allBools(nt, !toWilds), allBools(nw, toWilds)
 	}
 	if m.transKind == kindStartup {
@@ -431,8 +384,18 @@ func (m *Model) animatedModeLetters() (tav, wild []bool) {
 	return allBools(nt, !toWilds), allBools(nw, toWilds)
 }
 
-// renderHeader is the two banner lines for the resting view.
+// renderHeader is the banner shown above Camp/Wilds: the TAVERN/CAMP toggle and
+// the greeting (the count-up timer replaces the greeting while venturing). The
+// Tavern builds its own header in renderTavernView.
 func (m *Model) renderHeader(width int) []string {
+	if m.venturing() {
+		// Deep in the Wilds the header is just "WILDS" + the session timer — no
+		// TAVERN/CAMP toggle, for maximum focus.
+		return []string{
+			m.ventureHeaderLine(width),
+			ui.CenterText(ui.StyleMuted.Render(m.subtitle), width),
+		}
+	}
 	return []string{
 		m.renderModeToggle(width),
 		ui.CenterText(ui.StyleMuted.Render(m.subtitle), width),
@@ -512,8 +475,12 @@ func (m *Model) renderTransitionView() string {
 	margin := strings.Repeat(" ", m.leftMargin)
 
 	litTav, litAfi := m.animatedModeLetters()
+	headLine := m.renderModeLine(width, litTav, litAfi)
+	if m.venturing() {
+		headLine = m.ventureHeaderLine(width) // Camp→Wilds: swap straight to the WILDS header
+	}
 	header := []string{
-		m.renderModeLine(width, litTav, litAfi),
+		headLine,
 		ui.CenterText(ui.StyleMuted.Render(m.transitionSubtitle()), width),
 	}
 	logoHeight := len(header) + 3 // blank, filter line, blank (matches resting view)
@@ -562,6 +529,12 @@ func (m *Model) renderTransitionView() string {
 		topPad = 0
 	}
 
+	// Camp⇄Tavern body lines already carry their margin; everything else is
+	// centered in the single column and gets the margin prepended here.
+	rowMargin := margin
+	if m.transAbsolute {
+		rowMargin = ""
+	}
 	clip := lipgloss.NewStyle().MaxWidth(m.width)
 	var b strings.Builder
 	for i := 0; i < topPad; i++ {
@@ -576,7 +549,7 @@ func (m *Model) renderTransitionView() string {
 	m.modeToggleRow = topPad
 	m.chipLineRow = topPad + len(header) + 1
 	for _, line := range rowLines[:shown] {
-		b.WriteString(clip.Render(margin+line) + "\n")
+		b.WriteString(clip.Render(rowMargin+line) + "\n")
 	}
 	if overflow {
 		b.WriteString(foldHint(margin, width) + "\n")

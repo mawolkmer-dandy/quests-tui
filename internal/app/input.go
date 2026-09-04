@@ -46,64 +46,51 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.undo()
 		return nil
 	case key.Matches(msg, Keys.SetOut):
+		if m.venturing() {
+			// From deep in the Wilds, Ctrl+G heads all the way back to the Tavern
+			// (the session is logged first — bailing is never penalized).
+			m.logVentureSession(false)
+			m.endVenture()
+			return m.setWilds(false)
+		}
 		return m.setWilds(!m.wilds)
+	case msg.Code == tea.KeyEsc && m.venturing():
+		return m.makeCamp(false) // step back out of the Wilds to Camp
 	case msg.Code == tea.KeyEsc && m.wilds:
 		return m.setWilds(false)
-	// Two-column Tavern: jump to a section (Ctrl+1..4, in the rail's visual
-	// order — Questboard/Runes/Vault top-to-bottom, then Campaigns) or switch
-	// columns with Left/Right once the caret is at the title's edge (otherwise
-	// the arrow keeps editing text).
-	case m.twoColumn() && msg.String() == "ctrl+1":
-		m.jumpToSection("inbox")
+	// Ctrl+P fuzzy-jumps to any room / banner / campaign in the hall.
+	case m.inTavern() && msg.String() == "ctrl+p":
+		m.commitEdit()
+		m.pushModal(jumpModal(m.store))
 		return nil
-	case m.twoColumn() && msg.String() == "ctrl+2":
-		m.jumpToSection("runes")
+	// Ctrl+1 / Ctrl+2 move focus between the sidebar (hall) and the content pane.
+	case m.inTavern() && msg.String() == "ctrl+1":
+		m.returnToHall()
 		return nil
-	case m.twoColumn() && msg.String() == "ctrl+3":
-		m.jumpToSection("lookouts")
+	case m.inTavern() && msg.String() == "ctrl+2":
+		m.diveIntoPane()
 		return nil
-	case m.twoColumn() && msg.String() == "ctrl+4":
-		m.jumpToSection("someday")
+	// Ctrl+N is "new": a Banner from the hall, a contextual sibling in the pane.
+	case m.inTavern() && msg.String() == "ctrl+n":
+		if m.hallFocus {
+			return m.newBannerFromHall()
+		}
+		return m.contextualCreate()
+	// Tavern hall (master-detail): ↑↓ move the selection, Tab/→ dive into the
+	// pane (navigation), Enter adds a campaign in the current area.
+	case m.inTavern() && m.hallFocus && key.Matches(msg, Keys.Up):
+		m.moveHallCursor(-1)
 		return nil
-	case m.twoColumn() && msg.String() == "ctrl+5":
-		m.jumpToSection("campaigns")
+	case m.inTavern() && m.hallFocus && key.Matches(msg, Keys.Down):
+		m.moveHallCursor(1)
 		return nil
-	// Alt+arrows resize the focused section: ←/→ the rail↔campaigns width,
-	// ↑/↓ the focused rail box's height. Alt (not Ctrl, which macOS grabs for
-	// Mission Control; not Shift, which selects text) — and Alt+arrows are free
-	// in the Tavern (move-line's Alt+↑/↓ is body-only).
-	case m.twoColumn() && msg.String() == "alt+right":
-		m.resizeColumnWidth(resizeStep)
+	case m.inTavern() && m.hallFocus && (key.Matches(msg, Keys.Tab) || key.Matches(msg, Keys.Right)):
+		m.diveIntoPane()
 		return nil
-	case m.twoColumn() && msg.String() == "alt+left":
-		m.resizeColumnWidth(-resizeStep)
-		return nil
-	case m.twoColumn() && msg.String() == "alt+down":
-		m.resizeCurrentRailBox(resizeStep)
-		return nil
-	case m.twoColumn() && msg.String() == "alt+up":
-		m.resizeCurrentRailBox(-resizeStep)
-		return nil
-	// Ctrl+Shift+1..4 collapse/expand a rail section in place (Campaigns isn't a
-	// collapsible box, so there's no Ctrl+Shift+5).
-	case m.twoColumn() && msg.String() == "ctrl+shift+1":
-		m.toggleSectionCollapse("inbox")
-		return nil
-	case m.twoColumn() && msg.String() == "ctrl+shift+2":
-		m.toggleSectionCollapse("runes")
-		return nil
-	case m.twoColumn() && msg.String() == "ctrl+shift+3":
-		m.toggleSectionCollapse("lookouts")
-		return nil
-	case m.twoColumn() && msg.String() == "ctrl+shift+4":
-		m.toggleSectionCollapse("someday")
-		return nil
-	// The rail is the left column, campaigns the right: Left→rail, Right→campaigns.
-	case m.twoColumn() && key.Matches(msg, Keys.Left) && m.caretAtStart():
-		m.switchColumn(true)
-		return nil
-	case m.twoColumn() && key.Matches(msg, Keys.Right) && m.caretAtEnd():
-		m.switchColumn(false)
+	case m.inTavern() && m.hallFocus && key.Matches(msg, Keys.Enter):
+		return m.hallCreate()
+	case m.inTavern() && !m.hallFocus && msg.Code == tea.KeyEsc:
+		m.returnToHall()
 		return nil
 	case key.Matches(msg, Keys.Up):
 		m.moveCursor(-1)
@@ -120,8 +107,12 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		if msg.Code == tea.KeyPgUp {
 			delta = -1
 		}
+		step := m.moveCursor
+		if m.inTavern() && m.hallFocus {
+			step = m.moveHallCursor
+		}
 		for i := 0; i < half; i++ {
-			m.moveCursor(delta)
+			step(delta)
 		}
 		return nil
 	}
@@ -225,11 +216,16 @@ func (m *Model) handleRowKey(msg tea.KeyPressMsg) tea.Cmd {
 // ghost — the keyboard "hop". (The mouse wheel scrolls the viewport instead and
 // never touches the cursor — see handleWheel.)
 func (m *Model) moveCursor(delta int) {
+	m.commitEdit()
+	// Arrowing off an unnamed Tavern draft discards it (and relocates the
+	// cursor to a safe neighbor) — that hop is the whole move.
+	if m.discardEmptyPaneDraft() {
+		return
+	}
 	rows := m.visibleRows()
 	if len(rows) == 0 {
 		return
 	}
-	m.commitEdit()
 	idx := findRowIndex(rows, m.cursor)
 	if idx < 0 {
 		idx = 0
@@ -426,6 +422,9 @@ func (m *Model) toggleReveal() {
 	switch m.cursor.kind {
 	case ui.RowProject:
 		m.collapsedProjects[m.cursor.projectID] = !m.collapsedProjects[m.cursor.projectID]
+	case ui.RowBanner:
+		// Banners fold their campaigns; reuse collapsedProjects keyed by banner ID.
+		m.collapsedProjects[m.cursor.bannerID] = !m.collapsedProjects[m.cursor.bannerID]
 	case ui.RowSection:
 		m.collapsedSections[m.cursor.section] = !m.collapsedSections[m.cursor.section]
 		m.saveLayoutConfig()
@@ -445,6 +444,12 @@ func (m *Model) toggleReveal() {
 // (Questboard / Runes / Campaigns / Vault) has one; the "Campaigns" label opens
 // the campaigns section view.
 func (m *Model) handleReveal() tea.Cmd {
+	// Tab is navigation in the Tavern: a campaign row drills into that campaign's
+	// view (the modal is retiring).
+	if m.inTavern() && !m.hallFocus && m.cursor.kind == ui.RowProject {
+		m.drillIntoCampaign(m.cursor.projectID)
+		return nil
+	}
 	switch m.cursor.kind {
 	case ui.RowProject:
 		m.commitEdit()
@@ -455,7 +460,9 @@ func (m *Model) handleReveal() tea.Cmd {
 			m.collapsedProjects[p.ID] = false
 			m.pushModal(campaignDetailModal(p))
 		}
-	case ui.RowQuest:
+	case ui.RowQuest, ui.RowWildsObjective:
+		// An objective opens its parent quest — the mouse/Tab equivalent of
+		// stepping into the quest that owns it.
 		m.commitEdit()
 		if q := m.findQuest(m.cursor.questID); q != nil {
 			m.pushModal(questDetailModal(q))
@@ -482,6 +489,23 @@ func (m *Model) handleReveal() tea.Cmd {
 // "Campaigns" label it toggles collapse — of that one campaign, that
 // section, or every campaign at once, respectively.
 func (m *Model) handleEnter() tea.Cmd {
+	// In Camp (not in a modal), Enter on a taken quest ventures it into the
+	// Wilds — the focus ritual. Camp is an agenda, not an outliner, so Enter
+	// commits to one quest rather than adding a sibling.
+	if m.modal == nil && m.wilds && !m.venturing() && m.cursor.kind == ui.RowQuest {
+		return m.venture(m.cursor.questID)
+	}
+	// The Wilds is distraction-free: Enter makes no structural edits there.
+	if m.modal == nil && m.venturing() {
+		return nil
+	}
+	// In the Tavern content pane, Enter ADDS a new sibling below the cursor
+	// (Tab is navigation now). Contextual: a quest next to a quest, a campaign
+	// next to a campaign, matching the group's status.
+	if m.modal == nil && m.inTavern() && !m.hallFocus {
+		return m.contextualCreate()
+	}
+
 	rows := m.currentRowScope()
 	idx := findRowIndex(rows, m.cursor)
 	if idx < 0 {
@@ -492,10 +516,16 @@ func (m *Model) handleEnter() tea.Cmd {
 
 	switch row.Kind {
 	case ui.RowNewProject:
-		p := model.Project{ID: store.NewID(), Name: ""}
+		p := model.Project{ID: store.NewID(), Name: "", BannerID: row.BannerID}
 		m.store.Projects = append(m.store.Projects, p)
 		m.save()
 		m.setCursor(ui.Row{Kind: ui.RowProject, ProjectID: p.ID})
+
+	case ui.RowNewBanner:
+		b := model.Banner{ID: store.NewID(), Name: ""}
+		m.store.Banners = append(m.store.Banners, b)
+		m.save()
+		m.setCursor(ui.Row{Kind: ui.RowBanner, BannerID: b.ID})
 
 	case ui.RowNewQuest:
 		if row.ProjectID != "" {
@@ -506,9 +536,17 @@ func (m *Model) handleEnter() tea.Cmd {
 			m.collapsedProjects[row.ProjectID] = false
 		}
 		q := m.newQuestUnder(row.ProjectID, model.StatusOpen)
+		if row.ProjectID == "" && row.BannerID != "" {
+			// A loose quest lives directly under a banner (ongoing area work).
+			if nq := m.findQuest(q.ID); nq != nil {
+				nq.BannerID = row.BannerID
+				m.save()
+			}
+			m.collapsedProjects[row.BannerID] = false // keep the banner open
+		}
 		m.setCursor(ui.Row{Kind: ui.RowQuest, ProjectID: q.ProjectID, QuestID: q.ID})
 
-	case ui.RowProject, ui.RowSection, ui.RowRuneQuest, ui.RowLookoutQuest, ui.RowVaultHeader:
+	case ui.RowProject, ui.RowSection, ui.RowRuneQuest, ui.RowLookoutQuest, ui.RowVaultHeader, ui.RowBanner:
 		m.toggleReveal()
 
 	case ui.RowRune:
@@ -549,6 +587,116 @@ func (m *Model) isVaulted(q *model.Quest) bool {
 		}
 	}
 	return false
+}
+
+// contextualCreate adds a new sibling below the cursor in a Tavern pane — a
+// quest next to a quest (same campaign/loose banner, inheriting active/open), a
+// campaign next to a campaign, a quest on a campaign's header, a campaign on a
+// banner's header. Both Enter and Ctrl+N use it; the new row opens for naming.
+func (m *Model) contextualCreate() tea.Cmd {
+	m.commitEdit()
+	switch m.cursor.kind {
+	case ui.RowQuest, ui.RowNewQuest:
+		return m.createSiblingQuest()
+	case ui.RowNewProject:
+		m.createCampaignInPane(m.cursor.bannerID)
+	case ui.RowProject:
+		if m.hallCursor.kind == ui.RowProject && m.cursor.projectID == m.hallCursor.projectID {
+			// The campaign-view header → add a (new, inactive) quest to it.
+			nq := m.newQuestUnder(m.cursor.projectID, model.StatusOpen)
+			m.setCursor(ui.Row{Kind: ui.RowQuest, ProjectID: m.cursor.projectID, QuestID: nq.ID, Bare: true})
+		} else if p := m.findProject(m.cursor.projectID); p != nil {
+			m.createCampaignInPane(p.BannerID)
+		}
+	case ui.RowBanner:
+		m.createCampaignInPane(m.cursor.bannerID)
+	case ui.RowSection:
+		if m.cursor.section == "inbox" {
+			nq := m.newQuestUnder("", model.StatusOpen)
+			m.setCursor(ui.Row{Kind: ui.RowQuest, QuestID: nq.ID, Bare: true})
+		}
+	case ui.RowDayHeader: // the "Later" divider
+		if m.hallCursor.kind == ui.RowProject {
+			nq := m.newQuestUnder(m.hallCursor.projectID, model.StatusOpen)
+			m.setCursor(ui.Row{Kind: ui.RowQuest, ProjectID: m.hallCursor.projectID, QuestID: nq.ID, Bare: true})
+		} else if m.hallCursor.kind == ui.RowBanner {
+			m.createCampaignInPane(m.hallCursor.bannerID)
+		}
+	case ui.RowVaultHeader:
+		m.toggleReveal()
+	}
+	return nil
+}
+
+// createSiblingQuest adds a quest next to the cursor quest (or on a "+ New Quest"
+// row) — same campaign or loose banner, inheriting its active/open status.
+func (m *Model) createSiblingQuest() tea.Cmd {
+	projectID, bannerID, status := "", "", model.StatusOpen
+	switch m.cursor.kind {
+	case ui.RowQuest:
+		q := m.findQuest(m.cursor.questID)
+		if q == nil {
+			return nil
+		}
+		projectID, bannerID, status = q.ProjectID, q.BannerID, q.Status
+		if status == model.StatusDone {
+			status = model.StatusOpen
+		}
+	case ui.RowNewQuest:
+		// "+ add quest" adds an inactive (open) quest — you take it up later.
+		projectID, bannerID = m.cursor.projectID, m.cursor.bannerID
+	}
+	nq := m.newQuestUnder(projectID, status)
+	if projectID == "" && bannerID != "" {
+		if x := m.findQuest(nq.ID); x != nil {
+			x.BannerID = bannerID
+			m.save()
+		}
+	}
+	m.setCursor(ui.Row{Kind: ui.RowQuest, ProjectID: projectID, QuestID: nq.ID, Bare: true})
+	return nil
+}
+
+// createCampaignInPane adds a campaign under bannerID and drops the pane cursor
+// on it to name it.
+func (m *Model) createCampaignInPane(bannerID string) {
+	np := model.Project{ID: store.NewID(), Name: "", BannerID: bannerID}
+	m.store.Projects = append(m.store.Projects, np)
+	m.save()
+	m.setCursor(ui.Row{Kind: ui.RowProject, ProjectID: np.ID})
+}
+
+// hallCreate (hall Enter) adds a campaign in the current area and dives into it
+// to name it; on a "+ New" affordance it creates as before.
+func (m *Model) hallCreate() tea.Cmd {
+	m.commitEdit()
+	switch m.hallCursor.kind {
+	case ui.RowNewBanner, ui.RowNewProject:
+		return m.activateHallEntry()
+	case ui.RowBanner:
+		return m.createCampaignFromHall(m.hallCursor.bannerID)
+	case ui.RowProject:
+		if p := m.findProject(m.hallCursor.projectID); p != nil {
+			return m.createCampaignFromHall(p.BannerID)
+		}
+	}
+	return nil
+}
+
+func (m *Model) createCampaignFromHall(bannerID string) tea.Cmd {
+	np := model.Project{ID: store.NewID(), Name: "", BannerID: bannerID}
+	m.store.Projects = append(m.store.Projects, np)
+	m.save()
+	m.hallCursor = cursorTarget{kind: ui.RowProject, projectID: np.ID}
+	m.diveIntoPane() // land on the new campaign's header to name it
+	return nil
+}
+
+// newBannerFromHall (Ctrl+N in the hall) creates a Banner and dives in to name it.
+func (m *Model) newBannerFromHall() tea.Cmd {
+	m.commitEdit()
+	m.hallCursor = cursorTarget{kind: ui.RowNewBanner}
+	return m.activateHallEntry()
 }
 
 func (m *Model) newQuestUnder(projectID string, status model.QuestStatus) model.Quest {
@@ -623,9 +771,36 @@ func questHasDetails(q *model.Quest) bool {
 // keeps whatever done/active state it had when it was sent there. Trying
 // either on a vaulted quest shows a brief inline warning instead of just
 // silently doing nothing.
+// toggleCampaignDone marks a campaign done (done-styled) or reopens it. It stays
+// in the hall either way — sending it to the Vault is a separate, manual Ctrl+V
+// (toggleVault), same as a quest. Archived campaigns are left alone.
+func (m *Model) toggleCampaignDone(projectID string) tea.Cmd {
+	p := m.findProject(projectID)
+	if p == nil || p.Archived {
+		return nil
+	}
+	if p.IsCompleted() {
+		p.CompletedAt = nil
+		m.save()
+		return nil
+	}
+	now := time.Now()
+	p.CompletedAt = &now
+	m.save()
+	return m.playSound(sndQuestDone)
+}
+
 func (m *Model) toggleDone() tea.Cmd {
 	if m.cursor.kind == ui.RowWildsObjective {
 		return m.markWildsObjectiveDone()
+	}
+	// Ctrl+D on the quest you've ventured with finishes it — mark done, then
+	// return to Camp with the flourish (see completeVenture).
+	if m.modal == nil && m.venturing() && m.cursor.kind == ui.RowQuest && m.cursor.questID == m.venturedID {
+		return m.completeVenture()
+	}
+	if m.cursor.kind == ui.RowProject {
+		return m.toggleCampaignDone(m.cursor.projectID) // mark done; it stays in the hall
 	}
 	if m.cursor.kind != ui.RowQuest {
 		return nil
@@ -679,6 +854,14 @@ func (m *Model) markWildsObjectiveDone() tea.Cmd {
 	}
 	q.UpdatedAt = time.Now()
 	m.save()
+	// Clearing the last pending objective out in the Wilds finishes the quest —
+	// the completion moment of the focus ritual (its own flourish subsumes the
+	// objective ding).
+	if m.modal == nil && m.venturing() && m.venturedID == q.ID {
+		if _, more := q.NextObjective(); !more {
+			return m.completeVenture()
+		}
+	}
 	if row, ok := nearestSelectableRow(m.visibleRows(), idx); ok {
 		m.setCursor(row)
 	}
@@ -694,7 +877,16 @@ func (m *Model) toggleActive() tea.Cmd {
 		return nil
 	}
 	q := m.findQuest(m.cursor.questID)
-	if q == nil || q.InQuestboard() {
+	if q == nil {
+		return nil
+	}
+	if q.InQuestboard() {
+		// A Questboard quest has no campaign to be active under yet — Ctrl+A
+		// triages it: pick a campaign and take it up (file as active) in one step.
+		m.commitEdit()
+		mod := projectPickerModal(m.store, q.ID, "", true)
+		mod.SourceRowIdx = findRowIndex(m.currentRowScope(), m.cursor)
+		m.pushModal(mod)
 		return nil
 	}
 	if m.isVaulted(q) {
@@ -813,18 +1005,27 @@ func (m *Model) cyclePriority() tea.Cmd {
 }
 
 func (m *Model) openProjectPicker() {
-	if m.cursor.kind != ui.RowQuest {
-		return
-	}
-	q := m.findQuest(m.cursor.questID)
-	if q == nil {
-		return
-	}
 	m.commitEdit()
 	srcIdx := findRowIndex(m.currentRowScope(), m.cursor)
-	mod := projectPickerModal(m.store, q.ID, q.ProjectID)
-	mod.SourceRowIdx = srcIdx
-	m.pushModal(mod)
+	switch m.cursor.kind {
+	case ui.RowQuest:
+		q := m.findQuest(m.cursor.questID)
+		if q == nil {
+			return
+		}
+		mod := projectPickerModal(m.store, q.ID, q.ProjectID, false)
+		mod.SourceRowIdx = srcIdx
+		m.pushModal(mod)
+	case ui.RowProject:
+		// On a campaign, "move to…" picks its Banner (Area) instead.
+		p := m.findProject(m.cursor.projectID)
+		if p == nil {
+			return
+		}
+		mod := bannerPickerModal(m.store, p.ID, p.BannerID)
+		mod.SourceRowIdx = srcIdx
+		m.pushModal(mod)
+	}
 }
 
 // openConfirmDelete arms the same lightweight inline y/n prompt for whatever
@@ -897,18 +1098,15 @@ func titleOffset(row ui.Row, nestOffset int) int {
 // Action==Press used to reach. Right/middle presses are ignored (matching v1,
 // which only ever checked Button==Left here).
 func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
+	if m.inTavern() {
+		return m.handleTavernClick(msg) // the borderless hall + pane has its own routing
+	}
 	mouse := msg.Mouse()
 	m.hoverSection = ""
 	m.confirmDeleteID = "" // any click/scroll cancels a pending inline delete confirm
 
 	if mouse.Button != tea.MouseLeft {
 		return nil
-	}
-
-	// A divider press starts a resize drag instead of any row/title dispatch
-	// below — see tavern_columns.go's hitTestDivider.
-	if cmd, started := m.tryStartResizeDrag(mouse.X, mouse.Y); started {
-		return cmd
 	}
 
 	rows := m.visibleRows()
@@ -931,12 +1129,6 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 		return nil
 	}
 
-	// Two-column Tavern clicks are mapped by the per-column line→row tables the
-	// renderer built (boxes shift lines, so plain arithmetic won't do).
-	if m.twoColumn() {
-		return m.handleTwoColumnClick(mouse)
-	}
-
 	relY := mouse.Y - m.rowsScreenTop
 	if relY < 0 {
 		return nil // clicked the logo/blank area above the rows
@@ -951,6 +1143,9 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 // handleWheel handles a scroll-wheel event — the v1 equivalent lived inside
 // handleMouse guarded by Action==Press && Button==Wheel*.
 func (m *Model) handleWheel(msg tea.MouseWheelMsg) tea.Cmd {
+	if m.inTavern() {
+		return m.handleTavernWheel(msg)
+	}
 	mouse := msg.Mouse()
 	m.confirmDeleteID = ""
 	delta := 1
@@ -961,11 +1156,13 @@ func (m *Model) handleWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	// stays put, possibly scrolling out of view, like a normal editor). Every
 	// scrollable surface follows this rule; each render re-centers on the cursor
 	// only when the cursor itself moved (cursorMoved), so a wheel scroll sticks.
-	if m.twoColumn() {
-		m.wheelSection(m.sectionAtPoint(mouse), delta) // the box under the pointer
+	// Clamp against the last render's max so scrolling past an end is a true
+	// no-op — no state churn, no re-render (which would otherwise flicker).
+	next := clampInt(m.scrollOffset+delta, 0, m.scrollMax)
+	if next == m.scrollOffset {
 		return nil
 	}
-	m.scrollOffset += delta // single-column viewport; the render clamps it
+	m.scrollOffset = next
 	m.invalidateRender()
 	return nil
 }
@@ -980,9 +1177,6 @@ func (m *Model) handleMotion(msg tea.MouseMotionMsg) tea.Cmd {
 		m.updateResizeDrag(mouse.X, mouse.Y)
 		return nil
 	}
-	if m.twoColumn() && !m.leftDown {
-		m.updateResizeHover(mouse.X, mouse.Y)
-	}
 	rows := m.visibleRows()
 	if len(rows) == 0 {
 		return nil
@@ -990,29 +1184,13 @@ func (m *Model) handleMotion(msg tea.MouseMotionMsg) tea.Cmd {
 	if m.leftDown {
 		return m.dragTextSelection(mouse, rows)
 	}
-	if m.twoColumn() {
-		m.updateSectionHover(mouse)
-		return nil
-	}
 	m.updateHover(mouse, rows)
 	return nil
 }
 
-// updateResizeHover tracks which divider (if any) the mouse currently rests
-// on, purely for the hover line/joint highlight — never gates whether a drag
-// can start (tryStartResizeDrag hit-tests fresh at press time).
-func (m *Model) updateResizeHover(x, y int) {
-	next := m.hitTestDivider(x, y)
-	if next == m.resizeHover {
-		return
-	}
-	m.resizeHover = next
-	m.invalidateRender()
-}
-
 // commonRowClick performs the click actions that are identical on every list
-// surface — opening a rune, checking off a Wilds objective, collapsing a
-// rune-quest group, or adding via a "+ New …" affordance. It returns
+// surface — opening a rune, collapsing a rune-quest group, or adding via a
+// "+ New …" affordance. It returns
 // (cmd, true) when it handled the row kind; (nil, false) leaves the
 // surface-specific kinds (Section chevron, Quest checkbox — whose click zones
 // depend on that surface's layout) to the caller. One definition of what a
@@ -1031,8 +1209,6 @@ func (m *Model) commonRowClick(row ui.Row) (tea.Cmd, bool) {
 		return m.clickLink(row.LookoutURL), true
 	case ui.RowTrack:
 		return m.copyTrack(row.QuestID, row.TrackEvent), true // click copies the event + marks
-	case ui.RowWildsObjective:
-		return m.toggleDone(), true
 	case ui.RowNewProject, ui.RowNewQuest:
 		return m.handleEnter(), true
 	}
@@ -1050,11 +1226,11 @@ const rowDoubleClickWindow = 400 * time.Millisecond
 
 // rowOpensDetail reports whether a row kind has a detail/focus view that Tab
 // opens and that single-click does NOT already open — i.e. one a double-click
-// should enter (see handleReveal). RowLabel is excluded: its name already opens
-// the section on a single click.
+// should enter (see handleReveal). A Wilds objective opens its PARENT quest.
+// RowLabel is excluded: its name already opens the section on a single click.
 func rowOpensDetail(k ui.RowKind) bool {
 	switch k {
-	case ui.RowQuest, ui.RowProject, ui.RowSection:
+	case ui.RowQuest, ui.RowProject, ui.RowSection, ui.RowWildsObjective:
 		return true
 	}
 	return false
@@ -1158,8 +1334,38 @@ func (m *Model) clickRowAt(rows []ui.Row, idx int, msg tea.Mouse, colX int) tea.
 			return m.toggleDone()
 		}
 		m.beginTextSelection(m.editor, relX-titleOffset(row, nestOffset))
+	case ui.RowWildsObjective:
+		// Mirror a quest row: only the checkbox glyph marks the objective done;
+		// clicking the text edits it (double-click opens the parent quest, above).
+		indent := m.objectiveIndent(row)
+		checkX := wildsObjCol + 2*indent
+		if relX >= checkX && relX <= checkX+1 {
+			return m.toggleDone() // → markWildsObjectiveDone
+		}
+		m.beginTextSelection(m.editor, relX-objectiveTextOffset(indent))
 	}
 	return nil
+}
+
+// objectiveIndent is a Wilds objective row's nesting depth (its body line's
+// Indent) — the objective shifts right 2 columns per level (see wildsObjCol),
+// which the checkbox click zone and text caret both key off.
+func (m *Model) objectiveIndent(row ui.Row) int {
+	if q := m.findQuest(row.QuestID); q != nil {
+		for _, l := range q.Body {
+			if l.ID == row.BodyLineID {
+				return l.Indent
+			}
+		}
+	}
+	return 0
+}
+
+// objectiveTextOffset is the column (from the column's content edge) where a
+// Wilds objective's editable text starts: the checkbox slot (wildsObjCol, plus
+// 2 per nest level) then the checkbox glyph and its trailing space.
+func objectiveTextOffset(indent int) int {
+	return wildsObjCol + 2*indent + 2
 }
 
 // beginTextSelection places ti's cursor at the clicked column (clamped to

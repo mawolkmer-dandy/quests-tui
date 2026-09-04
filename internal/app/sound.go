@@ -83,7 +83,8 @@ func (m *Model) playSound(e soundEvent) tea.Cmd {
 		return nil // configured file gone — stay silent rather than erroring
 	}
 	return func() tea.Msg {
-		_ = exec.Command("afplay", path).Start() // detached; we don't wait
+		// -v 0.5 → half volume; the bundled clips are loud at full.
+		_ = exec.Command("afplay", "-v", "0.5", path).Start() // detached; we don't wait
 		return nil
 	}
 }

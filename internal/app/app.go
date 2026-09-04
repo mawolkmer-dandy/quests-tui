@@ -82,10 +82,11 @@ type cursorTarget struct {
 	bodyLineID string
 	lookoutURL string
 	trackEvent string
+	bannerID   string
 }
 
 func targetFromRow(row ui.Row) cursorTarget {
-	return cursorTarget{kind: row.Kind, projectID: row.ProjectID, questID: row.QuestID, section: row.Section, label: row.Label, runeKey: row.RuneKey, bodyLineID: row.BodyLineID, lookoutURL: row.LookoutURL, trackEvent: row.TrackEvent}
+	return cursorTarget{kind: row.Kind, projectID: row.ProjectID, questID: row.QuestID, section: row.Section, label: row.Label, runeKey: row.RuneKey, bodyLineID: row.BodyLineID, lookoutURL: row.LookoutURL, trackEvent: row.TrackEvent, bannerID: row.BannerID}
 }
 
 func (t cursorTarget) matches(row ui.Row) bool {
@@ -100,9 +101,13 @@ func (t cursorTarget) matches(row ui.Row) bool {
 	case ui.RowSection:
 		return t.section == row.Section
 	case ui.RowNewProject:
+		return t.bannerID == row.BannerID // one per banner (+ the global one)
+	case ui.RowNewBanner:
 		return true
+	case ui.RowBanner:
+		return t.bannerID == row.BannerID
 	case ui.RowNewQuest:
-		return t.projectID == row.ProjectID
+		return t.projectID == row.ProjectID && t.bannerID == row.BannerID // banner-loose "+ New Quest" is distinct
 	case ui.RowLabel:
 		return t.label == row.Label
 	case ui.RowRune:
@@ -158,6 +163,32 @@ type Model struct {
 	quickFilter quickFilter
 	animate     bool // whether the intro/transition animation plays (config: intro)
 
+	// Venture (the Wilds focus loop): venturedID is the single quest currently
+	// ventured out of Camp into the Wilds (empty = at Camp, the full agenda).
+	// ventureStart is when this venture began, for the count-up session timer;
+	// ventureTickGen guards the once-a-second timer so a stale ticker stops on
+	// its next fire (see ventureTick / wilds_venture.go).
+	venturedID     string
+	ventureStart   time.Time
+	ventureTickGen int
+
+	// Tavern hall (2c-visual): the borderless left directory + floating content
+	// pane, navigated master-detail. hallFocus is true while the cursor walks the
+	// hall (left) — false once it has dived into the pane (right). hallCursor is
+	// the selected hall entry (a room / banner / campaign), which drives what the
+	// pane shows (see paneRows). hallScroll is the hall column's own vertical
+	// scroll; the pane reuses scrollOffset. hallSpans + the column geometry are
+	// recorded each render for click routing between the two columns.
+	hallFocus     bool
+	hallCursor    cursorTarget
+	hallScroll    int
+	hallScrollMax int // largest useful hallScroll, cached each render so the wheel can clamp
+	hallSpans     []hallSpan
+	hallColX      int
+	hallColW      int
+	paneColX      int
+	paneColW      int
+
 	// chipLineRow is the screen row of the reserved filter line; chipSpans are
 	// the Wilds quick-chip click extents on it (see handleMouse).
 	chipLineRow int
@@ -186,7 +217,11 @@ type Model struct {
 
 	width, height int
 	scrollOffset  int
-	subtitle      string
+	// scrollMax is the largest useful scrollOffset for the single-column view,
+	// cached each render so the wheel handler can clamp (and no-op at the
+	// bottom) instead of over-incrementing past the end.
+	scrollMax int
+	subtitle  string
 
 	// Screen-space overlay (see overlay.go): transient effects composited on
 	// top of the final frame. cursorScreen{X,Y} is the last-rendered cursor
@@ -206,50 +241,29 @@ type Model struct {
 	// right-to-left, a pause, then the new view reveals line by line. Runs on
 	// startup, Tavern⇄Wilds, and filter changes. transPhase == transNone
 	// when idle.
-	transPhase        transPhase
-	transFrame        int
-	transOld          []string  // rendered rows captured before the change, for the dissolve
-	transOldSub       string    // the subtitle being typed out (mode switches only)
-	transFast         bool      // filter changes animate faster than mode switches
-	transGen          int       // bumped each beginTransition; ticks from an older gen are ignored (no double-speed)
-	transKind         transKind // startup / mode switch / filter — drives header + stagger
-	transOldTwoColumn bool      // the departing view was the two-column Tavern → dissolve it per-section (inverted reveal)
+	transPhase  transPhase
+	transFrame  int
+	transOld    []string  // rendered rows captured before the change, for the dissolve
+	transOldSub string    // the subtitle being typed out (mode switches only)
+	transFast   bool      // filter changes animate faster than mode switches
+	transGen    int       // bumped each beginTransition; ticks from an older gen are ignored (no double-speed)
+	transKind   transKind // startup / mode switch / filter — drives header + stagger
+	// transAbsolute marks a transition whose captured/revealed body lines already
+	// carry their left margin (the Camp⇄Tavern switch, whose two-column Tavern
+	// body can't share the single-column margin) — so the animation renders them
+	// as-is instead of re-indenting.
+	transAbsolute bool
 
 	// set each View() call, used by handleMouse to map screen coordinates
 	// back to a row index / in-row column.
 	rowsScreenTop int
 	leftMargin    int
 
-	// Two-column Tavern (see tavern_columns.go). railFocus is which column the
-	// cursor lives in; leftCursor/railCursor remember each column's cursor
-	// across switches; railScroll is the rail's own scroll offset. The
-	// *ScreenTop/*ColX/*ColWidth fields are the rail's on-screen geometry, set
-	// each render for mouse hit-testing.
-	// railFocus is true when the cursor is in the left rail (Questboard / Runes
-	// / Vault) rather than the right campaigns column. railCursor/campCursor
-	// remember each column's cursor across switches. railScroll is the rail
-	// block's scroll; the campaigns box scrolls its content via scrollOffset.
-	railFocus    bool
-	campCursor   cursorTarget
-	railCursor   cursorTarget
-	railScroll   int
-	railColX     int // rail item text x (left column)
-	campColX     int // campaigns item text x (right column)
-	leftColWidth int // rail (left) column width — also the campaigns-column x threshold
-	// railLineRow/campLineRow map each on-screen line of a column back to the
-	// row index it shows, or -1 for box chrome / blanks — how a two-column
-	// click resolves to a row (boxes shift lines, so plain arithmetic can't).
-	railLineRow []int
-	campLineRow []int
-	// sectionScroll is each Tavern box's own vertical scroll offset, keyed by
-	// section ("inbox" / "runes" / "someday" / "campaigns") — every section is
-	// an independent scroll view (see viewTwoColumn). sectionMaxScroll is each
-	// box's clamp bound (set at render), so a mouse wheel can scroll a section
-	// directly. railLineSection maps each rail screen line to its section, so a
-	// wheel over the rail knows which box it's pointing at.
+	// sectionScroll / sectionMaxScroll are each focus view's own vertical scroll
+	// offset and clamp bound, keyed by section — used by the quest-detail and
+	// campaign/section focus panes so a wheel can scroll them directly.
 	sectionScroll    map[string]int
 	sectionMaxScroll map[string]int
-	railLineSection  []string
 	// uiVersion bumps whenever displayed Tavern content changes (a save, a
 	// collapse toggle, an integration-status update). boxCache holds each
 	// section's wrapped lines + spans so scrolling (which changes none of that)
@@ -294,6 +308,10 @@ type Model struct {
 	// (reset to 0 whenever a focus view is opened/left).
 	focusCaretLine int
 	focusScroll    int
+	// focusScrollMax is the largest useful focusScroll for the campaign/section
+	// focus page, cached each render so the wheel handler can clamp (and no-op
+	// at the bottom) rather than over-incrementing.
+	focusScrollMax int
 	focusBackWidth int
 	focusHelpX     int
 	focusHelpWidth int
@@ -408,17 +426,19 @@ type Model struct {
 	// resize) is in progress.
 	leftDown bool
 
-	// resizeDrag/resizeHover/railWidthRatio/railBoxRatios/lastRailHeights/
-	// lastViewHeight — the two-column Tavern's draggable divider state. See
-	// tavern_columns.go. resizeHover is which divider (if any) the mouse
-	// currently rests on while not dragging — drives the "you can drag here"
-	// line/marker highlight.
-	resizeDrag      resizeDragState
-	resizeHover     resizeTarget
-	railWidthRatio  float64
-	railBoxRatios   []float64 // one weight per rail box (Questboard/Runes/Wards/Vault)
-	lastRailHeights []int     // cached rendered height per rail box, for hit-testing
-	lastViewHeight  int
+	// resizeDrag/resizeHover drive the one remaining draggable divider — the
+	// quest-detail Sigils/body split. resizeHover is which divider the mouse
+	// rests on while not dragging (the "you can drag here" highlight).
+	// railWidthRatio/railBoxRatios persist in the config Layout for back-compat
+	// (the Tavern's rail resize is retired; nothing reads them for rendering now).
+	resizeDrag     resizeDragState
+	resizeHover    resizeTarget
+	railWidthRatio float64
+	railBoxRatios  []float64
+
+	// showHiddenSigils reveals the empty connection sections in the quest detail
+	// (normally hidden for calm); toggled with Ctrl+E while a quest is open.
+	showHiddenSigils bool
 
 	// detailWidthRatio is the quest-detail Sigils box's fraction of the detail
 	// view width (draggable, persisted); detailDividerX/detailPaneTop/Bottom are
@@ -587,9 +607,11 @@ type Options struct {
 }
 
 func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
+	// The app opens into Camp (the focused agenda), so seed a Camp greeting
+	// unless the config pins one.
 	subtitle := opts.Greeting
 	if subtitle == "" {
-		subtitle = ui.RandomGreeting()
+		subtitle = ui.RandomCampGreeting() // launch lands at Camp
 	}
 	railWidthRatio := opts.RailWidthRatio
 	if railWidthRatio <= 0 {
@@ -603,6 +625,7 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 	m := &Model{
 		store:             s,
 		path:              path,
+		wilds:             true, // launch into Camp (the focused agenda), not the Tavern
 		darkBg:            darkBg,
 		cfgPath:           opts.CfgPath,
 		railWidthRatio:    railWidthRatio,
@@ -634,6 +657,8 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 		lastFoundSHA:        map[string]string{},
 		focusLinkIdx:        noSelection,
 	}
+	// Camp re-sorts by priority on every entry; a fresh launch is an entry too.
+	m.store.WildsOrder = nil
 	if rows := m.visibleRows(); len(rows) > 0 {
 		m.setCursor(rows[0])
 	}
@@ -660,8 +685,8 @@ func (m *Model) Init() tea.Cmd {
 	// Update) so it doesn't burn frames before there's a size to render into.
 	// Start watching the quick-add spool so captures made elsewhere (CLI,
 	// Raycast) show up live without a relaunch.
-	// The app opens into the Tavern — play its arrival sound on launch.
-	cmds := []tea.Cmd{m.watchQuickAdd(), m.playSound(sndEnterTavern)}
+	// The app opens into Camp — play its arrival sound on launch.
+	cmds := []tea.Cmd{m.watchQuickAdd(), m.playSound(sndEnterWilds)}
 	if m.integrationsEnabled {
 		// Fire the first sync almost immediately so linked PR/Jira/rune
 		// statuses resolve on launch instead of sitting at "fetching…" for a
@@ -733,7 +758,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case syncResultMsg:
 		m.applySyncResult(msg)
-		return m, tea.Batch(m.maybeStartSpinner(), m.autoFindCmd())
+		return m, tea.Batch(m.maybeStartSpinner(), m.autoFindCmd(), m.autoStackExpandCmd())
 
 	case agentsMsg:
 		m.agents = msg.agents
@@ -780,6 +805,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.playSound(sndAddConnection), m.pokeOverlayTick())
 		}
 		return m, tea.Batch(cmds...)
+
+	case ventureTickMsg:
+		// The Wilds session timer: re-arm once a second while still ventured.
+		// Returning here re-renders the frame, so the count-up advances. A stale
+		// gen (venture ended / restarted) just stops.
+		if msg.gen != m.ventureTickGen || m.venturedID == "" {
+			return m, nil
+		}
+		return m, ventureTick(m.ventureTickGen)
 
 	case spinnerTickMsg:
 		return m, m.onSpinnerTick(msg.gen)
@@ -919,6 +953,15 @@ func (m *Model) findProject(id string) *model.Project {
 	for i := range m.store.Projects {
 		if m.store.Projects[i].ID == id {
 			return &m.store.Projects[i]
+		}
+	}
+	return nil
+}
+
+func (m *Model) findBanner(id string) *model.Banner {
+	for i := range m.store.Banners {
+		if m.store.Banners[i].ID == id {
+			return &m.store.Banners[i]
 		}
 	}
 	return nil
@@ -1066,29 +1109,6 @@ const (
 	filterAll
 )
 
-func (f quickFilter) label() string {
-	switch f {
-	case filterTaken:
-		return "Taken"
-	case filterPriority:
-		return "Priority"
-	default:
-		return "All"
-	}
-}
-
-// quickFilterMatch reports whether q passes the active Wilds chip.
-func (m *Model) quickFilterMatch(q *model.Quest) bool {
-	switch m.quickFilter {
-	case filterTaken:
-		return q.Status == model.StatusActive
-	case filterPriority:
-		return q.Priority == model.PriorityHigh || q.Priority == model.PriorityMedium
-	default:
-		return true
-	}
-}
-
 // wildsRows is the flat quest list shown out on the road: every quest under a
 // non-archived campaign that passes the quick filter, tagged with its campaign
 // name. Unlike the Tavern (grouped per campaign), the Wilds is one list sorted
@@ -1098,14 +1118,19 @@ func (m *Model) quickFilterMatch(q *model.Quest) bool {
 func (m *Model) wildsRows() []ui.Row {
 	byID := m.wildsEligible()
 	var rows []ui.Row
+	first := true
 	for _, id := range m.wildsOrderedIDs(byID) {
 		q := byID[id]
-		if !m.quickFilterMatch(&q) {
-			continue
+		if q.Status != model.StatusActive {
+			continue // Camp is only what you're actively on — the quests you've taken up
 		}
 		if m.searchOpen && !m.searchMatch(&q) {
 			continue
 		}
+		if !first {
+			rows = append(rows, ui.Row{Kind: ui.RowSpacer}) // a little air between quests
+		}
+		first = false
 		rows = append(rows, ui.Row{Kind: ui.RowQuest, ProjectID: q.ProjectID, QuestID: id, ShowProjectTag: true})
 		rows = append(rows, wildsObjectiveRows(q)...)
 	}
@@ -1139,6 +1164,13 @@ func (m *Model) wildsEligible() map[string]model.Quest {
 			continue
 		}
 		for _, q := range ui.QuestsForCampaign(m.store, m.store.Projects[i].ID) {
+			out[q.ID] = q
+		}
+	}
+	// Loose quests under a banner (no campaign) are live work too — an active
+	// one should reach Camp / the Wilds like any other.
+	for _, q := range m.store.Quests {
+		if q.ProjectID == "" && q.BannerID != "" && !q.Vaulted {
 			out[q.ID] = q
 		}
 	}
@@ -1227,22 +1259,20 @@ func (m *Model) setWilds(on bool) tea.Cmd {
 		return nil
 	}
 	m.commitEdit()
-	old := m.currentRowLines()    // snapshot the departing view for the dissolve
-	oldTwoColumn := m.twoColumn() // was the departing view the two-column Tavern?
-	m.transOldSub = m.subtitle    // the subtitle to type out
+	old := m.currentBodyAbsolute() // snapshot the departing view (either layout) for the dissolve
+	m.transOldSub = m.subtitle     // the subtitle to type out
 	if m.searchOpen {
 		m.closeSearch()
 	}
 	m.wilds = on
 	m.editor = nil
 	m.scrollOffset = 0
-	m.railFocus = false // both Wilds and the Tavern default to the left/main column
 	if on {
 		m.quickFilter = filterTaken
 		// Re-sort by priority on every entry: manual nudges are per-visit only,
-		// so a fresh trip to the Wilds always reads top-down by priority.
+		// so a fresh trip to Camp always reads top-down by priority.
 		m.store.WildsOrder = nil
-		m.subtitle = ui.RandomWildsGreeting()
+		m.subtitle = ui.RandomCampGreeting()
 	} else {
 		m.subtitle = ui.RandomGreeting()
 	}
@@ -1252,7 +1282,7 @@ func (m *Model) setWilds(on bool) tea.Cmd {
 		m.cursor = cursorTarget{}
 	}
 	cmd := m.beginTransition(old, kindMode)
-	m.transOldTwoColumn = oldTwoColumn // beginTransition reset it; set for this switch
+	m.transAbsolute = true // the captured/revealed body lines carry their own margin
 	snd := sndEnterTavern
 	if on {
 		snd = sndEnterWilds
@@ -1293,39 +1323,23 @@ func (m *Model) insertQuestMetaRows(rows []ui.Row) []ui.Row {
 	return rows
 }
 
-// twoColumn reports whether the Tavern is showing its two-column layout —
-// the normal Tavern only. Wilds is a single focused list, and search collapses
-// back to one column so a match in any section still surfaces.
-func (m *Model) twoColumn() bool {
+// inTavern reports whether the Tavern (its rooms) is the active view — i.e. not
+// Camp and not mid-search.
+func (m *Model) inTavern() bool {
 	return !m.wilds && !m.searchOpen
 }
 
-// campaignColumnRows / railColumnRows are the two Tavern columns' row lists.
-// The campaigns column (right) is the focus list, with quest-meta integration
-// sub-lines spliced in; the rail (left) is Questboard, Runes and the Vault, no
-// meta lines (the narrow boxes would crowd — open a quest to see its links).
-func (m *Model) campaignColumnRows() []ui.Row {
-	return m.insertQuestMetaRows(ui.BuildCampaignColumn(m.store, m.collapsedProjects))
-}
-
-func (m *Model) railColumnRows() []ui.Row {
-	return ui.BuildRailColumn(m.store, m.collapsedProjects, m.collapsedSections)
-}
-
 func (m *Model) visibleRows() []ui.Row {
+	if m.venturing() {
+		return m.ventureRows() // the single quest ventured into the Wilds
+	}
 	if m.wilds {
 		return m.wildsRows()
 	}
-	if m.twoColumn() {
-		// Navigation/mutation act on whichever column holds the cursor: the
-		// rail (Questboard/Runes/Vault) or the campaigns list.
-		if m.railFocus {
-			return m.railColumnRows()
-		}
-		return m.campaignColumnRows()
-	}
 	if !m.searchOpen {
-		return m.insertQuestMetaRows(ui.BuildRows(m.store, m.collapsedProjects, m.collapsedSections))
+		// The Tavern is the hall + pane: the pane shows the current hall selection.
+		m.ensureHallCursor()
+		return m.paneRows()
 	}
 	// While searching, ignore collapse state so a match in any campaign or
 	// section still surfaces (empty groups are dropped below).
@@ -1393,6 +1407,18 @@ func (m *Model) setCursor(row ui.Row) {
 		ti.CursorEnd()
 		_ = ti.Focus()
 		m.editor = &ti
+	case ui.RowBanner:
+		b := m.findBanner(row.BannerID)
+		if b == nil {
+			m.editor = nil
+			return
+		}
+		ti := textinput.New()
+		ti.Prompt = ""
+		ti.SetValue(b.Name)
+		ti.CursorEnd()
+		_ = ti.Focus()
+		m.editor = &ti
 	case ui.RowQuest:
 		q := m.findQuest(row.QuestID)
 		if q == nil {
@@ -1402,6 +1428,28 @@ func (m *Model) setCursor(row ui.Row) {
 		ti := textinput.New()
 		ti.Prompt = ""
 		ti.SetValue(q.Title)
+		ti.CursorEnd()
+		_ = ti.Focus()
+		m.editor = &ti
+	case ui.RowWildsObjective:
+		// A Wilds objective is inline-editable just like a quest title (click the
+		// text or type) — seed the editor with the objective's display text
+		// (the body line minus its "- " marker; see commitEdit for the write-back).
+		q := m.findQuest(row.QuestID)
+		if q == nil {
+			m.editor = nil
+			return
+		}
+		text := ""
+		for _, l := range q.Body {
+			if l.ID == row.BodyLineID {
+				_, text = model.ClassifyBodyLine(l.Text)
+				break
+			}
+		}
+		ti := textinput.New()
+		ti.Prompt = ""
+		ti.SetValue(text)
 		ti.CursorEnd()
 		_ = ti.Focus()
 		m.editor = &ti
@@ -1422,13 +1470,58 @@ func (m *Model) commitEdit() {
 		if p := m.findProject(m.cursor.projectID); p != nil {
 			p.Name = value
 		}
+	case ui.RowBanner:
+		if b := m.findBanner(m.cursor.bannerID); b != nil {
+			b.Name = value
+		}
 	case ui.RowQuest:
 		if q := m.findQuest(m.cursor.questID); q != nil {
 			q.Title = value
 			q.UpdatedAt = time.Now()
 		}
+	case ui.RowWildsObjective:
+		// Re-prefix the "- " objective marker; the line's ID/Done/Indent are
+		// left untouched so an edit never disturbs its checked state or nesting.
+		if q := m.findQuest(m.cursor.questID); q != nil {
+			for i := range q.Body {
+				if q.Body[i].ID == m.cursor.bodyLineID {
+					q.Body[i].Text = "- " + value
+					q.UpdatedAt = time.Now()
+					break
+				}
+			}
+		}
 	}
 	m.save()
+}
+
+// discardEmptyPaneDraft drops a still-unnamed quest or campaign in the Tavern
+// pane when focus leaves it — the outliner rule that an empty new line vanishes
+// if you never name it. Scoped to the pane so Camp/Wilds/modal editing is
+// untouched, and guarded on questHasDetails/quest count so a row holding real
+// data is never silently removed. Returns true when it deleted the cursor's row
+// (removeCurrentRow having already relocated the cursor to a safe neighbor).
+func (m *Model) discardEmptyPaneDraft() bool {
+	if !m.inTavern() || m.hallFocus {
+		return false
+	}
+	switch m.cursor.kind {
+	case ui.RowQuest:
+		q := m.findQuest(m.cursor.questID)
+		if q != nil && strings.TrimSpace(q.Title) == "" && !questHasDetails(q) {
+			id := q.ID
+			m.removeCurrentRow(func() { m.deleteQuestByID(id) })
+			return true
+		}
+	case ui.RowProject:
+		p := m.findProject(m.cursor.projectID)
+		if p != nil && strings.TrimSpace(p.Name) == "" && m.projectQuestCount(p.ID) == 0 {
+			id := p.ID
+			m.removeCurrentRow(func() { m.deleteProjectByID(id) })
+			return true
+		}
+	}
+	return false
 }
 
 // removeCurrentRow deletes the cursor's row via fn, then relocates the
@@ -1567,10 +1660,32 @@ func (m *Model) confirmDeleteHint(row ui.Row) string {
 // all-motion mouse reporting per-frame — v2 moved these off tea.NewProgram's
 // options (WithAltScreen/WithMouseAllMotion) onto the View itself.
 func (m *Model) View() tea.View {
-	v := tea.NewView(m.compositeOverlay(m.renderContent()))
+	v := tea.NewView(m.padToScreen(m.compositeOverlay(m.renderContent())))
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeAllMotion
 	return v
+}
+
+// padToScreen forces every frame to exactly m.height lines. A frame whose line
+// count changes between renders makes Bubble Tea's alt-screen renderer repaint
+// the WHOLE screen, which flickers — most visibly when scrolling a view whose
+// content overflows by only a line or two, where the fold hint / last content
+// row toggles the height by one on the final scroll notch. Padding with blank
+// lines (never moving content) keeps the size fixed so the renderer diffs in
+// place. Frames are clipped to m.height defensively; in practice every view
+// already fits within it.
+func (m *Model) padToScreen(frame string) string {
+	if m.height <= 0 {
+		return frame
+	}
+	lines := strings.Split(frame, "\n")
+	if len(lines) > m.height {
+		lines = lines[:m.height]
+	}
+	for len(lines) < m.height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) renderContent() string {
@@ -1592,24 +1707,26 @@ func (m *Model) renderContent() string {
 		return m.renderModal()
 	}
 
-	// Transitions: the two-column Tavern animates each section's text filling in
-	// (reveal) or emptying out (dissolve, when it's the departing view); the
-	// single-column Wilds/search keep the sliding dissolve/reveal.
+	// A Camp⇄Tavern switch runs the SAME dissolve→pause→reveal as Camp⇄Wilds
+	// (renderTransitionView, re-centered every frame), just with margin-baked
+	// body lines — so both directions collapse to the header and grow back with
+	// no bounce.
+	if m.transitioning() && m.transKind == kindMode {
+		return m.renderTransitionView()
+	}
+
+	// The Tavern is the borderless hall + content pane (master-detail), static
+	// at rest.
+	if m.inTavern() {
+		return m.renderTavernView()
+	}
+
+	// Transitions use the single-column sliding dissolve/reveal (Camp/Wilds).
 	if m.transitioning() {
-		dissolving := m.transPhase == transDissolve || m.transPhase == transPause
-		if dissolving && m.transOldTwoColumn {
-			return m.viewTavernTransition(m.tavernDissolveReveal()) // old Tavern emptying
-		}
-		if !dissolving && m.twoColumn() {
-			return m.viewTavernTransition(m.tavernRevealFrac()) // new Tavern filling in
-		}
 		return m.renderTransitionView()
 	}
 
 	contentWidth := m.contentWidth()
-	if m.twoColumn() {
-		contentWidth = m.tavernWidth() // two columns want the horizontal room
-	}
 	m.leftMargin = (m.width - contentWidth) / 2
 	if m.leftMargin < 0 {
 		m.leftMargin = 0
@@ -1644,10 +1761,6 @@ func (m *Model) renderContent() string {
 		viewHeight = 1
 	}
 
-	if m.twoColumn() {
-		return m.viewTwoColumn(contentWidth, margin, footer, logoLines, logoHeight, availableHeight, 1.0)
-	}
-
 	rows := m.visibleRows()
 	idx := findRowIndex(rows, m.cursor)
 	if idx < 0 && len(rows) > 0 {
@@ -1669,6 +1782,7 @@ func (m *Model) renderContent() string {
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
+	m.scrollMax = maxScroll // let the wheel handler clamp/no-op at the ends
 	if m.scrollOffset > maxScroll {
 		m.scrollOffset = maxScroll
 	}
@@ -1693,6 +1807,12 @@ func (m *Model) renderContent() string {
 
 	blockHeight := logoHeight + shown + len(emptyHelp)
 	topPad := vpad + (innerHeight-blockHeight)/2
+	if m.inTavern() {
+		// Pin the header (mode toggle + door-strip) to a fixed top instead of
+		// centering the block — so switching rooms, whose contents differ in
+		// height, never shifts the header up or down. Only the body changes.
+		topPad = vpad
+	}
 	if topPad < 0 {
 		topPad = 0
 	}
@@ -1708,7 +1828,7 @@ func (m *Model) renderContent() string {
 		m.cursorScreenY = m.rowsScreenTop + (idx - m.scrollOffset)
 		m.cursorScreenX = m.leftMargin // the cursor "›" marker column
 	}
-	m.modeToggleRow = topPad          // the header's first line is the TAVERN/WILDS toggle
+	m.modeToggleRow = topPad          // the header's first line is the TAVERN/CAMP toggle
 	m.tavernHelpRow = m.modeToggleRow // F1 help sits on the header row
 	// The reserved filter/chip line sits just above the rows (after the logo
 	// and its blank line) — its screen row is used for chip click hit-testing.
@@ -1764,7 +1884,8 @@ func (m *Model) renderContent() string {
 	}
 
 	m.cursorMoved = false // consumed; the wheel scrolls freely until the next key move
-	return strings.TrimRight(b.String(), "\n") + "\n" + footer
+	// A couple of blank lines set the footer apart from the content body.
+	return strings.TrimRight(b.String(), "\n") + "\n\n\n" + footer
 }
 
 // renderOutlineRowLine renders one outline row (or its integration meta
@@ -1994,8 +2115,6 @@ func (m *Model) statusRow() (ui.Row, bool) {
 		sets = [][]ui.Row{campaignQuestRows(m.store, m.modal.CampaignID)}
 	case m.modal != nil && m.modal.Kind == ModalSectionDetail:
 		sets = [][]ui.Row{m.sectionRows(m.modal.Section)}
-	case m.twoColumn():
-		sets = [][]ui.Row{m.railColumnRows(), m.campaignColumnRows()}
 	default:
 		sets = [][]ui.Row{m.visibleRows()}
 	}
@@ -2015,16 +2134,58 @@ func (m *Model) statusHint() string {
 	if m.hideHoverTips {
 		return ""
 	}
+	if m.venturing() {
+		// The Wilds is distraction-free: one clear instruction, not per-row tips.
+		return renderHintParts([]hintPart{{"ctrl+d", "finish"}, {"esc", "make camp"}})
+	}
+	// At Camp, a quest can be peeked (Tab) or ventured into the Wilds (Enter).
+	if m.wilds {
+		if row, ok := m.statusRow(); ok && row.Kind == ui.RowQuest {
+			return renderHintParts([]hintPart{{"tab", "peek"}, {"enter", "venture"}})
+		}
+	}
 	if m.modal != nil && m.modal.Kind == ModalQuestDetail {
 		if q := m.findQuest(m.modal.QuestID); q != nil {
 			return m.sigilStatusLine(q)
 		}
 		return ""
 	}
+	// The Tavern's shortcuts follow the selected line: Enter adds, Tab navigates,
+	// Ctrl+N is the "new" one level up, Esc steps back.
+	if m.inTavern() && m.modal == nil {
+		return renderHintParts(m.tavernHint())
+	}
 	if row, ok := m.statusRow(); ok {
 		return renderHintParts(actionHintParts(row))
 	}
 	return ""
+}
+
+// tavernHint is the footer's contextual shortcut list for the selected hall or
+// pane line.
+func (m *Model) tavernHint() []hintPart {
+	if m.hallFocus {
+		switch m.hallCursor.kind {
+		case ui.RowBanner, ui.RowProject:
+			return []hintPart{{"enter", "new campaign"}, {"tab", "open"}, {"ctrl+n", "new banner"}}
+		case ui.RowSection:
+			return []hintPart{{"tab", "open"}, {"ctrl+n", "new banner"}}
+		}
+		return []hintPart{{"ctrl+n", "new banner"}}
+	}
+	switch m.cursor.kind {
+	case ui.RowQuest:
+		return []hintPart{{"enter", "add"}, {"tab", "open"}, {"esc", "back"}}
+	case ui.RowProject:
+		return []hintPart{{"enter", "add"}, {"tab", "open"}, {"esc", "back"}}
+	case ui.RowBanner:
+		return []hintPart{{"enter", "add campaign"}, {"esc", "back"}}
+	case ui.RowNewQuest, ui.RowNewProject:
+		return []hintPart{{"enter", "add"}, {"esc", "back"}}
+	case ui.RowVaultHeader:
+		return []hintPart{{"enter", "toggle"}, {"esc", "back"}}
+	}
+	return []hintPart{{"esc", "back"}}
 }
 
 // statusBar is the app-wide bottom line: the current selection's action hints
@@ -2033,6 +2194,8 @@ func (m *Model) statusHint() string {
 func (m *Model) statusBar(width int) string {
 	left := strings.TrimPrefix(m.statusHint(), "  ") // renderHintParts prepends a 2-space gap; the bar owns spacing
 	right := ""
+	// Camp/Wilds stay uncluttered — no counts here. The Tavern shows how many
+	// quests are currently taken up.
 	if !m.wilds {
 		if taken := m.takenCount(); taken > 0 {
 			right = ui.StyleFooter.Render(fmt.Sprintf("%d taken up", taken))

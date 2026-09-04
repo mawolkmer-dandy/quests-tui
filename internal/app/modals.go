@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -30,6 +31,9 @@ const (
 type pickerItem struct {
 	ID    string
 	Label string
+	// Hint is a muted suffix shown after the label — used by the campaign picker
+	// to show each campaign's active-quest count ("· 3 active").
+	Hint string
 }
 
 // isFocusModal reports whether kind is one of the full-screen focused views
@@ -101,10 +105,20 @@ type Modal struct {
 
 	// ModalProjectPicker
 	TargetQuestID string
-	PickerItems   []pickerItem
-	PickerIndex   int
-	PickerFilter  string // fuzzy-search query typed into the picker
-	SourceRowIdx  int    // the moved quest's row index in the source list, to relocate the cursor after the move
+	// TargetProjectID: when set, the picker (same ModalProjectPicker machinery)
+	// assigns a Banner to this campaign instead of moving a quest to a campaign.
+	TargetProjectID string
+	PickerItems     []pickerItem
+	PickerIndex     int
+	PickerFilter    string // fuzzy-search query typed into the picker
+	SourceRowIdx    int    // the moved quest's row index in the source list, to relocate the cursor after the move
+	// TakeUp marks a triage picker opened with Ctrl+A: filing the quest also
+	// takes it up (Status → active) so it lands in Camp. Ctrl+O leaves it open.
+	TakeUp bool
+	// Jump marks the Ctrl+P fuzzy-jump picker: its items are hall targets
+	// (rooms / banners / campaigns), and selecting one navigates the hall there
+	// (see updateModal's enter) rather than moving a quest.
+	Jump bool
 
 	// ModalSectionDetail: which section ("inbox" | "someday") this page shows.
 	Section string
@@ -243,16 +257,152 @@ func campaignDetailModal(p *model.Project) *Modal {
 	}
 }
 
-func projectPickerModal(s *store.Store, questID, currentProjectID string) *Modal {
+// projectPickerModal is the triage / move-to-campaign picker. Campaigns are
+// ordered recents-first (most recently touched at the top — where you're most
+// likely to file next), each annotated with its active-quest count. takeUp
+// marks the Ctrl+A "take it up now" variant (files as active); Ctrl+O files as
+// open. Archived campaigns (in the Vault) aren't filing targets.
+func projectPickerModal(s *store.Store, questID, currentProjectID string, takeUp bool) *Modal {
+	live := make([]model.Project, 0, len(s.Projects))
+	for _, p := range s.Projects {
+		if !p.Archived {
+			live = append(live, p)
+		}
+	}
+	recency, active := projectRecencyAndActive(s)
+	sort.SliceStable(live, func(a, b int) bool {
+		return recency[live[a].ID].After(recency[live[b].ID])
+	})
+
 	items := []pickerItem{{ID: "", Label: "Questboard (no campaign)"}}
 	idx := 0
-	for _, p := range s.Projects {
-		items = append(items, pickerItem{ID: p.ID, Label: p.Name})
+	for _, p := range live {
+		it := pickerItem{ID: p.ID, Label: p.Name}
+		if n := active[p.ID]; n > 0 {
+			it.Hint = fmt.Sprintf("%d active", n)
+		}
+		items = append(items, it)
 		if p.ID == currentProjectID {
 			idx = len(items) - 1
 		}
 	}
-	return &Modal{Kind: ModalProjectPicker, TargetQuestID: questID, PickerItems: items, PickerIndex: idx}
+	return &Modal{Kind: ModalProjectPicker, TargetQuestID: questID, PickerItems: items, PickerIndex: idx, TakeUp: takeUp}
+}
+
+// projectRecencyAndActive returns, per campaign ID, the most recent quest
+// update time (for recents-first ordering) and the count of active (taken-up)
+// quests (for the picker hint).
+func projectRecencyAndActive(s *store.Store) (recency map[string]time.Time, active map[string]int) {
+	recency = map[string]time.Time{}
+	active = map[string]int{}
+	for i := range s.Quests {
+		q := &s.Quests[i]
+		if q.ProjectID == "" {
+			continue
+		}
+		if q.UpdatedAt.After(recency[q.ProjectID]) {
+			recency[q.ProjectID] = q.UpdatedAt
+		}
+		if q.Status == model.StatusActive && !q.Vaulted {
+			active[q.ProjectID]++
+		}
+	}
+	return recency, active
+}
+
+// bannerPickerModal reuses the ModalProjectPicker machinery to assign a Banner
+// (Area) to a campaign: the items are the banners (plus "— no banner —"), and
+// TargetProjectID marks it as a banner assignment (see updateModal's enter).
+func bannerPickerModal(s *store.Store, projectID, currentBannerID string) *Modal {
+	items := []pickerItem{{ID: "", Label: "— no banner —"}}
+	idx := 0
+	for _, b := range s.Banners {
+		items = append(items, pickerItem{ID: b.ID, Label: b.Name})
+		if b.ID == currentBannerID {
+			idx = len(items) - 1
+		}
+	}
+	return &Modal{Kind: ModalProjectPicker, TargetProjectID: projectID, PickerItems: items, PickerIndex: idx}
+}
+
+// projectName is a campaign's display name, or a stand-in for the empty
+// "no campaign" target (the Questboard).
+func (m *Model) projectName(id string) string {
+	if id == "" {
+		return "the Questboard"
+	}
+	if p := m.findProject(id); p != nil {
+		if p.Name != "" {
+			return p.Name
+		}
+	}
+	return "a campaign"
+}
+
+// fileToastText is the destination confirmation shown after triaging a quest —
+// "took up in X" when it was taken up (Ctrl+A), "filed to X" otherwise.
+func fileToastText(takeUp bool, name string) string {
+	if takeUp {
+		return "took up in " + name
+	}
+	return "filed to " + name
+}
+
+// jumpModal is the Ctrl+P fuzzy jump: every hall destination (the rooms, each
+// banner, each live campaign) as one flat searchable list. Each item's ID
+// encodes its kind ("section:inbox" / "banner:<id>" / "project:<id>") so the
+// enter-apply can navigate the hall to it.
+func jumpModal(s *store.Store) *Modal {
+	items := []pickerItem{
+		{ID: "section:inbox", Label: "Questboard"},
+		{ID: "section:someday", Label: "Vault"},
+	}
+	for _, b := range s.Banners {
+		items = append(items, pickerItem{ID: "banner:" + b.ID, Label: "⚑ " + b.Name})
+	}
+	for i := range s.Projects {
+		if p := s.Projects[i]; !p.Archived {
+			label := p.Name
+			if p.BannerID != "" {
+				if b := findBannerIn(s, p.BannerID); b != nil {
+					label = b.Name + " / " + p.Name
+				}
+			}
+			items = append(items, pickerItem{ID: "project:" + p.ID, Label: label})
+		}
+	}
+	if ui.CountRunes(s) > 0 {
+		items = append(items, pickerItem{ID: "section:runes", Label: "Runes"})
+	}
+	if ui.CountLookouts(s) > 0 {
+		items = append(items, pickerItem{ID: "section:lookouts", Label: "Lookouts"})
+	}
+	return &Modal{Kind: ModalProjectPicker, Jump: true, PickerItems: items}
+}
+
+// findBannerIn is a store-scoped banner lookup for jumpModal (which has no
+// Model receiver).
+func findBannerIn(s *store.Store, id string) *model.Banner {
+	for i := range s.Banners {
+		if s.Banners[i].ID == id {
+			return &s.Banners[i]
+		}
+	}
+	return nil
+}
+
+// hallTargetFromJumpID turns a jump item's encoded ID into the hall cursor
+// target it selects.
+func hallTargetFromJumpID(id string) (cursorTarget, bool) {
+	switch {
+	case strings.HasPrefix(id, "section:"):
+		return cursorTarget{kind: ui.RowSection, section: strings.TrimPrefix(id, "section:")}, true
+	case strings.HasPrefix(id, "banner:"):
+		return cursorTarget{kind: ui.RowBanner, bannerID: strings.TrimPrefix(id, "banner:")}, true
+	case strings.HasPrefix(id, "project:"):
+		return cursorTarget{kind: ui.RowProject, projectID: strings.TrimPrefix(id, "project:")}, true
+	}
+	return cursorTarget{}, false
 }
 
 func helpModal() *Modal {
@@ -858,21 +1008,51 @@ func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 				mod.PickerIndex++
 			}
 		case "enter":
+			if mod.Jump {
+				if len(items) > 0 {
+					if t, ok := hallTargetFromJumpID(items[mod.PickerIndex].ID); ok {
+						m.selectHallTarget(t)
+					}
+				}
+				m.closeModal()
+				return nil
+			}
+			var toast tea.Cmd
 			if len(items) > 0 {
-				if target := m.findQuest(mod.TargetQuestID); target != nil {
-					target.ProjectID = items[mod.PickerIndex].ID
+				sel := items[mod.PickerIndex].ID
+				if mod.TargetProjectID != "" {
+					if p := m.findProject(mod.TargetProjectID); p != nil {
+						p.BannerID = sel // fly this campaign under the chosen banner
+						m.save()
+					}
+				} else if target := m.findQuest(mod.TargetQuestID); target != nil {
+					target.ProjectID = sel
+					// Filing inherits the campaign's Banner (its Area), so the quest
+					// still belongs to that sphere if it later leaves the campaign;
+					// dropping back to the Questboard clears it.
+					if p := m.findProject(sel); p != nil {
+						target.BannerID = p.BannerID
+					} else {
+						target.BannerID = ""
+					}
+					// Ctrl+A takes it up now (→ Camp); Ctrl+O leaves the status as-is.
+					if mod.TakeUp {
+						target.Status = model.StatusActive
+					}
 					target.UpdatedAt = time.Now()
 					m.save()
+					toast = m.showClipboardToastText(fileToastText(mod.TakeUp, m.projectName(sel)))
 				}
 			}
 			// Relocate the cursor to the source list's next item (or previous
-			// if it was last) rather than following the quest into its new
-			// home — see SourceRowIdx.
+			// if it was last) — auto-advance to the next thing to triage rather
+			// than following the quest into its new home — see SourceRowIdx.
 			srcIdx := mod.SourceRowIdx
 			m.closeModal()
 			if row, ok := nearestSelectableRow(m.currentRowScope(), srcIdx); ok {
 				m.setCursor(row)
 			}
+			return toast
 		case "esc":
 			m.closeModal()
 		case "backspace":
@@ -948,6 +1128,11 @@ func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 		// macOS terminals only deliver Option+↑/↓ as alt-arrows (Option+←/→ become
 		// word-motion), so accepting ↑/↓ here guarantees a working key in Sigils.
 		switch msg.String() {
+		case "f3":
+			// Reveal / hide the empty connection sections (see focusCodeLines).
+			m.showHiddenSigils = !m.showHiddenSigils
+			m.invalidateRender()
+			return nil
 		case "alt+right":
 			m.resizeColumnWidth(resizeStep)
 			return nil
@@ -1152,7 +1337,7 @@ func (m *Model) renderModal() string {
 		b.WriteString(ui.StyleSectionHeader.Render("Views"))
 		b.WriteString("\n")
 		fmt.Fprintf(&b, "%-11s%s\n", "Tavern", ui.StyleMuted.Render("the full outline — everything at once"))
-		fmt.Fprintf(&b, "%-11s%s\n", "Wilds", ui.StyleMuted.Render("Ctrl+G — a focused view of just your taken-up quests"))
+		fmt.Fprintf(&b, "%-11s%s\n", "Camp", ui.StyleMuted.Render("Ctrl+G — a focused view of just your taken-up quests"))
 		b.WriteString("\n")
 
 		b.WriteString(ui.StyleSectionHeader.Render("Sections"))
@@ -1218,7 +1403,17 @@ func (m *Model) renderModal() string {
 
 	case ModalProjectPicker:
 		var b strings.Builder
-		b.WriteString(ui.StyleTitle.Render("Move to campaign"))
+		title, noMatch := "Move to campaign", "  (no matching campaigns)"
+		if mod.TakeUp {
+			title = "Take up in which campaign?"
+		}
+		if mod.Jump {
+			title, noMatch = "Jump to…", "  (nothing matches)"
+		}
+		if mod.TargetProjectID != "" {
+			title, noMatch = "Fly under which banner?", "  (no matching banners)"
+		}
+		b.WriteString(ui.StyleTitle.Render(title))
 		b.WriteString("\n")
 		query := mod.PickerFilter
 		if query == "" {
@@ -1227,7 +1422,7 @@ func (m *Model) renderModal() string {
 		b.WriteString(ui.StyleMuted.Render("› ") + query + "\n\n")
 		items := mod.filteredPickerItems()
 		if len(items) == 0 {
-			b.WriteString(ui.StyleMuted.Render("  (no matching campaigns)") + "\n")
+			b.WriteString(ui.StyleMuted.Render(noMatch) + "\n")
 		}
 		pickerFirstLine, pickerItemCount = strings.Count(b.String(), "\n"), len(items)
 		for i, item := range items {
@@ -1236,9 +1431,16 @@ func (m *Model) renderModal() string {
 			if i == mod.PickerIndex {
 				line = ui.StyleSelectedRow.Render("> " + label)
 			}
+			if item.Hint != "" {
+				line += ui.StyleMuted.Render("  · " + item.Hint)
+			}
 			b.WriteString(line + "\n")
 		}
-		b.WriteString("\n" + ui.StyleMuted.Render("type to filter · ↑↓ choose · enter confirm · esc cancel"))
+		verb := "enter confirm"
+		if mod.TakeUp {
+			verb = "enter take up"
+		}
+		b.WriteString("\n" + ui.StyleMuted.Render("type to filter · ↑↓ choose · "+verb+" · esc cancel"))
 		content = b.String()
 
 	case ModalAgentPicker:
@@ -1422,9 +1624,11 @@ func (m *Model) viewQuestDetail() string {
 	glyphLead := glyphStyle.Render(glyph) + " "
 	m.focusTitleX = leftMargin + lipgloss.Width(mark) + lipgloss.Width(glyphLead)
 	m.focusTitleWidth = lipgloss.Width(ui.StyleTitle.Render(title))
-	// Constant width whether renaming or not (same as the Tavern list), so the
-	// chip after the title never shifts on select or as the caret moves.
-	titleText := m.constantWidthTitle(title, m.titleEditor, ui.StyleTitle, ui.StyleTitle)
+	// The title reads as a title, not body text: bold AND colored to match its
+	// type glyph (gold for main, blue for side) so it stands apart from the notes
+	// below. Constant width whether renaming or not, so the chip never shifts.
+	titleStyle := glyphStyle.Bold(true)
+	titleText := m.constantWidthTitle(title, m.titleEditor, titleStyle, titleStyle)
 	// The type/status/progress chip stays visible even while renaming — the chip
 	// reflects quest metadata, not the title text, so there's no reason to hide it.
 	titleLine := mark + glyphLead + titleText + ui.StyleMuted.Render(chip)
@@ -1686,6 +1890,7 @@ func (m *Model) renderFocusView() string {
 	if len(lines) <= avail {
 		topPad = vpad + (avail-len(lines))/2
 		m.focusScroll = 0
+		m.focusScrollMax = 0 // it all fits — the wheel can't scroll
 	} else {
 		// Re-center on the caret only when it moved (keyboard); a wheel scroll
 		// leaves the caret put and must stick.
@@ -1700,7 +1905,8 @@ func (m *Model) renderFocusView() string {
 				m.focusScroll = caretAbs - avail + 1 // below the window: bring it to the bottom edge
 			}
 		}
-		m.focusScroll = clampInt(m.focusScroll, 0, len(lines)-avail)
+		m.focusScrollMax = len(lines) - avail
+		m.focusScroll = clampInt(m.focusScroll, 0, m.focusScrollMax)
 		scroll = m.focusScroll
 	}
 
@@ -1803,18 +2009,21 @@ func (m *Model) handleFocusWheel(msg tea.MouseWheelMsg) tea.Cmd {
 		if mouse.X < m.focusBodyX {
 			section = "sigils"
 		}
-		next := m.sectionScroll[section] + delta
-		if next < 0 {
-			next = 0
-		}
-		if max := m.sectionMaxScroll[section]; next > max {
-			next = max
+		next := clampInt(m.sectionScroll[section]+delta, 0, m.sectionMaxScroll[section])
+		if next == m.sectionScroll[section] {
+			return nil // already at an end — do nothing (no flicker)
 		}
 		m.sectionScroll[section] = next
 		m.invalidateRender()
 		return nil
 	}
-	m.focusScroll += delta // section/campaign page viewport; renderFocusView clamps
+	// Section/campaign page: clamp against the last render's max so scrolling
+	// past an end is a true no-op instead of over-incrementing and re-rendering.
+	next := clampInt(m.focusScroll+delta, 0, m.focusScrollMax)
+	if next == m.focusScroll {
+		return nil
+	}
+	m.focusScroll = next
 	m.invalidateRender()
 	return nil
 }

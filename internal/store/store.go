@@ -13,12 +13,20 @@ import (
 // local JSON file. There is no DB at this scale — a personal todo list is a
 // few hundred quests at most, and a flat file stays human-readable.
 type Store struct {
+	// Banners are the Areas (persistent spheres) that group campaigns and hold
+	// loose ongoing quests. Absent in pre-Banner data — campaigns then load
+	// ungrouped (empty BannerID), and the user groups them later.
+	Banners  []model.Banner  `json:"banners,omitempty"`
 	Projects []model.Project `json:"projects"`
 	Quests   []model.Quest   `json:"quests"`
 	// WildsOrder is the user's manual ordering of quests in the Wilds view, by
 	// quest ID — independent of the per-campaign order in the Tavern. Quests
 	// not listed here fall in after, sorted by tier. Stale IDs are ignored.
 	WildsOrder []string `json:"wildsOrder,omitempty"`
+	// WildsSessions logs each focus session ventured out into the Wilds (quest,
+	// start, end, whether it completed). Absent in pre-focus-loop data — it then
+	// loads as an empty log. Feeds the "focused today" stat.
+	WildsSessions []model.WildsSession `json:"wildsSessions,omitempty"`
 	// Runes is the watched LaunchDarkly flag keys shown in the Tavern's Runes
 	// list — flags you're monitoring, not necessarily tied to one quest.
 	Runes []string `json:"runes,omitempty"`

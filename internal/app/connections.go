@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"image/color"
 	"strings"
 
@@ -207,6 +208,12 @@ func (m *Model) connectionIcons(q *model.Quest) string {
 	}
 	if len(icons) == 0 {
 		return ""
+	}
+	// Camp stays calm: collapse a quest's cluster of emblems to its first one
+	// plus a muted "+k" overflow, so an agenda row never becomes a row of icons.
+	// The full set still shows in the Tavern and the detail view.
+	if m.wilds && len(icons) > 1 {
+		return "  " + icons[0] + ui.StyleMuted.Render(fmt.Sprintf(" +%d", len(icons)-1))
 	}
 	return "  " + strings.Join(icons, " ")
 }

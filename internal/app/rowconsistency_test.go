@@ -9,10 +9,9 @@ import (
 	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 )
 
-// A quest row shows its inline connection emblems on EVERY surface that renders
-// it — outline, Tavern rail box, Tavern campaigns column, and the campaign /
-// section focus pages. Guards against the surfaces drifting apart again (see
-// docs/ui-consistency.md).
+// A quest row shows its inline connection emblems on every surface that renders
+// it — the outline (Camp / Tavern rooms) and the campaign / section focus pages.
+// Guards against the surfaces drifting apart again (see docs/ui-consistency.md).
 func TestQuestEmblemsOnEverySurface(t *testing.T) {
 	ui.Init(true)
 	st := &store.Store{
@@ -37,8 +36,6 @@ func TestQuestEmblemsOnEverySurface(t *testing.T) {
 			hasEmblem("outline", m.renderOutlineRowLine(orows, i, -1, -1, -1, 120, 0))
 		}
 	}
-	// Tavern rail box item.
-	hasEmblem("rail box", m.renderBoxItemLine([]ui.Row{qrow}, 0, -1, 120))
 	// Campaign / section focus page.
 	hasEmblem("focus page", m.renderFocusListRow(qrow, false))
 }

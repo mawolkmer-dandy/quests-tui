@@ -86,7 +86,7 @@ func TestWheelScrollSpawnsNoTrail(t *testing.T) {
 	}}
 	m := &Model{store: st, wilds: false, collapsedProjects: map[string]bool{}, collapsedSections: map[string]bool{},
 		sectionScroll: map[string]int{}, sectionMaxScroll: map[string]int{}}
-	m.width, m.height, m.leftColWidth = 120, 40, 40
+	m.width, m.height = 120, 40
 	m.cursorScreenX, m.cursorScreenY = 4, 3
 	// Put the cursor on the first quest of the (campaigns) column.
 	rows := m.visibleRows()
