@@ -23,3 +23,14 @@ Every TUI interaction must work **both** keyboard-first and via mouse — never 
 - For multi-pane layouts, add explicit hotkeys to switch the active column/pane and to jump to specific sections.
 - When adding any new pane/section/affordance, wire up both a keybinding (navigation, activation, section-jump, column-switch) and a mouse hit-test (click to focus/activate).
 - Verify both paths headlessly (tmux send-keys + mouse events).
+
+## Releases — always use the cut-release skill (never do it by hand)
+
+ANY request to release, ship, publish, cut/tag a version, push a release, or
+bump the version **must** go through the **`cut-release` skill** — load and
+follow it before touching git; do not improvise the steps. It first confirms
+the semver bump (major / minor / patch) with the user, then commits, tags with
+a real changelog, cuts the GitHub Release, re-hashes the tarball, and mirrors
+the Homebrew formula into the tap. Doing it manually has already shipped an
+incomplete release (no GitHub Release, bare tag message) — so don't: open the
+skill every time.
