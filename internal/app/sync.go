@@ -29,14 +29,20 @@ type PRStatus struct {
 	Status           string // "running" | "error" | "success" | "merged" | "closed"
 	CommentsResolved int
 	CommentsTotal    int
-	BaseRef          string    // the branch this PR targets (baseRefName)
-	HeadRef          string    // this PR's own branch (headRefName)
-	HeadSHA          string    // this PR's head commit oid — auto-find re-diffs only when it changes
-	MergedAt         time.Time // when the PR merged (zero if not merged) — ages tracks/runes it introduced
-	Title            string    // PR title, for the shareable copy-section list
-	Additions        int       // lines added, for the "+N/-M" churn suffix
-	Deletions        int       // lines removed
-	Draft            bool      // draft PR — a distinct emoji in the copied list
+	// Approvals is how many reviewers have approved; ReviewersTotal is everyone
+	// who's weighed in or is still requested (approvals + changes-requested +
+	// pending requests) — so the badge reads "1/2 approved". ReviewersTotal 0 =
+	// nobody's involved yet, so the approvals badge is hidden.
+	Approvals      int
+	ReviewersTotal int
+	BaseRef        string    // the branch this PR targets (baseRefName)
+	HeadRef        string    // this PR's own branch (headRefName)
+	HeadSHA        string    // this PR's head commit oid — auto-find re-diffs only when it changes
+	MergedAt       time.Time // when the PR merged (zero if not merged) — ages tracks/runes it introduced
+	Title          string    // PR title, for the shareable copy-section list
+	Additions      int       // lines added, for the "+N/-M" churn suffix
+	Deletions      int       // lines removed
+	Draft          bool      // draft PR — a distinct emoji in the copied list
 }
 
 // JiraStatus is a Jira issue's coarse status category.
@@ -230,6 +236,17 @@ type reviewThreadsResponse struct {
 						IsResolved bool `json:"isResolved"`
 					} `json:"nodes"`
 				} `json:"reviewThreads"`
+				// latestOpinionatedReviews is GitHub's own dedup — the latest
+				// APPROVED/CHANGES_REQUESTED per reviewer (COMMENTED-only reviewers,
+				// like Bugbot, are excluded).
+				LatestOpinionatedReviews struct {
+					Nodes []struct {
+						State string `json:"state"`
+					} `json:"nodes"`
+				} `json:"latestOpinionatedReviews"`
+				ReviewRequests struct {
+					TotalCount int `json:"totalCount"`
+				} `json:"reviewRequests"`
 			} `json:"pullRequest"`
 		} `json:"repository"`
 	} `json:"data"`
@@ -246,7 +263,7 @@ func fetchPRStatus(prCode, prRepo string) (PRStatus, bool) {
 	if !ok {
 		return PRStatus{}, false
 	}
-	resolved, total, ok := fetchPRReviewThreads(owner, repo, num)
+	resolved, total, approvals, reviewersTotal, ok := fetchPRReviews(owner, repo, num)
 	if !ok {
 		return PRStatus{}, false
 	}
@@ -255,6 +272,8 @@ func fetchPRStatus(prCode, prRepo string) (PRStatus, bool) {
 		Status:           status,
 		CommentsResolved: resolved,
 		CommentsTotal:    total,
+		Approvals:        approvals,
+		ReviewersTotal:   reviewersTotal,
 		BaseRef:          resp.BaseRefName,
 		HeadRef:          resp.HeadRefName,
 		HeadSHA:          resp.HeadRefOid,
@@ -319,9 +338,12 @@ func collapseRollup(entries []prRollupEntry) string {
 	return "success"
 }
 
-const reviewThreadsQuery = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}}}}}`
+const reviewThreadsQuery = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}}latestOpinionatedReviews(first:50){nodes{state}}reviewRequests{totalCount}}}}`
 
-func fetchPRReviewThreads(owner, repo, num string) (resolved, total int, ok bool) {
+// fetchPRReviews returns a PR's comment-thread resolution and its approval
+// tally: resolved/total comment threads, approvals, and reviewersTotal (approvals
+// + changes-requested + still-requested reviewers — the "N/M approved" denominator).
+func fetchPRReviews(owner, repo, num string) (resolved, total, approvals, reviewersTotal int, ok bool) {
 	out, err := runCmd("gh", "api", "graphql",
 		"-f", "query="+reviewThreadsQuery,
 		"-F", "owner="+owner,
@@ -329,19 +351,29 @@ func fetchPRReviewThreads(owner, repo, num string) (resolved, total int, ok bool
 		"-F", "number="+num,
 	)
 	if err != nil {
-		return 0, 0, false
+		return 0, 0, 0, 0, false
 	}
 	var resp reviewThreadsResponse
 	if err := json.Unmarshal(out, &resp); err != nil {
-		return 0, 0, false
+		return 0, 0, 0, 0, false
 	}
-	nodes := resp.Data.Repository.PullRequest.ReviewThreads.Nodes
-	for _, n := range nodes {
+	pr := resp.Data.Repository.PullRequest
+	for _, n := range pr.ReviewThreads.Nodes {
 		if n.IsResolved {
 			resolved++
 		}
 	}
-	return resolved, len(nodes), true
+	changesRequested := 0
+	for _, r := range pr.LatestOpinionatedReviews.Nodes {
+		switch r.State {
+		case "APPROVED":
+			approvals++
+		case "CHANGES_REQUESTED":
+			changesRequested++
+		}
+	}
+	reviewersTotal = approvals + changesRequested + pr.ReviewRequests.TotalCount
+	return resolved, len(pr.ReviewThreads.Nodes), approvals, reviewersTotal, true
 }
 
 // --- Jira fetch -----------------------------------------------------------
@@ -505,6 +537,43 @@ func (m *Model) prStack(prs []model.PRLink) []prStackNode {
 	return nodes
 }
 
+// trailItem is one display line of a rendered PR stack: a PR (node) or the
+// "main" trunk line closing a stack (isMain). marker is its tree connector.
+type trailItem struct {
+	node   prStackNode
+	marker string
+	isMain bool
+}
+
+// stackDisplay reorders prStack's flat, root-first nodes for DISPLAY the way
+// `gh stack view` reads: the TOP of the stack (the head, furthest from main)
+// first, down to the parent PR that targets main, then a "main" trunk line. Each
+// PR in a real stack gets the "├" connector; the trunk line gets "└"; a lone
+// (unstacked) PR keeps no connector and no trunk line. Multiple independent
+// stacks on one quest are each ordered and closed on their own.
+func stackDisplay(nodes []prStackNode) []trailItem {
+	var out []trailItem
+	i := 0
+	for i < len(nodes) {
+		// A component runs until the next root (depth 0).
+		j := i + 1
+		for j < len(nodes) && nodes[j].depth != 0 {
+			j++
+		}
+		comp := nodes[i:j]
+		if len(comp) == 1 && !comp[0].stacked {
+			out = append(out, trailItem{node: comp[0]}) // lone PR
+		} else {
+			for k := len(comp) - 1; k >= 0; k-- { // head first, root last
+				out = append(out, trailItem{node: comp[k], marker: ui.GlyphStackBranchMid})
+			}
+			out = append(out, trailItem{isMain: true, marker: ui.GlyphStackBranchEnd})
+		}
+		i = j
+	}
+	return out
+}
+
 // --- rendering ------------------------------------------------------------
 
 // prStatusWord is the expanded-view word for a PR's state: merged→"merged",
@@ -546,19 +615,23 @@ func (m *Model) jiraStatusWord(code string) string {
 	}
 }
 
-// prCommentsText is the always-shown "<resolved>/<total> comments" for a PR,
-// including "0/0" when there are none (or before it's synced). A PR is fully
-// addressed when the two numbers match.
-func (m *Model) prCommentsText(code string) string {
-	st := m.prStatus[code]
-	return fmt.Sprintf("%d/%d comments", st.CommentsResolved, st.CommentsTotal)
-}
-
 // prCommentsCount is the compact "<resolved>/<total>" for the list inline,
 // always shown (0/0 included).
 func (m *Model) prCommentsCount(code string) string {
 	st := m.prStatus[code]
 	return fmt.Sprintf("%d/%d", st.CommentsResolved, st.CommentsTotal)
+}
+
+// prReviewBadges is the muted, icon-led review summary for a PR: the comment
+// resolution (󰆂 R/T) and, when any reviewer is involved, the approval tally
+// (󰀈 A/M) — icons stand in for the "comments"/"approved" words to save space.
+func (m *Model) prReviewBadges(code string) string {
+	st := m.prStatus[code]
+	out := ui.GlyphPRComment + " " + fmt.Sprintf("%d/%d", st.CommentsResolved, st.CommentsTotal)
+	if st.ReviewersTotal > 0 {
+		out += " · " + ui.GlyphPRApproval + " " + fmt.Sprintf("%d/%d", st.Approvals, st.ReviewersTotal)
+	}
+	return out
 }
 
 // jiraGlyph is the filling-circle status glyph for a Jira code: a pulsing amber
@@ -711,19 +784,6 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn, baseX int) []string {
 
 	stack := m.prStack(q.PRs)
 
-	// Pad every code to the widest one so the status text after it lines up.
-	codeW := 0
-	for _, code := range q.JiraCodes {
-		if w := lipgloss.Width(code); w > codeW {
-			codeW = w
-		}
-	}
-	for _, node := range stack {
-		if w := lipgloss.Width(node.link.Code); w > codeW {
-			codeW = w
-		}
-	}
-
 	var lines []string
 	ln := startLn
 
@@ -737,9 +797,10 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn, baseX int) []string {
 	// the section loops read the same; drop it if the layout is ever reworked.
 	hintFor := func(li int, kind linkKind) string { return "" }
 
-	// addLink emits one aligned link line: a fixed-width stack gutter, the
-	// (already-styled) status glyph, the padded code, then the status text. The
-	// clickable span and cursor target both start at the code.
+	// addLink emits one link line: a fixed-width stack gutter, the (already-styled)
+	// status glyph, the code, then the status text right after it (like the other
+	// sigils — no column padding). The clickable span and cursor target start at
+	// the code.
 	// focusGutter is the 2-col left gutter for a sigil line: the accent "› "
 	// cursor mark when this link is focused (matching the body/outline), else
 	// the provided fallback (a stack marker or blank).
@@ -753,10 +814,9 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn, baseX int) []string {
 	addLink := func(marker, glyph, code, text string, kind linkKind, url string) {
 		li := len(m.focusLinks)
 		x := baseX + gutterW + lipgloss.Width(glyph) + 1
-		codePadded := code + strings.Repeat(" ", codeW-lipgloss.Width(code))
 		// The code (Jira/PR id) reads white like the NPC label and rune keys;
 		// only the trailing status word is muted.
-		body := ui.StyleName.Render(codePadded) + "  " + text
+		body := ui.StyleName.Render(code) + "  " + text
 		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x, x1: x + lipgloss.Width(body), url: url})
 		m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: kind, code: code, url: url})
 		if m.focusLinkIdx == li {
@@ -787,19 +847,26 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn, baseX int) []string {
 	meta("Type", questTypeLabel(q))
 	meta("Status", m.questStatusLabel(q))
 	meta("Priority", questPriorityLabel(q))
+	meta("Schedule", ui.QuestScheduleMeta(q, time.Now()))
 	meta("Created", agoStr(q.CreatedAt))
 	meta("Updated", agoStr(q.UpdatedAt))
 
-	// sectionHeader emits a blank spacer then a muted "emblem Name" line. When
-	// the section has items (count>0) the header is a focus stop that copies the
-	// whole section as a shareable list ("c"); empty sections stay non-navigable.
-	sectionHeader := func(glyph, name, sectionKey string, count int) {
+	// sectionHeader emits a blank spacer then a muted "emblem Name" line. When the
+	// section has items (count>0) the header is a focus stop that copies the whole
+	// section as a shareable list ("c"). An empty section instead shows emptyHint
+	// (already styled) on the next line — how to fill it ("paste a Jira link", or a
+	// "finding…" loading note while a sync scans the trails).
+	sectionHeader := func(glyph, name, sectionKey string, count int, emptyHint string) {
 		lines = append(lines, "") // spacer (non-navigable)
 		ln++
 		hdr := ui.StyleMuted.Render(glyph + " " + name)
 		if count == 0 {
 			lines = append(lines, agentPrefix+hdr)
 			ln++
+			if emptyHint != "" {
+				lines = append(lines, agentPrefix+"  "+emptyHint)
+				ln++
+			}
 			return
 		}
 		li := len(m.focusLinks)
@@ -809,11 +876,30 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn, baseX int) []string {
 		}
 		x0 := baseX + gutterW
 		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(glyph+" "+name), url: copySectionSentinel + sectionKey})
-		lines = append(lines, linePrefix(li)+hdr+hintFor(li, linkCopySection))
+		line := linePrefix(li) + hdr + hintFor(li, linkCopySection)
+		// The found-from-trails sections (Trails / Runes / Tracks) offer a resync
+		// affordance (click it, or "r") — hidden unless the line is selected, so it
+		// never clutters. While a resync is in flight it's a spinner for feedback.
+		if isTrailResyncSection(sectionKey) && (m.focusLinkIdx == li || m.findingQuestID == q.ID) {
+			icon := " " + m.resyncAffordance(q.ID)
+			ix0 := x0 + lipgloss.Width(glyph+" "+name) + 1
+			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: ix0, x1: ix0 + lipgloss.Width(icon), url: resyncSentinel})
+			line += icon
+		}
+		lines = append(lines, line)
 		ln++
 	}
+	// foundHint is the empty-state line for a "found from trails" section (Runes /
+	// Tracks): a pulsing "finding…" note while this quest's trails are being
+	// scanned, else a muted note that it fills from linked PRs.
+	foundHint := func(noun string) string {
+		if m.findingQuestID == q.ID {
+			return m.pulseStyle().Render(ui.GlyphFetching + " finding " + noun + " in trails…")
+		}
+		return ui.StyleMuted.Render(noun + " are found in your trails")
+	}
 	// NPCs (pinned agents).
-	sectionHeader(ui.GlyphConnNPC, "NPCs", secNPCs, len(q.AgentWorkspaces))
+	sectionHeader(ui.GlyphConnNPC, "NPCs", secNPCs, len(q.AgentWorkspaces), "")
 	for _, id := range q.AgentWorkspaces {
 		li := len(m.focusLinks)
 		state := m.agentState(id)
@@ -843,49 +929,37 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn, baseX int) []string {
 		ln++
 	}
 
-	// Scrolls (Jira) — hidden when empty; paste a Jira link into the body to add.
+	// Scrolls (Jira) — hidden in the compact view when empty; paste a Jira link.
 	if len(q.JiraCodes) > 0 || m.showHiddenSigils {
-		sectionHeader(ui.GlyphConnScroll, "Scrolls", secScrolls, len(q.JiraCodes))
+		sectionHeader(ui.GlyphConnScroll, "Scrolls", secScrolls, len(q.JiraCodes), ui.StyleMuted.Render("paste a Jira link in the notes"))
 		for _, code := range q.JiraCodes {
 			text := ui.StyleMuted.Render(m.jiraStatusWord(code))
 			addLink("", m.jiraGlyph(code), code, text, linkJira, jiraURL(code, m.jiraBaseURL))
 		}
 	}
 
-	// Trails (GitHub PRs) — hidden when empty; paste a PR link into the body to add.
+	// Trails (GitHub PRs) — hidden in the compact view when empty. Top of the
+	// stack first, closed by a "└ main" trunk line (like `gh stack view`);
+	// tracks/runes are found from these on sync.
 	if len(stack) > 0 || m.showHiddenSigils {
-		sectionHeader(ui.GlyphConnTrail, "Trails", secTrails, len(stack))
-		for i, node := range stack {
-			pr := node.link
+		sectionHeader(ui.GlyphConnTrail, "Trails", secTrails, len(stack), ui.StyleMuted.Render("paste a PR link in the notes"))
+		for _, d := range stackDisplay(stack) {
+			if d.isMain {
+				lines = append(lines, pad+ui.StyleMuted.Render(d.marker+" main"))
+				ln++
+				continue
+			}
+			pr := d.node.link
 			glyph, _ := m.prGlyph(pr.Code)
-			text := ui.StyleMuted.Render(m.prStatusWord(pr.Code) + " · " + m.prCommentsText(pr.Code))
-			marker := ""
-			if node.stacked {
-				marker = ui.GlyphStackBranchMid
-				if i == len(stack)-1 || stack[i+1].depth == 0 {
-					marker = ui.GlyphStackBranchEnd
-				}
-			}
-			addLink(marker, glyph, pr.Code, text, linkPR, prURL(pr.Repo, pr.Code))
-		}
-		if len(stack) > 0 {
-			// Find affordance — scan the Trails for Tracks (events) + flags/issues.
-			li := len(m.focusLinks)
-			m.focusLinks = append(m.focusLinks, focusLink{line: ln, kind: linkFind})
-			if m.focusLinkIdx == li {
-				m.focusCaretLine = ln
-			}
-			label := ui.GlyphFind + " find tracks in trails"
-			x0 := baseX + gutterW + 2
-			m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(label), url: findSentinel})
-			lines = append(lines, linePrefix(li)+"  "+ui.StyleMuted.Render(label)+hintFor(li, linkFind))
-			ln++
+			text := ui.StyleMuted.Render(m.prStatusWord(pr.Code) + " · " + m.prReviewBadges(pr.Code))
+			addLink(d.marker, glyph, pr.Code, text, linkPR, prURL(pr.Repo, pr.Code))
 		}
 	}
 
-	// Runes (LaunchDarkly flags) — hidden when empty; found from Trails.
+	// Runes (LaunchDarkly flags) — found from Trails on sync; hidden in the
+	// compact view when empty (even while a find is loading).
 	if len(q.Runes) > 0 || m.showHiddenSigils {
-		sectionHeader(ui.GlyphConnRune, "Runes", secRunes, len(q.Runes))
+		sectionHeader(ui.GlyphConnRune, "Runes", secRunes, len(q.Runes), foundHint("runes"))
 		for _, key := range q.Runes {
 			li := len(m.focusLinks)
 			url := ldFlagURL(m.ldProject, m.ldEnv, key)
@@ -904,11 +978,11 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn, baseX int) []string {
 		}
 	}
 
-	// Tracks (found from the Trails — no manual entry) — hidden when empty unless
-	// there are dismissed tracks to restore. The glyph is colored by whether the
-	// event's source PR is merged (in production) or still pending.
+	// Tracks (found from the Trails — no manual entry) — hidden in the compact
+	// view when empty (even while loading), unless there are dismissed to restore.
+	// The glyph is colored by whether the source PR is merged (live) or pending.
 	if len(q.Tracks) > 0 || len(q.DismissedTracks) > 0 || m.showHiddenSigils {
-		sectionHeader(ui.GlyphConnTrack, "Tracks", secTracks, len(q.Tracks))
+		sectionHeader(ui.GlyphConnTrack, "Tracks", secTracks, len(q.Tracks), foundHint("tracks"))
 		for _, t := range q.Tracks {
 			li := len(m.focusLinks)
 			glyph := m.trackGlyph(t)
@@ -950,9 +1024,10 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn, baseX int) []string {
 		}
 	}
 
-	// Lookouts (usage dashboards) — hidden when empty; paste a dashboard URL to add.
+	// Lookouts (usage dashboards) — hidden in the compact view when empty; paste
+	// an analytics dashboard URL to add.
 	if len(q.Lookouts) > 0 || m.showHiddenSigils {
-		sectionHeader(ui.GlyphConnLookout, "Lookouts", secLookouts, len(q.Lookouts))
+		sectionHeader(ui.GlyphConnLookout, "Lookouts", secLookouts, len(q.Lookouts), ui.StyleMuted.Render("paste an Amplitude, Hex, or Fullstory link"))
 		for _, l := range q.Lookouts {
 			li := len(m.focusLinks)
 			glyph := lookoutGlyph()
@@ -974,23 +1049,28 @@ func (m *Model) focusCodeLines(q *model.Quest, startLn, baseX int) []string {
 		}
 	}
 
-	// A muted, non-navigable hint to reveal/hide the empty connection sections
-	// (F3). Only shown when there's actually something hidden to reveal.
+	// A muted toggle to reveal / hide the empty connection sections. Keyboard-
+	// non-navigable (the link cursor skips it), but F3 or a click both flip it.
+	// Only shown when there's actually something hidden to reveal.
 	if m.sigilsHaveHidden(q) {
 		label := "＋ show hidden sigils"
 		if m.showHiddenSigils {
 			label = "－ hide empty sigils"
 		}
 		lines = append(lines, "")
-		lines = append(lines, agentPrefix+ui.StyleMuted.Render(label+"  F3"))
-		ln += 2
+		ln++
+		full := label + "  F3"
+		x0 := baseX + gutterW
+		m.focusCodeSpans = append(m.focusCodeSpans, focusCodeSpan{line: ln, x0: x0, x1: x0 + lipgloss.Width(full), url: toggleSigilsSentinel})
+		lines = append(lines, agentPrefix+ui.StyleMuted.Render(full))
+		ln++
 	}
 	return lines
 }
 
 // sigilsHaveHidden reports whether any hideable connection section is currently
-// empty — i.e. there's something for Ctrl+E to reveal. NPCs is excluded: it
-// always shows (its picker is the only way to add an agent).
+// empty — i.e. there's something for F3 to reveal. NPCs is excluded: it always
+// shows (its picker is the only way to add an agent).
 func (m *Model) sigilsHaveHidden(q *model.Quest) bool {
 	return len(q.JiraCodes) == 0 || len(m.prStack(q.PRs)) == 0 || len(q.Runes) == 0 ||
 		(len(q.Tracks) == 0 && len(q.DismissedTracks) == 0) || len(q.Lookouts) == 0
@@ -1001,13 +1081,69 @@ func (m *Model) sigilsHaveHidden(q *model.Quest) bool {
 // handleFocusMouse).
 const addAgentSentinel = "\x00add-agent"
 
-// forgeSentinel marks the "write the Lookout's plans" line; findSentinel marks
-// the "find tracks in trails" line; restoreSentinel marks the "N dismissed"
-// line — so a click there writes the plans / finds / restores, rather than
-// opening a browser.
+// forgeSentinel marks the "write the Lookout's plans" line; restoreSentinel
+// marks the "N dismissed" line — so a click there writes the plans / restores,
+// rather than opening a browser.
 const forgeSentinel = "\x00write-plans"
-const findSentinel = "\x00find-tracks"
 const restoreSentinel = "\x00restore-tracks"
+
+// resyncSentinel marks the resync affordance on a focused Trails header — a
+// click there refetches the quest's PR statuses and re-scans the trails for new
+// tracks/runes (e.g. a flag added in a fresh commit), rather than waiting for the
+// next sync pass.
+const resyncSentinel = "\x00resync-trails"
+
+// toggleSigilsSentinel marks the "show/hide hidden sigils" line, so clicking it
+// toggles the empty connection sections (the mouse twin of F3) rather than
+// opening a browser.
+const toggleSigilsSentinel = "\x00toggle-sigils"
+
+// resyncAffordance is the Trails resync control's label: while this quest is
+// mid-resync it's a spinning "resyncing…", otherwise the "↻ resync" button
+// followed by how long ago the data was last synced, so the freshness lives
+// right next to the button wherever it shows (room header or detail header).
+func (m *Model) resyncAffordance(questID string) string {
+	if m.findingQuestID == questID {
+		return ui.StyleRunning.Render(m.spin(spinnerAgent) + " resyncing…")
+	}
+	return ui.StyleSide.Render("↻ resync") + ui.StyleMuted.Render(" · "+syncedAgo(m.lastSyncAt))
+}
+
+// syncedAgo is the persistent "last synced" label for the Trails view — counts
+// up in seconds, then minutes/hours, so you can see how stale the data is. The
+// sync tick (and any manual resync) refreshes lastSyncAt.
+func syncedAgo(t time.Time) string {
+	if t.IsZero() {
+		return "not synced yet"
+	}
+	d := time.Since(t)
+	switch {
+	case d < 2*time.Second:
+		return "synced just now"
+	case d < time.Minute:
+		return fmt.Sprintf("synced %ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("synced %dm ago", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("synced %dh ago", int(d.Hours()))
+	}
+}
+
+// resyncTrails forces an immediate refresh of a quest's trails: refetch each
+// linked PR's status (CI / comments / new head SHA) and re-scan the PRs for
+// tracks and runes. Normally this happens automatically on the sync tick (every
+// sync_interval_secs, default 60s); this is the manual "do it now" for when you
+// just pushed a commit and don't want to wait.
+func (m *Model) resyncTrails(q *model.Quest) tea.Cmd {
+	if len(q.PRs) == 0 {
+		return nil
+	}
+	codes := make([]string, 0, len(q.PRs))
+	for _, pr := range q.PRs {
+		codes = append(codes, pr.Code)
+	}
+	return tea.Batch(m.syncNow(codes), m.findTracksInTrails(q.ID), m.maybeStartSpinner())
+}
 
 // agentFocusPrefix marks a pinned-agent line's clickable span; the herdr
 // terminal id follows the prefix, so a click focuses that agent (matching
@@ -1044,9 +1180,6 @@ func (m *Model) focusLinkCount(q *model.Quest) int {
 	// Affordances.
 	if len(q.AgentWorkspaces) == 0 {
 		n++ // the "+ add an NPC" affordance (only when none pinned)
-	}
-	if trails > 0 {
-		n++ // the find affordance (only when there are trails)
 	}
 	if len(q.Tracks) > 0 {
 		n++ // the "write the Lookout's plans" affordance (only with tracks)

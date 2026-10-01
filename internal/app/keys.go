@@ -48,6 +48,7 @@ type KeyMap struct {
 	MuteSound       key.Binding
 	Find            key.Binding
 	Rename          key.Binding
+	Schedule        key.Binding
 	Quit            key.Binding
 }
 
@@ -76,6 +77,7 @@ var Keys = KeyMap{
 	MuteSound:       key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("Ctrl+S", "mute / unmute sound")),
 	Find:            key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("Ctrl+R", "find tracks in linked trails")),
 	Rename:          key.NewBinding(key.WithKeys("f2"), key.WithHelp("F2", "rename title")),
+	Schedule:        key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("Ctrl+E", "schedule (muster / rite)")),
 	Quit:            key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("Ctrl+C", "quit")),
 }
 
@@ -131,7 +133,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // intentionally omitted, they're standard and were just padding out the list.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.ToggleActive, k.ToggleDone, k.ToggleImportant, k.ToggleVault, k.ToggleType, k.MoveProject},
+		{k.ToggleActive, k.ToggleDone, k.ToggleImportant, k.ToggleVault, k.ToggleType, k.MoveProject, k.Schedule},
 		{k.Delete, k.Undo, k.SetOut, k.Search, k.Help, k.ToggleHints, k.MuteSound, k.Find, k.Quit},
 	}
 }

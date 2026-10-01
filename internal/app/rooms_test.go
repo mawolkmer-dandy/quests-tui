@@ -108,7 +108,7 @@ func TestHallBodyScrolls(t *testing.T) {
 func TestJumpNavigatesHall(t *testing.T) {
 	m := roomsModel()
 	_ = frame(m)
-	m.modal = jumpModal(m.store)
+	m.modal = searchModal(m.store)
 	idx := -1
 	for i, it := range m.modal.PickerItems {
 		if it.ID == "project:p1" {

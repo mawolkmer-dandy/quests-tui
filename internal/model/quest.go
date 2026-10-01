@@ -90,6 +90,17 @@ type Quest struct {
 	CompletedAt *time.Time `json:"completedAt,omitempty"`
 	VaultedAt   *time.Time `json:"vaultedAt,omitempty"` // when the quest was moved to the Vault; drives the Vault's day timeline
 
+	// Muster is the quest's scheduled "when" date — the day it reports to Camp. A
+	// quest whose Muster is today or earlier surfaces in Camp as a "called" quest
+	// (still inactive until taken up); nil = unscheduled. It is NOT a deadline;
+	// stored date-only. For a rite (see Recurrence), Muster is the next occurrence
+	// and advances each cycle.
+	Muster *time.Time `json:"muster,omitempty"`
+
+	// Recurrence, when set, makes this a "rite" — a recurring quest that recycles
+	// its Muster to the next occurrence on completion instead of finishing once.
+	Recurrence *Recurrence `json:"recurrence,omitempty"`
+
 	// Integration links, captured from URLs pasted into the body (see
 	// internal/model/links.go and internal/app/links.go). JiraCodes holds every
 	// linked Jira issue and PRs every linked GitHub PR, each in the order it was
@@ -148,6 +159,75 @@ type Quest struct {
 	JiraCode string `json:"jiraCode,omitempty"` // deprecated: migrated into JiraCodes
 	PRCode   string `json:"prCode,omitempty"`   // deprecated: migrated into PRs
 	PRRepo   string `json:"prRepo,omitempty"`   // deprecated: migrated into PRs
+}
+
+// RecurUnit is the cadence unit of a rite.
+type RecurUnit string
+
+const (
+	RecurDaily  RecurUnit = "day"
+	RecurWeekly RecurUnit = "week"
+)
+
+// Recurrence makes a quest a "rite": it recurs on a cadence instead of being a
+// one-off. Every is the unit; Interval is how many units between occurrences (0
+// means 1). For a weekly rite, Weekdays optionally pins which days fire (empty =
+// the same weekday as the current Muster). nil Recurrence = a one-off quest.
+type Recurrence struct {
+	Every    RecurUnit      `json:"every"`
+	Interval int            `json:"interval,omitempty"`
+	Weekdays []time.Weekday `json:"weekdays,omitempty"`
+}
+
+// IsRite reports whether the quest recurs.
+func (q *Quest) IsRite() bool { return q.Recurrence != nil }
+
+// Called reports whether the quest is "called" to Camp as of day — its Muster is
+// on or before day (an overdue muster still counts, rolling forward). False when
+// it has no Muster.
+func (q *Quest) Called(day time.Time) bool {
+	return q.Muster != nil && !DateOnly(*q.Muster).After(DateOnly(day))
+}
+
+// DateOnly reduces t to its calendar date (the Y/M/D as seen in t's own
+// location) anchored at UTC midnight — a timezone-independent "civil date". This
+// lets a muster stored in any zone compare correctly against "now": both collapse
+// to the same civil date, so a muster dated today never reads as overdue merely
+// because it was written at UTC midnight while now is in a behind-UTC zone.
+func DateOnly(t time.Time) time.Time {
+	y, mo, d := t.Date()
+	return time.Date(y, mo, d, 0, 0, 0, 0, time.UTC)
+}
+
+// EffectiveInterval returns the interval with its default applied (minimum 1).
+func (r *Recurrence) EffectiveInterval() int {
+	if r.Interval < 1 {
+		return 1
+	}
+	return r.Interval
+}
+
+// Next returns the first occurrence strictly after `from`, date-only. A weekly
+// rite with Weekdays set returns the next listed weekday after `from`; otherwise
+// it steps forward by Interval days (daily) or weeks (weekly).
+func (r *Recurrence) Next(from time.Time) time.Time {
+	d := DateOnly(from)
+	if r.Every == RecurWeekly {
+		if len(r.Weekdays) > 0 {
+			want := map[time.Weekday]bool{}
+			for _, w := range r.Weekdays {
+				want[w] = true
+			}
+			for i := 1; i <= 7; i++ {
+				if nd := d.AddDate(0, 0, i); want[nd.Weekday()] {
+					return nd
+				}
+			}
+			return d.AddDate(0, 0, 7) // unreachable when Weekdays is non-empty
+		}
+		return d.AddDate(0, 0, 7*r.EffectiveInterval())
+	}
+	return d.AddDate(0, 0, r.EffectiveInterval())
 }
 
 // PRLink is one linked GitHub pull request: its short code ("#47477") and the

@@ -14,14 +14,6 @@ import (
 )
 
 func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
-	// While the search bar is open, it owns its keys (typing, facet cycling,
-	// close); everything else falls through to the normal handling below so
-	// you can still navigate and act on the filtered results.
-	if m.searchOpen {
-		if cmd, handled := m.handleSearchBarKey(msg); handled {
-			return cmd
-		}
-	}
 	// An inline Lookout rename owns every key while it's open (same as in the
 	// detail view — see handleLookoutRenameKey).
 	if cmd, handled := m.handleLookoutRenameKey(msg); handled {
@@ -32,8 +24,11 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.commitEdit()
 		m.pushModal(helpModal())
 		return nil
-	case key.Matches(msg, Keys.Search):
-		m.openSearch()
+	// Ctrl+F is Search — the unified fuzzy finder over rooms, banners, campaigns,
+	// and quests (replaces the old inline filter bar and the jump modal).
+	case m.inTavern() && key.Matches(msg, Keys.Search):
+		m.commitEdit()
+		m.pushModal(searchModal(m.store))
 		return nil
 	case key.Matches(msg, Keys.ToggleHints):
 		m.hideHoverTips = !m.hideHoverTips
@@ -58,11 +53,9 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.makeCamp(false) // step back out of the Wilds to Camp
 	case msg.Code == tea.KeyEsc && m.wilds:
 		return m.setWilds(false)
-	// Ctrl+P fuzzy-jumps to any room / banner / campaign in the hall.
-	case m.inTavern() && msg.String() == "ctrl+p":
-		m.commitEdit()
-		m.pushModal(jumpModal(m.store))
-		return nil
+	// Ctrl+L links the current campaign to its next saga chapter.
+	case m.inTavern() && msg.String() == "ctrl+l":
+		return m.openSagaPicker()
 	// Ctrl+1 / Ctrl+2 move focus between the sidebar (hall) and the content pane.
 	case m.inTavern() && msg.String() == "ctrl+1":
 		m.returnToHall()
@@ -84,13 +77,32 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	case m.inTavern() && m.hallFocus && key.Matches(msg, Keys.Down):
 		m.moveHallCursor(1)
 		return nil
+	// Shift+↑/↓ reorders the selected banner in the sidebar (like reordering
+	// quests/campaigns in the pane).
+	case m.inTavern() && m.hallFocus && m.hallCursor.kind == ui.RowBanner && key.Matches(msg, Keys.MoveUp):
+		m.moveBanner(-1)
+		return nil
+	case m.inTavern() && m.hallFocus && m.hallCursor.kind == ui.RowBanner && key.Matches(msg, Keys.MoveDown):
+		m.moveBanner(1)
+		return nil
+	// Ctrl+P cycles a campaign's priority from the hall (it works on a quest in
+	// the pane via handleRowKey; the hall selection isn't the pane cursor).
+	case m.inTavern() && m.hallFocus && m.hallCursor.kind == ui.RowProject && key.Matches(msg, Keys.ToggleImportant):
+		m.cycleProjectPriority(m.hallCursor.projectID)
+		return nil
 	case m.inTavern() && m.hallFocus && (key.Matches(msg, Keys.Tab) || key.Matches(msg, Keys.Right)):
 		m.diveIntoPane()
 		return nil
 	case m.inTavern() && m.hallFocus && key.Matches(msg, Keys.Enter):
 		return m.hallCreate()
+	// Ctrl+X in the hall confirms deleting whatever's selected there — a banner
+	// (its campaigns/loose quests survive, ungrouped) or a campaign — acting on
+	// the hall selection, not the pane cursor beneath it.
+	case m.inTavern() && m.hallFocus && key.Matches(msg, Keys.Delete):
+		m.openDeleteModal(m.hallCursor)
+		return nil
 	case m.inTavern() && !m.hallFocus && msg.Code == tea.KeyEsc:
-		m.returnToHall()
+		m.escFromPane()
 		return nil
 	case key.Matches(msg, Keys.Up):
 		m.moveCursor(-1)
@@ -120,32 +132,16 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 // handleRowKey handles every action keyed off whatever m.cursor currently
-// targets — shared by the main outline and a focused campaign's quest list
-// (see updateModal's ModalCampaignDetail case), so Tab/Enter/Ctrl+D/Ctrl+X/
-// etc. behave identically in both places.
+// targets — shared by the Tavern pane and a focused section page, so
+// Tab/Enter/Ctrl+D/Ctrl+X/etc. behave identically in both places.
 func (m *Model) handleRowKey(msg tea.KeyPressMsg) tea.Cmd {
-	if m.confirmDeleteID != "" {
-		target := m.cursor
-		id := m.confirmDeleteID
-		m.confirmDeleteID = ""
-		if msg.String() == "y" {
-			switch target.kind {
-			case ui.RowQuest:
-				m.removeCurrentRow(func() { m.deleteQuestByID(id) })
-			case ui.RowProject:
-				m.removeCurrentRow(func() { m.deleteProjectByID(id) })
-			case ui.RowRune:
-				qid := target.questID
-				m.removeCurrentRow(func() { m.detachRuneFromQuest(qid, id) })
-			case ui.RowLookout:
-				qid := target.questID
-				m.removeCurrentRow(func() { m.removeLookout(qid, id) })
-			case ui.RowTrack:
-				qid := target.questID
-				m.removeCurrentRow(func() { m.dismissTrack(qid, id) })
-			}
+	// A campaign notes line intercepts its editing keys (split/merge, typing,
+	// copy-paste) for the shared body editor; navigation keys fall through to
+	// the ordinary pane cursor below.
+	if m.cursor.kind == ui.RowBodyLine {
+		if cmd, handled := m.handleCampaignNoteEditKey(msg); handled {
+			return cmd
 		}
-		return nil
 	}
 
 	switch {
@@ -176,8 +172,10 @@ func (m *Model) handleRowKey(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, Keys.MoveProject):
 		m.openProjectPicker()
 		return nil
+	case key.Matches(msg, Keys.Schedule):
+		return m.openSchedulePicker()
 	case key.Matches(msg, Keys.Delete):
-		m.openConfirmDelete()
+		m.openDeleteModal(m.cursor)
 		return nil
 	case key.Matches(msg, Keys.Find):
 		if m.cursor.kind == ui.RowQuest {
@@ -195,6 +193,15 @@ func (m *Model) handleRowKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.copyToClipboard(ldFlagURL(m.ldProject, m.ldEnv, m.cursor.runeKey), "link copied")
 	case msg.String() == "c" && m.cursor.kind == ui.RowLookout:
 		return m.copyToClipboard(m.cursor.lookoutURL, "link copied")
+	case msg.String() == "c" && m.cursor.kind == ui.RowTrail:
+		return m.copyToClipboard(prURL(m.cursor.prRepo, m.cursor.prCode), "link copied")
+	case msg.String() == "r" && isTrailResyncRow(m.cursor.kind):
+		// Resync this quest's trails from any room (refetch CI/comments/approvals,
+		// re-scan for tracks/runes). RowLookout keeps "r" for rename (handled above).
+		if q := m.findQuest(m.cursor.questID); q != nil {
+			return m.resyncTrails(q)
+		}
+		return nil
 	}
 
 	// Everything else — printable characters, arrows, Home/End, Ctrl+A/E/K/U/W
@@ -216,12 +223,23 @@ func (m *Model) handleRowKey(msg tea.KeyPressMsg) tea.Cmd {
 // ghost — the keyboard "hop". (The mouse wheel scrolls the viewport instead and
 // never touches the cursor — see handleWheel.)
 func (m *Model) moveCursor(delta int) {
+	fromNote := ""
+	if m.cursor.kind == ui.RowBodyLine {
+		fromNote = m.cursor.projectID
+	}
 	m.commitEdit()
 	// Arrowing off an unnamed Tavern draft discards it (and relocates the
 	// cursor to a safe neighbor) — that hop is the whole move.
 	if m.discardEmptyPaneDraft() {
 		return
 	}
+	defer func() {
+		// Leaving a campaign's notes for a non-note row drops any dangling
+		// trailing blank line the session left behind.
+		if fromNote != "" && m.cursor.kind != ui.RowBodyLine {
+			m.pruneTrailingEmptyNotes(fromNote)
+		}
+	}()
 	rows := m.visibleRows()
 	if len(rows) == 0 {
 		return
@@ -386,6 +404,29 @@ func (m *Model) swapQuests(idA, idB string) {
 // moveProject swaps the current campaign with the nearest campaign in the
 // given direction that shares its archived state (campaigns and archived
 // campaigns render in separate, non-interleaved lists).
+// moveBanner swaps the hall-selected banner with its neighbor (delta -1/+1) in
+// the sidebar order, keeping the selection on it. A no-op on the synthetic
+// "Unassigned" area (not a real banner) or at either end.
+func (m *Model) moveBanner(delta int) {
+	idx := -1
+	for i := range m.store.Banners {
+		if m.store.Banners[i].ID == m.hallCursor.bannerID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	j := idx + delta
+	if j < 0 || j >= len(m.store.Banners) {
+		return
+	}
+	m.store.Banners[idx], m.store.Banners[j] = m.store.Banners[j], m.store.Banners[idx]
+	m.save()
+	m.cursorMoved = true // keep the hall scroll following the moved banner
+}
+
 func (m *Model) moveProject(delta int) {
 	me := m.findProject(m.cursor.projectID)
 	if me == nil {
@@ -428,9 +469,6 @@ func (m *Model) toggleReveal() {
 	case ui.RowSection:
 		m.collapsedSections[m.cursor.section] = !m.collapsedSections[m.cursor.section]
 		m.saveLayoutConfig()
-	case ui.RowRuneQuest, ui.RowLookoutQuest:
-		// Rune/Lookout-quest groups reuse collapsedProjects keyed by quest ID.
-		m.collapsedProjects[m.cursor.questID] = !m.collapsedProjects[m.cursor.questID]
 	case ui.RowVaultHeader:
 		// A focused page's Vaulted group — expanded state under a synthetic key.
 		k := ui.VaultOpenKey(m.cursor.section)
@@ -444,28 +482,35 @@ func (m *Model) toggleReveal() {
 // (Questboard / Runes / Campaigns / Vault) has one; the "Campaigns" label opens
 // the campaigns section view.
 func (m *Model) handleReveal() tea.Cmd {
-	// Tab is navigation in the Tavern: a campaign row drills into that campaign's
-	// view (the modal is retiring).
-	if m.inTavern() && !m.hallFocus && m.cursor.kind == ui.RowProject {
+	// Tab is navigation in the Tavern: a campaign row (or a saga chapter link)
+	// drills into that campaign's view.
+	if m.inTavern() && !m.hallFocus && (m.cursor.kind == ui.RowProject || m.cursor.kind == ui.RowSagaLink) {
 		m.drillIntoCampaign(m.cursor.projectID)
 		return nil
 	}
 	switch m.cursor.kind {
 	case ui.RowProject:
+		// Tab on a campaign header jumps to that campaign's Tavern pane — the
+		// campaign's home, where its notes and quests live.
 		m.commitEdit()
 		if p := m.findProject(m.cursor.projectID); p != nil {
-			// The focused quest sublist navigates via the global outline
-			// (see handleEnter's RowNewQuest/RowQuest cases), so the
-			// campaign needs to already be expanded there.
-			m.collapsedProjects[p.ID] = false
-			m.pushModal(campaignDetailModal(p))
+			m.drillIntoCampaign(p.ID)
 		}
 	case ui.RowQuest, ui.RowWildsObjective:
 		// An objective opens its parent quest — the mouse/Tab equivalent of
 		// stepping into the quest that owns it.
 		m.commitEdit()
 		if q := m.findQuest(m.cursor.questID); q != nil {
-			m.pushModal(questDetailModal(q))
+			m.openQuestDetail(q)
+		}
+	case ui.RowRune, ui.RowRuneQuest, ui.RowLookout, ui.RowLookoutQuest,
+		ui.RowTrack, ui.RowTrail, ui.RowTrailQuest:
+		// A sigil in the Trails/Lookouts/Runes rooms (a PR, dashboard, flag, or
+		// event) belongs to a quest — Tab opens that quest's page so you can see
+		// what references it. (Enter still opens the sigil's own link/collapse.)
+		m.commitEdit()
+		if q := m.findQuest(m.cursor.questID); q != nil {
+			m.openQuestDetail(q)
 		}
 	case ui.RowSection, ui.RowLabel:
 		m.commitEdit()
@@ -501,8 +546,13 @@ func (m *Model) handleEnter() tea.Cmd {
 	}
 	// In the Tavern content pane, Enter ADDS a new sibling below the cursor
 	// (Tab is navigation now). Contextual: a quest next to a quest, a campaign
-	// next to a campaign, matching the group's status.
+	// next to a campaign, matching the group's status. A saga chapter link is
+	// navigation, not a row to add beside — Enter drills into it.
 	if m.modal == nil && m.inTavern() && !m.hallFocus {
+		if m.cursor.kind == ui.RowSagaLink {
+			m.drillIntoCampaign(m.cursor.projectID)
+			return nil
+		}
 		return m.contextualCreate()
 	}
 
@@ -546,14 +596,24 @@ func (m *Model) handleEnter() tea.Cmd {
 		}
 		m.setCursor(ui.Row{Kind: ui.RowQuest, ProjectID: q.ProjectID, QuestID: q.ID})
 
-	case ui.RowProject, ui.RowSection, ui.RowRuneQuest, ui.RowLookoutQuest, ui.RowVaultHeader, ui.RowBanner:
+	case ui.RowProject, ui.RowSection, ui.RowVaultHeader, ui.RowBanner:
 		m.toggleReveal()
+
+	case ui.RowTrailQuest, ui.RowRuneQuest, ui.RowLookoutQuest:
+		// Room quest headers aren't collapsible — Enter resyncs that quest's trails
+		// (refetch PR status, re-scan for tracks/runes). A no-op if it has no PRs.
+		if q := m.findQuest(m.cursor.questID); q != nil {
+			return m.resyncTrails(q)
+		}
 
 	case ui.RowRune:
 		return m.openConnection(connection{kind: linkRune, code: row.RuneKey, url: ldFlagURL(m.ldProject, m.ldEnv, row.RuneKey)})
 
 	case ui.RowLookout:
 		return m.openLookoutScry(row.LookoutURL)
+
+	case ui.RowTrail:
+		return openURL(prURL(row.Repo, row.Code))
 
 	case ui.RowLabel:
 		m.toggleAllCampaigns()
@@ -658,12 +718,28 @@ func (m *Model) createSiblingQuest() tea.Cmd {
 }
 
 // createCampaignInPane adds a campaign under bannerID and drops the pane cursor
-// on it to name it.
+// on it to name it. Under the pinned Errands area, which holds no campaigns, it
+// adds a loose quest instead.
 func (m *Model) createCampaignInPane(bannerID string) {
+	if bannerID == errandsBanner {
+		m.createLooseQuestInPane(bannerID)
+		return
+	}
 	np := model.Project{ID: store.NewID(), Name: "", BannerID: bannerID}
 	m.store.Projects = append(m.store.Projects, np)
 	m.save()
 	m.setCursor(ui.Row{Kind: ui.RowProject, ProjectID: np.ID})
+}
+
+// createLooseQuestInPane adds an open loose quest directly under a banner (no
+// campaign) and drops the pane cursor on it to name it.
+func (m *Model) createLooseQuestInPane(bannerID string) {
+	nq := m.newQuestUnder("", model.StatusOpen)
+	if x := m.findQuest(nq.ID); x != nil {
+		x.BannerID = bannerID
+		m.save()
+	}
+	m.setCursor(ui.Row{Kind: ui.RowQuest, QuestID: nq.ID, Bare: true})
 }
 
 // hallCreate (hall Enter) adds a campaign in the current area and dives into it
@@ -684,6 +760,12 @@ func (m *Model) hallCreate() tea.Cmd {
 }
 
 func (m *Model) createCampaignFromHall(bannerID string) tea.Cmd {
+	if bannerID == errandsBanner {
+		// Errands hold quests, not campaigns — dive into its pane and add a quest.
+		m.diveIntoPane()
+		m.createLooseQuestInPane(bannerID)
+		return nil
+	}
 	np := model.Project{ID: store.NewID(), Name: "", BannerID: bannerID}
 	m.store.Projects = append(m.store.Projects, np)
 	m.save()
@@ -717,11 +799,11 @@ func (m *Model) newQuestUnder(projectID string, status model.QuestStatus) model.
 
 // handleBackspace deletes an empty row outright (cursor at column 0 of an
 // empty title) — the usual outliner "merge/remove empty line" behavior. If
-// the quest has details (a non-empty body), it's not deleted silently —
-// this arms an inline y/n confirmation instead (see confirmDeleteID), since
-// the empty title could otherwise hide real data being lost. Deleting a
-// project this way requires it to already be empty of quests; otherwise
-// Ctrl+X (with confirmation) is required.
+// the quest has details (a non-empty body), it's not deleted silently — the
+// confirm dialog opens instead (see openDeleteModal), since the empty title
+// could otherwise hide real data being lost. Deleting a project this way
+// requires it to already be empty of quests; otherwise Ctrl+X (with the
+// confirm dialog) is required.
 func (m *Model) handleBackspace(msg tea.KeyPressMsg) tea.Cmd {
 	if m.editor == nil {
 		return nil
@@ -738,7 +820,7 @@ func (m *Model) handleBackspace(msg tea.KeyPressMsg) tea.Cmd {
 		case ui.RowQuest:
 			id := m.cursor.questID
 			if q := m.findQuest(id); q != nil && questHasDetails(q) {
-				m.confirmDeleteID = id
+				m.openDeleteModal(m.cursor) // has notes — confirm rather than silently drop
 				return nil
 			}
 			m.removeCurrentRow(func() { m.deleteQuestByID(id) })
@@ -813,10 +895,13 @@ func (m *Model) toggleDone() tea.Cmd {
 		return m.showWarning(m.cursor, "vault is read-only")
 	}
 	before := ui.SortBucket(*q)
-	becameDone := false
+	becameDone, recycled := false, false
 	if q.Status == model.StatusDone {
 		q.Status = model.StatusOpen
 		q.CompletedAt = nil
+	} else if recycleRite(q) {
+		// A rite doesn't finish — it rolls to its next muster and leaves Camp.
+		recycled = true
 	} else {
 		q.Status = model.StatusDone
 		now := time.Now()
@@ -826,10 +911,15 @@ func (m *Model) toggleDone() tea.Cmd {
 	q.UpdatedAt = time.Now()
 	m.reslotIfTierChanged(q.ID, before)
 	m.save()
-	if becameDone {
+	if becameDone || recycled {
 		// A quest gets the ring "seal stamp"; objectives get the scatter burst.
 		m.spawnSparkleRing(m.cursorScreenX+questGlyphCol, m.cursorScreenY, 12)
-		return tea.Batch(m.playSound(sndQuestDone), m.maybeStartOverlayTick())
+		cmds := []tea.Cmd{m.playSound(sndQuestDone), m.maybeStartOverlayTick()}
+		if recycled {
+			when, _ := ui.MusterWhen(*q.Muster, time.Now())
+			cmds = append(cmds, m.showClipboardToastText("rite done · next "+when))
+		}
+		return tea.Batch(cmds...)
 	}
 	return nil
 }
@@ -986,22 +1076,56 @@ func nextPriority(p model.Priority) model.Priority {
 // axis from type/status, so it applies on the Questboard too). Blocked in
 // the read-only Vault, matching the other toggles.
 func (m *Model) cyclePriority() tea.Cmd {
-	if m.cursor.kind != ui.RowQuest {
+	switch m.cursor.kind {
+	case ui.RowProject:
+		m.cycleProjectPriority(m.cursor.projectID)
 		return nil
+	case ui.RowQuest:
+		q := m.findQuest(m.cursor.questID)
+		if q == nil {
+			return nil
+		}
+		if m.isVaulted(q) {
+			return m.showWarning(m.cursor, "vault is read-only")
+		}
+		before := ui.SortBucket(*q)
+		q.Priority = nextPriority(q.Priority)
+		q.UpdatedAt = time.Now()
+		m.reslotIfTierChanged(q.ID, before)
+		m.save()
 	}
-	q := m.findQuest(m.cursor.questID)
-	if q == nil {
-		return nil
-	}
-	if m.isVaulted(q) {
-		return m.showWarning(m.cursor, "vault is read-only")
-	}
-	before := ui.SortBucket(*q)
-	q.Priority = nextPriority(q.Priority)
-	q.UpdatedAt = time.Now()
-	m.reslotIfTierChanged(q.ID, before)
-	m.save()
 	return nil
+}
+
+// onQuestInDetail runs a list quest-action (toggleActive/Done/Type/Vault,
+// cyclePriority, openProjectPicker — all of which target m.cursor) against the
+// quest open in the detail page, then restores the real cursor. This lets every
+// list action work from inside a quest, not only from a list.
+func (m *Model) onQuestInDetail(q *model.Quest, action func() tea.Cmd) tea.Cmd {
+	saved := m.cursor
+	m.cursor = cursorTarget{kind: ui.RowQuest, questID: q.ID, projectID: q.ProjectID}
+	cmd := action()
+	m.cursor = saved
+	return cmd
+}
+
+// bodyCursorOnObjective reports whether the body line being edited is an
+// objective ("- …"), so Ctrl+D checks it off rather than toggling the whole quest
+// done. Reads the live editor value (the current line may be uncommitted).
+func (m *Model) bodyCursorOnObjective() bool {
+	kind, _ := model.ClassifyBodyLine(m.bodyEditor.Value())
+	return kind == model.BodyObjective
+}
+
+// cycleProjectPriority steps a campaign's priority marker (none → med → high →
+// low → none). It's a visual cue only — campaign order is unchanged.
+func (m *Model) cycleProjectPriority(projectID string) {
+	p := m.findProject(projectID)
+	if p == nil {
+		return
+	}
+	p.Priority = nextPriority(p.Priority)
+	m.save()
 }
 
 func (m *Model) openProjectPicker() {
@@ -1013,7 +1137,13 @@ func (m *Model) openProjectPicker() {
 		if q == nil {
 			return
 		}
-		mod := projectPickerModal(m.store, q.ID, q.ProjectID, false)
+		// Pre-select the quest's current home — its campaign, or its area (a loose
+		// quest under a banner) via the bannerMoveTarget sentinel.
+		current := q.ProjectID
+		if current == "" && q.BannerID != "" {
+			current = bannerMoveTarget + q.BannerID
+		}
+		mod := projectPickerModal(m.store, q.ID, current, false)
 		mod.SourceRowIdx = srcIdx
 		m.pushModal(mod)
 	case ui.RowProject:
@@ -1025,31 +1155,6 @@ func (m *Model) openProjectPicker() {
 		mod := bannerPickerModal(m.store, p.ID, p.BannerID)
 		mod.SourceRowIdx = srcIdx
 		m.pushModal(mod)
-	}
-}
-
-// openConfirmDelete arms the same lightweight inline y/n prompt for whatever
-// is under the cursor — a quest or a campaign (which cascades to every
-// quest inside it). No popup for either; see confirmDeleteID.
-func (m *Model) openConfirmDelete() {
-	m.commitEdit()
-	switch m.cursor.kind {
-	case ui.RowQuest:
-		if m.findQuest(m.cursor.questID) == nil {
-			return
-		}
-		m.confirmDeleteID = m.cursor.questID
-	case ui.RowProject:
-		if m.findProject(m.cursor.projectID) == nil {
-			return
-		}
-		m.confirmDeleteID = m.cursor.projectID
-	case ui.RowRune:
-		m.confirmDeleteID = m.cursor.runeKey
-	case ui.RowLookout:
-		m.confirmDeleteID = m.cursor.lookoutURL
-	case ui.RowTrack:
-		m.confirmDeleteID = m.cursor.trackEvent
 	}
 }
 
@@ -1083,6 +1188,34 @@ func (m *Model) deleteProjectByID(id string) {
 	m.save()
 }
 
+// deleteBannerByID removes a banner, ungrouping its campaigns and loose quests
+// (their work survives — campaigns fall back to Unassigned, loose quests to the
+// Questboard) rather than deleting them. Returns how many items were ungrouped.
+func (m *Model) deleteBannerByID(id string) int {
+	ungrouped := 0
+	for i := range m.store.Projects {
+		if m.store.Projects[i].BannerID == id {
+			m.store.Projects[i].BannerID = ""
+			ungrouped++
+		}
+	}
+	for i := range m.store.Quests {
+		if m.store.Quests[i].BannerID == id {
+			m.store.Quests[i].BannerID = ""
+			ungrouped++
+		}
+	}
+	out := m.store.Banners[:0]
+	for _, b := range m.store.Banners {
+		if b.ID != id {
+			out = append(out, b)
+		}
+	}
+	m.store.Banners = out
+	m.save()
+	return ungrouped
+}
+
 // titleOffset is the fixed number of display columns before a row's
 // editable title text starts, matching RenderRow's own layout exactly —
 // used to convert a click/drag's screen column into a rune index for text
@@ -1103,7 +1236,6 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 	}
 	mouse := msg.Mouse()
 	m.hoverSection = ""
-	m.confirmDeleteID = "" // any click/scroll cancels a pending inline delete confirm
 
 	if mouse.Button != tea.MouseLeft {
 		return nil
@@ -1147,7 +1279,6 @@ func (m *Model) handleWheel(msg tea.MouseWheelMsg) tea.Cmd {
 		return m.handleTavernWheel(msg)
 	}
 	mouse := msg.Mouse()
-	m.confirmDeleteID = ""
 	delta := 1
 	if mouse.Button == tea.MouseWheelUp {
 		delta = -1
@@ -1202,11 +1333,19 @@ func (m *Model) commonRowClick(row ui.Row) (tea.Cmd, bool) {
 		// A click copies the flag link (double-click opens); Enter still opens
 		// via applyRowAction — matching links everywhere else.
 		return m.clickLink(ldFlagURL(m.ldProject, m.ldEnv, row.RuneKey)), true
-	case ui.RowRuneQuest, ui.RowLookoutQuest, ui.RowVaultHeader:
+	case ui.RowVaultHeader:
 		m.toggleReveal()
+		return nil, true
+	case ui.RowTrailQuest, ui.RowRuneQuest, ui.RowLookoutQuest:
+		// Room quest headers aren't collapsible — a click resyncs that quest.
+		if q := m.findQuest(row.QuestID); q != nil {
+			return m.resyncTrails(q), true
+		}
 		return nil, true
 	case ui.RowLookout:
 		return m.clickLink(row.LookoutURL), true
+	case ui.RowTrail:
+		return m.clickLink(prURL(row.Repo, row.Code)), true
 	case ui.RowTrack:
 		return m.copyTrack(row.QuestID, row.TrackEvent), true // click copies the event + marks
 	case ui.RowNewProject, ui.RowNewQuest:
@@ -1230,7 +1369,7 @@ const rowDoubleClickWindow = 400 * time.Millisecond
 // RowLabel is excluded: its name already opens the section on a single click.
 func rowOpensDetail(k ui.RowKind) bool {
 	switch k {
-	case ui.RowQuest, ui.RowProject, ui.RowSection, ui.RowWildsObjective:
+	case ui.RowQuest, ui.RowProject, ui.RowSection, ui.RowWildsObjective, ui.RowSagaLink:
 		return true
 	}
 	return false

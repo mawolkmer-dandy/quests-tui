@@ -95,8 +95,8 @@ func TestTriageTakeUpMakesActive(t *testing.T) {
 	if q.Status != model.StatusActive {
 		t.Fatalf("take-up should mark the quest active, got %q", q.Status)
 	}
-	if !m.clipboardToastActive || !strings.Contains(m.clipboardToastText, "Migrate") {
-		t.Fatalf("a destination toast should name the campaign, got active=%v text=%q", m.clipboardToastActive, m.clipboardToastText)
+	if !m.toastActive() || !strings.Contains(m.toastText, "Migrate") {
+		t.Fatalf("a destination toast should name the campaign, got active=%v text=%q", m.toastActive(), m.toastText)
 	}
 }
 

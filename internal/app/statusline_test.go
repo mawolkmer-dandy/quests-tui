@@ -16,7 +16,7 @@ func TestSigilHintOnStatusLineNotInline(t *testing.T) {
 	m, q := sigilModel()
 	m.width, m.height = 120, 60 // tall enough that nothing scrolls out
 	m.detailWidthRatio = 0.42
-	m.modal.BodyEditor = m.newBodyEditor("")
+	m.bodyEditor = m.newBodyEditor("")
 	q.Body = []model.BodyLine{{Text: "a"}}
 
 	for i := range m.focusLinks {
@@ -41,7 +41,7 @@ func TestSigilStatusEmptyWhenBodyFocused(t *testing.T) {
 	m, q := sigilModel()
 	m.width, m.height = 120, 60
 	m.detailWidthRatio = 0.42
-	m.modal.BodyEditor = m.newBodyEditor("")
+	m.bodyEditor = m.newBodyEditor("")
 	q.Body = []model.BodyLine{{Text: "hello"}}
 	m.focusLinkIdx = noSelection
 

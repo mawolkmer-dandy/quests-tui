@@ -59,6 +59,24 @@ const (
 	// "+ New Banner" affordance.
 	RowBanner
 	RowNewBanner
+	// RowBodyLine is one line of a campaign's inline notes (Project.Body),
+	// rendered at the top of its Tavern pane. ProjectID names the campaign;
+	// BodyLineID identifies the line. Plain prose only — no objective/heading
+	// classification (that's a quest-body thing). The active line's editable
+	// text comes in via titleView, like a quest's.
+	RowBodyLine
+	// RowSagaLink is a chapter link at the bottom of a campaign pane —
+	// "← Continued from: NAME" (the previous chapter) or "→ Continues in: NAME"
+	// (Project.NextID). ProjectID is the linked campaign to drill into; Label
+	// holds the direction prefix.
+	RowSagaLink
+	// RowTrailQuest is a collapsible quest header in the Trails (open PRs) section,
+	// grouping that quest's open PRs. RowTrail is one open PR beneath it: Code is
+	// its "#123", Repo its "owner/repo", and Label carries the stack-tree gutter
+	// ("├"/"└"/""). Its live status (CI / draft / comments) is app-rendered into
+	// titleView, since PR status lives in the app, not the store.
+	RowTrailQuest
+	RowTrail
 )
 
 // Row is one visible line of the outline. Quest rows under a project don't
@@ -80,6 +98,8 @@ type Row struct {
 	BodyLineID     string // for RowWildsObjective: the quest body line it maps to
 	LookoutURL     string // for RowLookout: the dashboard URL
 	TrackEvent     string // for RowTrack: the tracking-event name
+	Code           string // for RowTrail: the PR code, e.g. "#123"
+	Repo           string // for RowTrail: the PR's "owner/repo"
 	BannerID       string // for RowBanner; also on a RowNewProject to create the campaign inside that banner
 	// Bare drops the collapse chevron on a RowBanner/RowProject that isn't
 	// collapsible in context — a banner title, or a campaign shown as a
@@ -99,7 +119,7 @@ type Row struct {
 // all button (see RowLabel in RenderRow), so it's selectable too.
 func (r Row) Selectable() bool {
 	switch r.Kind {
-	case RowProject, RowQuest, RowSection, RowNewProject, RowNewQuest, RowLabel, RowRune, RowVaultCampaign, RowRuneQuest, RowWildsObjective, RowLookout, RowLookoutQuest, RowTrack, RowVaultHeader, RowBanner, RowNewBanner:
+	case RowProject, RowQuest, RowSection, RowNewProject, RowNewQuest, RowLabel, RowRune, RowVaultCampaign, RowRuneQuest, RowWildsObjective, RowLookout, RowLookoutQuest, RowTrack, RowVaultHeader, RowBanner, RowNewBanner, RowBodyLine, RowSagaLink, RowTrailQuest, RowTrail:
 		return true
 	}
 	return false
@@ -187,6 +207,10 @@ func questPriority(q model.Quest) int {
 }
 
 // priorityIndicator renders the 2-col slot left of a quest's glyph for its
+// PriorityIndicator exposes priorityIndicator for the hall's own campaign
+// renderer (which doesn't go through RenderRow).
+func PriorityIndicator(p model.Priority) string { return priorityIndicator(p) }
+
 // priority level (arrow + space), blank when none — kept a fixed width so
 // glyphs stay aligned.
 func priorityIndicator(p model.Priority) string {
@@ -289,24 +313,6 @@ func CountArchived(s *store.Store) int {
 	return n
 }
 
-// BuildRows computes the flat list of currently-visible rows: the
-// Questboard (Inbox) first, then a "Campaigns" label followed by each
-// non-archived campaign (with its quests, unless collapsed) and a
-// "+ New Campaign" affordance, then the Vault — parked quests and archived
-// campaigns together, since both are simply "not currently active". Rebuilt
-// fresh every frame from the store + collapse state — cheap at
-// personal-todo-list scale, and avoids ever letting a cached row list drift
-// out of sync with a mutation.
-func BuildRows(s *store.Store, collapsedProjects, collapsedSections map[string]bool) []Row {
-	var rows []Row
-	rows = append(rows, inboxRows(s, collapsedSections)...)
-	rows = append(rows, campaignRows(s, collapsedProjects)...)
-	rows = append(rows, runesRows(s, collapsedProjects, collapsedSections)...)
-	rows = append(rows, lookoutsRows(s, collapsedProjects, collapsedSections)...)
-	rows = append(rows, vaultRows(s, collapsedProjects, collapsedSections)...)
-	return addSpacers(rows)
-}
-
 // SectionContent is a section's rows WITHOUT its header — the exact content the
 // Tavern box shows for that section, so a focused section view renders
 // identically (day-grouped Vault, spaced campaigns, grouped Runes), just with
@@ -345,19 +351,6 @@ func SectionContent(s *store.Store, section string, collapsedProjects map[string
 // campaign is separated by a spacer for breathing room inside its box.
 func BuildCampaignColumn(s *store.Store, collapsedProjects map[string]bool) []Row {
 	return addSpacers(campaignRows(s, collapsedProjects))
-}
-
-// BuildRailColumn is the two-column Tavern's left rail: Questboard, then Runes,
-// then the Vault — three sections concatenated (each begins with its
-// RowSection header). The renderer splits on those headers into separate boxes;
-// no spacers, so it can lay them out and pin the Vault itself.
-func BuildRailColumn(s *store.Store, collapsedProjects, collapsedSections map[string]bool) []Row {
-	var rows []Row
-	rows = append(rows, inboxRows(s, collapsedSections)...)
-	rows = append(rows, runesRows(s, collapsedProjects, collapsedSections)...)
-	rows = append(rows, lookoutsRows(s, collapsedProjects, collapsedSections)...)
-	rows = append(rows, vaultRows(s, collapsedProjects, collapsedSections)...)
-	return rows
 }
 
 // appendProject appends a campaign header and, unless collapsed, its quests
@@ -449,31 +442,44 @@ func looseQuestsUnderBanner(s *store.Store, bannerID string) []model.Quest {
 	return out
 }
 
-// BannerCampaignCount exposes bannerCampaignCount for the Tavern hall.
-func BannerCampaignCount(s *store.Store, bannerID string) int {
-	return bannerCampaignCount(s, bannerID)
+// ErrandsBannerID is the reserved BannerID of the pinned Errands area (shared
+// with the app package's errandsBanner sentinel), so rendering can give it a
+// distinct treatment — a checklist glyph and the accent color — and count its
+// loose quests rather than campaigns.
+const ErrandsBannerID = "errands"
+
+// BannerItemCount exposes bannerItemCount for the Tavern hall.
+func BannerItemCount(s *store.Store, bannerID string) int {
+	return bannerItemCount(s, bannerID)
 }
 
-// bannerCampaignCount is how many live (un-vaulted) campaigns fly under a banner.
-func bannerCampaignCount(s *store.Store, bannerID string) int {
+// bannerItemCount is how many live (un-vaulted) items sit directly under a
+// banner — its campaigns plus any loose quests filed on the banner with no
+// campaign. Errands hold only loose quests, so this is what makes their badge
+// count the errands; a normal area counts both.
+func bannerItemCount(s *store.Store, bannerID string) int {
 	n := 0
 	for i := range s.Projects {
 		if p := s.Projects[i]; !p.Archived && p.BannerID == bannerID {
 			n++
 		}
 	}
+	for i := range s.Quests {
+		// Loose quests count as outstanding area work — done ones are finished, so
+		// they drop out of the count (they still show in the area's Done group).
+		if q := s.Quests[i]; q.ProjectID == "" && q.BannerID == bannerID && !q.Vaulted && q.Status != model.StatusDone {
+			n++
+		}
+	}
 	return n
 }
 
-// runesRows draws the Runes section from every un-vaulted quest's attached
+// runesRowsOpt draws the Runes section from every un-vaulted quest's attached
 // flags (no manual watch list) — grouped under a collapsible quest header.
-// Vaulted quests drop out (their flags aren't worth watching anymore). Each
-// quest group's collapse state is keyed by quest ID in collapsedProjects
-// (quest IDs never collide with project IDs).
-func runesRows(s *store.Store, collapsedProjects, collapsedSections map[string]bool) []Row {
-	return runesRowsOpt(s, collapsedProjects, collapsedSections, false)
-}
-
+// Vaulted quests drop out (their flags aren't worth watching anymore); each
+// quest group's collapse state is keyed by quest ID in collapsedProjects. With
+// includeVaulted set (the focused page), a "Vaulted" group of parked quests
+// follows.
 func runesRowsOpt(s *store.Store, collapsedProjects, collapsedSections map[string]bool, includeVaulted bool) []Row {
 	collapsed := collapsedSections["runes"]
 	rows := []Row{{Kind: RowSection, Section: "runes", Collapsed: collapsed}}
@@ -500,11 +506,7 @@ func appendRuneGroups(s *store.Store, rows []Row, collapsedProjects map[string]b
 			rows = append(rows, Row{Kind: RowSpacer})
 		}
 		first = false
-		qCollapsed := collapsedProjects[q.ID]
-		rows = append(rows, Row{Kind: RowRuneQuest, Label: q.Title, QuestID: q.ID, Collapsed: qCollapsed})
-		if qCollapsed {
-			continue
-		}
+		rows = append(rows, Row{Kind: RowRuneQuest, Label: q.Title, QuestID: q.ID})
 		for _, key := range q.Runes {
 			rows = append(rows, Row{Kind: RowRune, RuneKey: key, QuestID: q.ID})
 		}
@@ -538,14 +540,10 @@ func CountRunes(s *store.Store) int {
 	return n
 }
 
-// lookoutsRows draws the Lookouts section from every un-vaulted quest with
+// lookoutsRowsOpt draws the Lookouts section from every un-vaulted quest with
 // analytics — its Tracks (found events) and Lookouts (dashboards) — grouped
 // under a collapsible quest header. When includeVaulted is set (the focused
 // page), a collapsed "Vaulted" group of the same, for parked quests, follows.
-func lookoutsRows(s *store.Store, collapsedProjects, collapsedSections map[string]bool) []Row {
-	return lookoutsRowsOpt(s, collapsedProjects, collapsedSections, false)
-}
-
 func lookoutsRowsOpt(s *store.Store, collapsedProjects, collapsedSections map[string]bool, includeVaulted bool) []Row {
 	collapsed := collapsedSections["lookouts"]
 	rows := []Row{{Kind: RowSection, Section: "lookouts", Collapsed: collapsed}}
@@ -579,11 +577,7 @@ func appendAnalyticsGroups(s *store.Store, rows []Row, collapsedProjects map[str
 			rows = append(rows, Row{Kind: RowSpacer})
 		}
 		first = false
-		qCollapsed := collapsedProjects[q.ID]
-		rows = append(rows, Row{Kind: RowLookoutQuest, Label: q.Title, QuestID: q.ID, Collapsed: qCollapsed})
-		if qCollapsed {
-			continue
-		}
+		rows = append(rows, Row{Kind: RowLookoutQuest, Label: q.Title, QuestID: q.ID})
 		if includeTracks {
 			for _, t := range q.Tracks {
 				rows = append(rows, Row{Kind: RowTrack, TrackEvent: t.Event, QuestID: q.ID})
@@ -896,6 +890,9 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, 
 			}
 		}
 		done, total := projectProgress(s, p.ID)
+		// The same 2-col priority slot quests carry, so campaigns can show a
+		// priority arrow and still line up with the quests beside them.
+		prio := priorityIndicator(p.Priority)
 		var progress string
 		if row.Bare {
 			// A drill-in campaign row: a progress ring leads instead of a
@@ -906,11 +903,11 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, 
 				ringStyle = StyleCampaignTitle
 			}
 			ring := ringStyle.Render(model.ProgressBucket(done, total))
-			line = withHint(fmt.Sprintf("%s%s%s %s", cursorMark, nestIndent, ring, name))
+			line = withHint(fmt.Sprintf("%s%s%s%s %s", cursorMark, nestIndent, prio, ring, name))
 			progress = StyleMuted.Render(fmt.Sprintf("%d/%d", done, total))
 		} else {
 			progress = StyleMuted.Render(fmt.Sprintf("%s %d/%d", model.ProgressBucket(done, total), done, total))
-			line = withHint(fmt.Sprintf("%s%s%s %s", cursorMark, nestIndent, caret(row.Collapsed), name))
+			line = withHint(fmt.Sprintf("%s%s%s%s %s", cursorMark, nestIndent, prio, caret(row.Collapsed), name))
 		}
 		pad := width - lipgloss.Width(progress) - 1
 		if pad < lipgloss.Width(line) {
@@ -951,13 +948,11 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, 
 		}
 		// The 2-col slot before the glyph holds the priority arrow (up for
 		// medium/high, a muted down-arrow for low), else stays blank — so glyphs
-		// stay column-aligned across the list. In the Tavern overview panes
-		// (Bare) it's dropped so quests align flush with campaign rows.
+		// stay column-aligned across the list. Shown in the Tavern too; campaigns
+		// carry the same slot, so quests and campaigns still line up.
 		prio := priorityIndicator(q.Priority)
-		if row.Bare {
-			prio = ""
-		}
-		return withHint(fmt.Sprintf("%s%s%s%s %s%s%s", cursorMark, nestIndent, prio, iconView, title, tag, progress)), hintX
+		badge := QuestScheduleBadge(q, time.Now())
+		return withHint(fmt.Sprintf("%s%s%s%s %s%s%s%s", cursorMark, nestIndent, prio, iconView, title, tag, progress, badge)), hintX
 
 	case RowSection:
 		label, count := sectionInfo(s, row.Section)
@@ -976,17 +971,22 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, 
 		}
 		// A Banner reads as an AREA header — bold, accent-colored, UPPERCASED, with
 		// a flag emblem — visually a tier above the plain-white campaigns nested
-		// under it.
+		// under it. The pinned Errands area is set apart with the tavern's warm
+		// accent and a checklist emblem, so it reads as a fixture, not a user area.
 		bannerStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorHeading)
+		glyph := "\U000f023b" // nf-md-flag (a banner); the banner's own icon overrides
+		if row.BannerID == ErrandsBannerID {
+			bannerStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+			glyph = GlyphErrands
+		}
 		name := titleView
 		if name == "" {
 			name = bannerStyle.Render(strings.ToUpper(nm))
 		}
-		glyph := "\U000f023b" // nf-md-flag (a banner); the banner's own icon overrides
 		if b := findBanner(s, row.BannerID); b != nil && b.Icon != "" {
 			glyph = b.Icon
 		}
-		count := StyleMuted.Render(fmt.Sprintf(" (%d)", bannerCampaignCount(s, row.BannerID)))
+		count := StyleMuted.Render(fmt.Sprintf(" (%d)", bannerItemCount(s, row.BannerID)))
 		if row.Bare {
 			// A banner title (not collapsible) — no chevron.
 			return withHint(fmt.Sprintf("%s%s %s%s", cursorMark, bannerStyle.Render(glyph), name, count)), hintX
@@ -1009,6 +1009,43 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, 
 			label = "+ New Quest"
 		}
 		return fmt.Sprintf("%s%s%s", cursorMark, nestIndent, StyleMuted.Render(label)), -1
+
+	case RowBodyLine:
+		// One line of a campaign's inline notes — plain muted prose under the
+		// title. The active line's live editor arrives via titleView; an empty
+		// campaign shows a muted "add notes…" placeholder (BodyLineID == "").
+		indent := "    "
+		if titleView != "" {
+			return withHint(fmt.Sprintf("%s%s%s", cursorMark, indent, titleView)), hintX
+		}
+		if row.BodyLineID == "" {
+			return fmt.Sprintf("%s%s%s", cursorMark, indent, StyleMuted.Render("add notes…")), -1
+		}
+		text := ""
+		if p := findProject(s, row.ProjectID); p != nil {
+			for _, l := range p.Body {
+				if l.ID == row.BodyLineID {
+					text = l.Text
+					break
+				}
+			}
+		}
+		return withHint(fmt.Sprintf("%s%s%s", cursorMark, indent, StyleMuted.Render(text))), hintX
+
+	case RowSagaLink:
+		// A chapter link at the bottom of a campaign pane: the direction prefix
+		// (Label) in muted text, then the linked campaign's name in the campaign
+		// accent (dimmed when that chapter is archived, but still navigable).
+		p := findProject(s, row.ProjectID)
+		if p == nil {
+			return "", -1
+		}
+		nameStyle := StyleCampaignTitle
+		if p.Archived {
+			nameStyle = StyleMuted
+		}
+		body := StyleMuted.Render(row.Label) + nameStyle.Render(p.Name)
+		return withHint(fmt.Sprintf("%s%s%s", cursorMark, nestIndent, body)), hintX
 
 	case RowWildsObjective:
 		q := findQuest(s, row.QuestID)
@@ -1043,16 +1080,19 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, 
 		// quest header.
 		return withHint(fmt.Sprintf("%s  %s", cursorMark, titleView)), hintX
 
-	case RowRuneQuest:
-		// A collapsible quest header in the Runes section — white name (bold when
-		// selected), like a campaign but for the flag groups.
-		name := row.Label
-		if isCursor {
-			name = StyleTitle.Render(name)
-		} else {
-			name = StyleName.Render(name)
+	case RowRuneQuest, RowLookoutQuest, RowTrailQuest:
+		// A quest header grouping its items in a room (Runes / Lookouts / Trails) —
+		// NOT collapsible (no chevron), so its items sit one indent in beneath it.
+		// The app supplies the title (+ any resync affordance) via titleView.
+		name := titleView
+		if name == "" {
+			if isCursor {
+				name = StyleTitle.Render(row.Label)
+			} else {
+				name = StyleName.Render(row.Label)
+			}
 		}
-		return withHint(fmt.Sprintf("%s%s %s", cursorMark, caret(row.Collapsed), name)), hintX
+		return withHint(fmt.Sprintf("%s%s", cursorMark, name)), hintX
 
 	case RowLookout, RowTrack:
 		// titleView is the app-rendered "glyph label" content — indented under its
@@ -1064,15 +1104,16 @@ func RenderRow(row Row, s *store.Store, titleView string, isCursor, isNew bool, 
 		// section page.
 		return withHint(cursorMark + StyleMuted.Render(caret(row.Collapsed)+" "+row.Label)), hintX
 
-	case RowLookoutQuest:
-		// A collapsible quest header in the Lookouts section, mirroring RowRuneQuest.
-		name := row.Label
-		if isCursor {
-			name = StyleTitle.Render(name)
-		} else {
-			name = StyleName.Render(name)
+	case RowTrail:
+		// One open PR under its quest header. titleView is the app-rendered
+		// "glyph #code  status  comments" content (PR status lives in the app). The
+		// stack gutter (Label: "├"/"└"/"") sits between the cursor mark and the
+		// content so a stack reads as one connected tree.
+		gutter := "  "
+		if row.Label != "" {
+			gutter = StyleMuted.Render(row.Label + " ")
 		}
-		return withHint(fmt.Sprintf("%s%s %s", cursorMark, caret(row.Collapsed), name)), hintX
+		return withHint(fmt.Sprintf("%s%s%s", cursorMark, gutter, titleView)), hintX
 
 	case RowDayHeader:
 		// Indented past the cursor-mark gutter so a group label ("Later", a

@@ -49,6 +49,7 @@ func main() {
 	thingsDB := flag.String("things-db", "", "path to a Things main.sqlite (default: auto-locate); use with --import-things")
 	dryRun := flag.Bool("dry-run", false, "with --import-things, preview the import without writing anything")
 	replace := flag.Bool("replace", false, "with --import-things, replace existing quests instead of appending (previous data is backed up first)")
+	quiet := flag.Bool("quiet", false, "silence all sound effects for this run (does not change your config)")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "quests — a keyboard-and-mouse quest journal TUI\n\nUsage:\n  quests                 launch the app\n  quests add <title…>    capture a quest from anywhere (see `quests add -h`)\n  quests campaigns       list campaign names (one per line)\n  quests --version       print the version\n  quests --init-config   write the default config file\n  quests --import-things import a local Things 3 database\n\nFlags:")
 		flag.PrintDefaults()
@@ -136,6 +137,12 @@ func main() {
 	ui.MovePriorityToTop = cfg.Behavior.PriorityToTop
 	ui.LowPriorityToBottom = cfg.Behavior.LowPriorityToBottom
 	app.ApplyKeys(cfg.Keys)
+
+	// --quiet silences sound for this run only — an in-memory override, never
+	// written back to config.toml (unlike the in-app mute toggle).
+	if *quiet {
+		cfg.Sound.Enabled = false
+	}
 
 	s, err := store.Load(dataPath)
 	if err != nil {

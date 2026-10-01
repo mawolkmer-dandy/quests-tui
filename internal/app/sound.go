@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -83,10 +84,42 @@ func (m *Model) playSound(e soundEvent) tea.Cmd {
 		return nil // configured file gone — stay silent rather than erroring
 	}
 	return func() tea.Msg {
+		// Only one clip plays at a time — a new sound cuts off whatever's still
+		// playing, so overlapping actions don't stack into a muddle. The kill +
+		// start is atomic under the mutex so rapid-fire events still leave exactly
+		// one clip running.
+		currentSound.mu.Lock()
+		if currentSound.proc != nil {
+			_ = currentSound.proc.Kill()
+			currentSound.proc = nil
+		}
 		// -v 0.5 → half volume; the bundled clips are loud at full.
-		_ = exec.Command("afplay", "-v", "0.5", path).Start() // detached; we don't wait
+		c := exec.Command("afplay", "-v", "0.5", path)
+		if err := c.Start(); err != nil {
+			currentSound.mu.Unlock()
+			return nil
+		}
+		currentSound.proc = c.Process
+		currentSound.mu.Unlock()
+		// Reap when it ends (or is killed), and clear the handle if it's still the
+		// current clip so a finished process isn't left dangling.
+		go func() {
+			_ = c.Wait()
+			currentSound.mu.Lock()
+			if currentSound.proc == c.Process {
+				currentSound.proc = nil
+			}
+			currentSound.mu.Unlock()
+		}()
 		return nil
 	}
+}
+
+// currentSound is the single afplay process allowed to run at a time; playSound
+// kills it before starting the next so clips never overlap.
+var currentSound struct {
+	mu   sync.Mutex
+	proc *os.Process
 }
 
 // toggleMute flips all sound on/off and persists it to config.toml so the

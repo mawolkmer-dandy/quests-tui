@@ -14,9 +14,10 @@ import (
 func TestTitleChipShownWhileRenaming(t *testing.T) {
 	ui.Init(true)
 	st := &store.Store{Quests: []model.Quest{{ID: "q1", Title: "Q", Status: model.StatusOpen}}}
-	m := &Model{store: st, modal: questDetailModal(&st.Quests[0]),
+	m := &Model{store: st, modal: &Modal{Kind: ModalQuestDetail, QuestID: st.Quests[0].ID},
 		sectionScroll: map[string]int{}, sectionMaxScroll: map[string]int{}}
-	m.modal.BodyEditor = m.newBodyEditor("")
+	m.bodyOwnerKind, m.bodyOwnerID = ownerQuest, st.Quests[0].ID
+	m.bodyEditor = m.newBodyEditor("")
 	m.width, m.height = 100, 40
 	m.detailWidthRatio = 0.42
 

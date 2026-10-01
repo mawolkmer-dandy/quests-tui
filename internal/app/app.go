@@ -82,11 +82,13 @@ type cursorTarget struct {
 	bodyLineID string
 	lookoutURL string
 	trackEvent string
+	prCode     string
+	prRepo     string
 	bannerID   string
 }
 
 func targetFromRow(row ui.Row) cursorTarget {
-	return cursorTarget{kind: row.Kind, projectID: row.ProjectID, questID: row.QuestID, section: row.Section, label: row.Label, runeKey: row.RuneKey, bodyLineID: row.BodyLineID, lookoutURL: row.LookoutURL, trackEvent: row.TrackEvent, bannerID: row.BannerID}
+	return cursorTarget{kind: row.Kind, projectID: row.ProjectID, questID: row.QuestID, section: row.Section, label: row.Label, runeKey: row.RuneKey, bodyLineID: row.BodyLineID, lookoutURL: row.LookoutURL, trackEvent: row.TrackEvent, prCode: row.Code, prRepo: row.Repo, bannerID: row.BannerID}
 }
 
 func (t cursorTarget) matches(row ui.Row) bool {
@@ -118,6 +120,10 @@ func (t cursorTarget) matches(row ui.Row) bool {
 		return t.questID == row.QuestID
 	case ui.RowWildsObjective:
 		return t.questID == row.QuestID && t.bodyLineID == row.BodyLineID
+	case ui.RowBodyLine:
+		return t.projectID == row.ProjectID && t.bodyLineID == row.BodyLineID
+	case ui.RowSagaLink:
+		return t.projectID == row.ProjectID && t.label == row.Label
 	case ui.RowLookout:
 		return t.questID == row.QuestID && t.lookoutURL == row.LookoutURL
 	case ui.RowTrack:
@@ -126,6 +132,10 @@ func (t cursorTarget) matches(row ui.Row) bool {
 		return t.questID == row.QuestID
 	case ui.RowVaultHeader:
 		return t.section == row.Section
+	case ui.RowTrailQuest:
+		return t.questID == row.QuestID
+	case ui.RowTrail:
+		return t.questID == row.QuestID && t.prCode == row.Code && t.prRepo == row.Repo
 	}
 	return false
 }
@@ -188,6 +198,14 @@ type Model struct {
 	hallColW      int
 	paneColX      int
 	paneColW      int
+	// paneLineRow maps each pane screen line (post soft-wrap) to its paneRows
+	// index, -1 for a spacer/blank — so a click resolves to the right row even
+	// when a campaign note wrapped onto several lines. Rebuilt each render.
+	paneLineRow []int
+	// paneLinkSpans are the shortened-link click targets in campaign notes, in
+	// absolute screen coordinates, so a click copies (or a fast second opens)
+	// the full URL — the same gesture as a quest body link. Rebuilt each render.
+	paneLinkSpans []paneLinkSpan
 
 	// chipLineRow is the screen row of the reserved filter line; chipSpans are
 	// the Wilds quick-chip click extents on it (see handleMouse).
@@ -205,15 +223,6 @@ type Model struct {
 	tavernHelpRow   int
 	tavernHelpX     int
 	tavernHelpWidth int
-
-	// Inline search/filter bar (Ctrl+F) — see search.go.
-	searchOpen       bool
-	searchInput      textinput.Model
-	searchFocus      int
-	fPriority        facetPriority
-	fStatus          facetStatus
-	fType            facetType
-	savedQuickFilter quickFilter
 
 	width, height int
 	scrollOffset  int
@@ -285,11 +294,20 @@ type Model struct {
 	cursor cursorTarget
 	editor *textinput.Model
 
+	// The shared body-outline editor, lifted off Modal so the same experience
+	// (navigation, split/merge, copy-paste) drives a quest's detail modal AND a
+	// campaign's inline notes in the Tavern pane. bodyOwnerKind/ID say whose
+	// Body is being edited (see currentBody); bodyCursor is the active line,
+	// bodyEditor the live line editor. ownerNone = no body is being edited.
+	bodyOwnerKind bodyOwnerKind
+	bodyOwnerID   string
+	bodyCursor    int
+	bodyEditor    textinput.Model
+
 	// selAnchor is the other end of a text selection in whichever editor is
-	// currently focused (m.editor, a modal's BodyEditor, or its
-	// SearchInput) — see selection.go. noSelection means there isn't one.
-	// selAnchorLine is the body-line index the anchor sits on inside a
-	// focus view — when it differs from the modal's BodyCursor, the
+	// currently focused (m.editor, the body editor, or the search box) — see
+	// selection.go. noSelection means there isn't one. selAnchorLine is the
+	// body-line index the anchor sits on — when it differs from bodyCursor, the
 	// selection spans lines (copy-only; see multilineSelActive).
 	selAnchor     int
 	selAnchorLine int
@@ -356,10 +374,6 @@ type Model struct {
 	// click inside a span triggers that hint's action (see handleMouse).
 	hintSpans map[int][]hintSpan
 
-	// non-empty while an inline delete confirmation is armed for the row
-	// under the cursor — a quest or a campaign (see handleBackspace / handleKey).
-	confirmDeleteID string
-
 	// modal is the topmost open modal; modalStack holds whatever's beneath
 	// it, so drilling from a campaign's detail page into one of its quests
 	// (Tab) and then closing (Esc) returns to the campaign, not the outline.
@@ -372,13 +386,25 @@ type Model struct {
 	// maps to an item index. modalItemTop is -1 when no list is showing.
 	modalItemTop, modalItemCount, modalItemX0, modalItemX1 int
 
+	// Schedule-picker click mapping: the screen Y of each option (indexed by
+	// PickerIndex), and the box's horizontal extent. Its options are separated by
+	// group captions, so a simple top+idx map (modalItem*) won't do — see
+	// handleScheduleClick / renderModal's ModalSchedulePicker tail.
+	scheduleItemYs                 []int
+	scheduleItemX0, scheduleItemX1 int
+
+	// Confirm-delete dialog click mapping: the screen row of its two buttons and
+	// each button's X extent, recomputed each renderModal so a click resolves to
+	// Cancel or the delete button. confirmBtnRow is -1 when no dialog is showing.
+	confirmBtnRow                    int
+	confirmCancelX0, confirmCancelX1 int
+	confirmDeleteX0, confirmDeleteX1 int
+
 	// hover is whatever row the mouse is currently resting over, or the
 	// cursor's own row (nil if neither applies) — used to show an action
 	// hint ("→ open (tab)", "↓ collapse (enter)") next to it. See
 	// updateHover, actionHint, and View()'s row loop. hideHoverTips
-	// (Ctrl+K) suppresses those hints without affecting anything else (the
-	// delete y/n prompt is driven by confirmDeleteID, a separate mechanism,
-	// and always shows).
+	// (Ctrl+K) suppresses those hints without affecting anything else.
 	hover         *cursorTarget
 	hideHoverTips bool
 	// hoverSection is the Tavern section whose title the mouse is currently over
@@ -393,11 +419,15 @@ type Model struct {
 	warningText   string
 	warningGen    int
 
-	// clipboardToastActive briefly swaps the footer (or the focused view's
-	// header) for a "copied to clipboard" indicator right after a selection
-	// is copied — see showClipboardToast in anim.go.
-	clipboardToastActive bool
-	clipboardToastGen    int
+	// The status-line toast is a queued, animated notice (see anim.go): messages
+	// type in/out and play one after another rather than replacing. toastQueue
+	// holds the pending ones, toastText/toastPhase/toastFrame the active one, and
+	// toastGen guards its tick loop.
+	toastQueue []string
+	toastText  string
+	toastPhase toastPhase
+	toastFrame int
+	toastGen   int
 	// lastLinkClickURL / lastLinkClickAt implement single-click-copy /
 	// double-click-open for links (sigils + body): a first click copies, a
 	// second click on the same URL within linkDoubleClickWindow opens it.
@@ -408,9 +438,6 @@ type Model struct {
 	// window enters its detail view — the mouse equivalent of Tab.
 	lastRowClick   cursorTarget
 	lastRowClickAt time.Time
-	// clipboardToastText overrides the toast's default "copied to clipboard"
-	// label (e.g. the incantation confirmation); empty = the default.
-	clipboardToastText string
 
 	// lastWheelAt is when the last scroll-wheel event arrived. Bubble Tea's
 	// input parser fragments SGR mouse sequences under fast scrolling and
@@ -437,7 +464,9 @@ type Model struct {
 	railBoxRatios  []float64
 
 	// showHiddenSigils reveals the empty connection sections in the quest detail
-	// (normally hidden for calm); toggled with Ctrl+E while a quest is open.
+	// (compact view shows only sections with value); toggled with F3 while a quest
+	// is open. Even a loading (being-found) but still-empty section stays hidden
+	// in the compact view.
 	showHiddenSigils bool
 
 	// detailWidthRatio is the quest-detail Sigils box's fraction of the detail
@@ -504,7 +533,8 @@ type Model struct {
 	// off the first body row steps onto the bottom-most of these. focusLinkIdx
 	// is which one the link cursor is on, or noSelection when the body owns the
 	// caret. Rebuilt each renderFocusContent. focusLinkConfirmID arms the inline
-	// y/n prompt for removing the focused link (mirrors confirmDeleteID).
+	// y/n prompt for removing the focused connection in the quest detail (a
+	// separate, lightweight confirm from the shared ModalConfirmDelete dialog).
 	focusLinks         []focusLink
 	focusLinkIdx       int
 	focusLinkConfirmID string
@@ -560,7 +590,6 @@ const (
 	linkTrack       // a found tracking event
 	linkLookout     // a usage dashboard (per-quest)
 	linkForge       // the "write the Lookout's plans" affordance line
-	linkFind        // the "find tracks in trails" affordance line
 	linkRestore     // the "restore dismissed tracks" affordance line
 	linkCopySection // a section header — focusable so it can be copied as a list
 )
@@ -607,11 +636,11 @@ type Options struct {
 }
 
 func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
-	// The app opens into Camp (the focused agenda), so seed a Camp greeting
-	// unless the config pins one.
+	// The app opens into the Tavern (the full hall + pane), so seed a Tavern
+	// greeting unless the config pins one.
 	subtitle := opts.Greeting
 	if subtitle == "" {
-		subtitle = ui.RandomCampGreeting() // launch lands at Camp
+		subtitle = ui.RandomGreeting() // launch lands in the Tavern
 	}
 	railWidthRatio := opts.RailWidthRatio
 	if railWidthRatio <= 0 {
@@ -625,7 +654,7 @@ func New(s *store.Store, path string, darkBg bool, opts Options) *Model {
 	m := &Model{
 		store:             s,
 		path:              path,
-		wilds:             true, // launch into Camp (the focused agenda), not the Tavern
+		wilds:             false, // launch into the Tavern (the full hall + pane), not Camp
 		darkBg:            darkBg,
 		cfgPath:           opts.CfgPath,
 		railWidthRatio:    railWidthRatio,
@@ -685,13 +714,16 @@ func (m *Model) Init() tea.Cmd {
 	// Update) so it doesn't burn frames before there's a size to render into.
 	// Start watching the quick-add spool so captures made elsewhere (CLI,
 	// Raycast) show up live without a relaunch.
-	// The app opens into Camp — play its arrival sound on launch.
-	cmds := []tea.Cmd{m.watchQuickAdd(), m.playSound(sndEnterWilds)}
+	// The app opens into the Tavern (see New) — play its arrival sound, not the
+	// Wilds one.
+	cmds := []tea.Cmd{m.watchQuickAdd(), m.playSound(sndEnterTavern)}
 	if m.integrationsEnabled {
 		// Fire the first sync almost immediately so linked PR/Jira/rune
 		// statuses resolve on launch instead of sitting at "fetching…" for a
 		// full interval; onSyncTick re-arms every tick after at syncInterval.
 		cmds = append(cmds, syncTick(750*time.Millisecond))
+		// Heartbeat for the Trails room's "synced Xs ago" counter.
+		cmds = append(cmds, clockTick())
 		// Poll herdr for pinned-agent state (fetches once up front, too).
 		if c := m.maybeStartAgentPoll(); c != nil {
 			cmds = append(cmds, c)
@@ -818,6 +850,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinnerTickMsg:
 		return m, m.onSpinnerTick(msg.gen)
 
+	case clockTickMsg:
+		return m, m.onClockTick()
+
 	case overlayTickMsg:
 		return m, m.onOverlayTick(msg.gen)
 
@@ -828,9 +863,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearWarningIfCurrent(msg.gen)
 		return m, nil
 
-	case clipboardToastExpireMsg:
-		m.clearClipboardToastIfCurrent(msg.gen)
-		return m, nil
+	case toastTickMsg:
+		return m, m.advanceToast(msg.gen)
 
 	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" {
@@ -875,11 +909,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.modal != nil {
 			return m, m.pasteIntoModal(msg)
 		}
-		if m.searchOpen {
-			var cmd tea.Cmd
-			m.searchInput, cmd = m.searchInput.Update(msg)
-			m.rehomeCursor()
-			return m, cmd
+		// Campaign notes edit through the shared body editor (m.editor is nil),
+		// so a paste there — the common case of dropping in a document link —
+		// routes to its own handler, which also shortens the pasted URL.
+		if m.cursor.kind == ui.RowBodyLine && m.bodyOwnerKind == ownerCampaign {
+			return m, m.pasteIntoCampaignNotes(msg)
 		}
 		if m.editor != nil {
 			var cmd tea.Cmd
@@ -901,6 +935,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if isPickerModal(m.modal.Kind) {
 				return m, m.handlePickerClick(msg)
+			}
+			if m.modal.Kind == ModalSchedulePicker {
+				return m, m.handleScheduleClick(msg)
+			}
+			if m.modal.Kind == ModalConfirmDelete {
+				return m, m.handleConfirmDeleteClick(msg)
 			}
 			// A help / overlay modal: a click anywhere dismisses it (there's
 			// nothing to interact with inside), matching "press any key to close".
@@ -938,7 +978,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if isFocusModal(m.modal.Kind) {
 				return m, m.handleFocusWheel(msg)
 			}
-			if isPickerModal(m.modal.Kind) {
+			if isPickerModal(m.modal.Kind) || m.modal.Kind == ModalSchedulePicker {
 				return m, m.handlePickerWheel(msg)
 			}
 			return m, nil
@@ -1000,6 +1040,29 @@ func (m *Model) save() {
 // changes that don't go through save() (collapse toggles, integration-status
 // updates).
 func (m *Model) invalidateRender() { m.uiVersion++ }
+
+type clockTickMsg struct{}
+
+// clockTick is a once-a-second heartbeat so the Trails room's "synced Xs ago"
+// counter advances on its own. It re-renders only while that room is open, so
+// idle Camp/detail views aren't churned.
+func clockTick() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return clockTickMsg{} })
+}
+
+func (m *Model) onClockTick() tea.Cmd {
+	// The synced-ago label rides on the resync affordance, which shows in the
+	// Trails room and in a quest's detail Trails header — bump the render in
+	// either so it counts up on its own.
+	room := m.hallCursor.section
+	inResyncRoom := m.modal == nil && m.inTavern() && m.hallCursor.kind == ui.RowSection &&
+		(room == "trails" || room == "runes" || room == "lookouts")
+	detailOpen := m.modal != nil && m.modal.Kind == ModalQuestDetail
+	if inResyncRoom || detailOpen {
+		m.invalidateRender()
+	}
+	return clockTick()
+}
 
 // recordUndo pushes the last snapshot onto the undo stack when the store has
 // actually changed since it was taken, then remembers the new state. Called
@@ -1075,9 +1138,27 @@ func (m *Model) closeModal() {
 	if n := len(m.modalStack); n > 0 {
 		m.modal = m.modalStack[n-1]
 		m.modalStack = m.modalStack[:n-1]
+		m.reseedBodyForModal()
 		return
 	}
 	m.modal = nil
+	// Back to the pane/outline: no modal owns the body editor. The Tavern pane
+	// re-seeds ownerCampaign itself when the caret re-enters a campaign's notes.
+	m.seedBody(ownerNone, "")
+}
+
+// reseedBodyForModal repoints the shared body editor at whatever detail modal
+// is now current — used when popping back to a buried modal, since the body
+// state is a single Model-level editor (not saved per-modal on the stack).
+func (m *Model) reseedBodyForModal() {
+	switch mod := m.modal; {
+	case mod == nil:
+		m.seedBody(ownerNone, "")
+	case mod.Kind == ModalQuestDetail:
+		m.seedBody(ownerQuest, mod.QuestID)
+	default:
+		m.seedBody(ownerNone, "")
+	}
 }
 
 // visibleRows is the row list every navigation/mutation/render path should
@@ -1089,13 +1170,10 @@ type chipSpan struct {
 	filter quickFilter
 }
 
-// renderFilterLine renders the reserved line above the rows: the search bar
-// while searching, otherwise blank. (The Wilds quick-filter chips were removed.)
+// renderFilterLine renders the reserved line above the rows — blank now that
+// search is a modal (and the Wilds quick-filter chips were removed).
 func (m *Model) renderFilterLine(width int, margin string) string {
 	m.chipSpans = nil
-	if m.searchOpen {
-		return margin + m.renderSearchBar()
-	}
 	return ""
 }
 
@@ -1117,14 +1195,18 @@ const (
 // no headers, no "+ New" affordances — those are Tavern activities.
 func (m *Model) wildsRows() []ui.Row {
 	byID := m.wildsEligible()
+	now := time.Now()
 	var rows []ui.Row
 	first := true
 	for _, id := range m.wildsOrderedIDs(byID) {
 		q := byID[id]
-		if q.Status != model.StatusActive {
-			continue // Camp is only what you're actively on — the quests you've taken up
+		// Camp is today's agenda: the quests you've taken up (active) plus any
+		// "called" ones — a muster due today or overdue — which show even while
+		// still inactive, until you take them up. Done quests never show.
+		if q.Status == model.StatusDone {
+			continue
 		}
-		if m.searchOpen && !m.searchMatch(&q) {
+		if q.Status != model.StatusActive && !q.Called(now) {
 			continue
 		}
 		if !first {
@@ -1168,9 +1250,15 @@ func (m *Model) wildsEligible() map[string]model.Quest {
 		}
 	}
 	// Loose quests under a banner (no campaign) are live work too — an active
-	// one should reach Camp / the Wilds like any other.
+	// one should reach Camp / the Wilds like any other. Any "called" quest (a
+	// muster due today/overdue) is also eligible wherever it lives — including
+	// the Questboard — so a scheduled errand surfaces on its day.
+	now := time.Now()
 	for _, q := range m.store.Quests {
-		if q.ProjectID == "" && q.BannerID != "" && !q.Vaulted {
+		if q.Vaulted {
+			continue
+		}
+		if (q.ProjectID == "" && q.BannerID != "") || q.Called(now) {
 			out[q.ID] = q
 		}
 	}
@@ -1261,9 +1349,6 @@ func (m *Model) setWilds(on bool) tea.Cmd {
 	m.commitEdit()
 	old := m.currentBodyAbsolute() // snapshot the departing view (either layout) for the dissolve
 	m.transOldSub = m.subtitle     // the subtitle to type out
-	if m.searchOpen {
-		m.closeSearch()
-	}
 	m.wilds = on
 	m.editor = nil
 	m.scrollOffset = 0
@@ -1304,16 +1389,6 @@ func (m *Model) contentWidth() int {
 
 // animateFilter runs a filter change (chip/facet) wrapped in the fast
 // dissolve→reveal so the list visibly re-forms; instant when animations off.
-func (m *Model) animateFilter(fn func()) tea.Cmd {
-	if !m.animate {
-		fn()
-		return nil
-	}
-	old := m.currentRowLines()
-	fn()
-	return m.beginTransition(old, kindFilter)
-}
-
 // insertQuestMetaRows previously inserted a RowQuestMeta integration sub-line
 // under each linked quest. Connections now render as compact status icons
 // inlined after the quest title (see connectionIcons / renderOutlineRowLine),
@@ -1326,7 +1401,7 @@ func (m *Model) insertQuestMetaRows(rows []ui.Row) []ui.Row {
 // inTavern reports whether the Tavern (its rooms) is the active view — i.e. not
 // Camp and not mid-search.
 func (m *Model) inTavern() bool {
-	return !m.wilds && !m.searchOpen
+	return !m.wilds
 }
 
 func (m *Model) visibleRows() []ui.Row {
@@ -1336,51 +1411,9 @@ func (m *Model) visibleRows() []ui.Row {
 	if m.wilds {
 		return m.wildsRows()
 	}
-	if !m.searchOpen {
-		// The Tavern is the hall + pane: the pane shows the current hall selection.
-		m.ensureHallCursor()
-		return m.paneRows()
-	}
-	// While searching, ignore collapse state so a match in any campaign or
-	// section still surfaces (empty groups are dropped below).
-	rows := ui.BuildRows(m.store, map[string]bool{}, map[string]bool{})
-
-	keep := make([]bool, len(rows))
-	for i, r := range rows {
-		if r.Kind == ui.RowQuest {
-			if q := m.findQuest(r.QuestID); q != nil && m.searchMatch(q) {
-				keep[i] = true
-			}
-		}
-	}
-
-	var out []ui.Row
-	i := 0
-	for i < len(rows) {
-		r := rows[i]
-		if r.Kind == ui.RowProject || r.Kind == ui.RowSection {
-			j := i + 1
-			groupHasMatch := false
-			for j < len(rows) && rows[j].Kind == ui.RowQuest {
-				if keep[j] {
-					groupHasMatch = true
-				}
-				j++
-			}
-			if groupHasMatch {
-				out = append(out, r)
-				for k := i + 1; k < j; k++ {
-					if keep[k] {
-						out = append(out, rows[k])
-					}
-				}
-			}
-			i = j
-			continue
-		}
-		i++ // RowNewProject: not relevant while searching
-	}
-	return m.insertQuestMetaRows(out)
+	// The Tavern is the hall + pane: the pane shows the current hall selection.
+	m.ensureHallCursor()
+	return m.paneRows()
 }
 
 // setCursor moves the cursor to row and (re)seeds the live editor for it —
@@ -1453,6 +1486,10 @@ func (m *Model) setCursor(row ui.Row) {
 		ti.CursorEnd()
 		_ = ti.Focus()
 		m.editor = &ti
+	case ui.RowBodyLine:
+		// Campaign notes use the shared body editor, not m.editor.
+		m.editor = nil
+		m.enterCampaignNotes(row)
 	default:
 		m.editor = nil
 	}
@@ -1461,6 +1498,12 @@ func (m *Model) setCursor(row ui.Row) {
 // commitEdit writes the live editor's value back to whatever the cursor
 // currently targets. Call before moving the cursor anywhere else.
 func (m *Model) commitEdit() {
+	// A campaign notes line is driven by the shared body editor, not m.editor,
+	// so nav-away commits go through commitBodyLine (m.editor is nil here).
+	if m.cursor.kind == ui.RowBodyLine {
+		m.commitBodyLine()
+		return
+	}
 	if m.editor == nil {
 		return
 	}
@@ -1527,7 +1570,7 @@ func (m *Model) discardEmptyPaneDraft() bool {
 // removeCurrentRow deletes the cursor's row via fn, then relocates the
 // cursor to the previous selectable row within currentRowScope — never
 // arbitrarily to the top, and never spilling out into the rest of the
-// outline when the cursor is inside a focused campaign's quest list.
+// outline when the cursor is inside a focused section page.
 func (m *Model) removeCurrentRow(fn func()) {
 	rows := m.currentRowScope()
 	idx := findRowIndex(rows, m.cursor)
@@ -1547,13 +1590,8 @@ func (m *Model) removeCurrentRow(fn func()) {
 // list, so deleting a quest there can't relocate the cursor out into the
 // rest of the outline underneath.
 func (m *Model) currentRowScope() []ui.Row {
-	if m.modal != nil {
-		switch {
-		case m.modal.Kind == ModalCampaignDetail && m.modal.InQuestList:
-			return campaignQuestRows(m.store, m.modal.CampaignID)
-		case m.modal.Kind == ModalSectionDetail:
-			return m.sectionRows(m.modal.Section)
-		}
+	if m.modal != nil && m.modal.Kind == ModalSectionDetail {
+		return m.sectionRows(m.modal.Section)
 	}
 	return m.visibleRows()
 }
@@ -1618,42 +1656,6 @@ func nearestSelectableRow(rows []ui.Row, idx int) (ui.Row, bool) {
 		}
 	}
 	return ui.Row{}, false
-}
-
-func rowMatchesConfirmDelete(row ui.Row, id string) bool {
-	switch row.Kind {
-	case ui.RowQuest:
-		return row.QuestID == id
-	case ui.RowProject:
-		return row.ProjectID == id
-	case ui.RowRune:
-		return row.RuneKey == id
-	case ui.RowLookout:
-		return row.LookoutURL == id
-	case ui.RowTrack:
-		return row.TrackEvent == id
-	}
-	return false
-}
-
-// confirmDeleteHint is the minimal inline y/n prompt for whatever's armed.
-func (m *Model) confirmDeleteHint(row ui.Row) string {
-	switch row.Kind {
-	case ui.RowQuest:
-		return "delete this quest? y/n"
-	case ui.RowProject:
-		if n := m.projectQuestCount(row.ProjectID); n > 0 {
-			return fmt.Sprintf("delete this campaign and its %d quest(s)? y/n", n)
-		}
-		return "delete this campaign? y/n"
-	case ui.RowRune:
-		return "stop watching this rune? y/n"
-	case ui.RowLookout:
-		return "remove this lookout? y/n"
-	case ui.RowTrack:
-		return "dismiss this track? y/n"
-	}
-	return ""
 }
 
 // View wraps renderContent's string in a tea.View, declaring alt-screen and
@@ -1904,7 +1906,6 @@ func (m *Model) renderOutlineRowLine(rows []ui.Row, i, idx, hoverIdx, vaultIdx, 
 		return line
 	}
 	isCursor := i == idx
-	confirming := isCursor && m.confirmDeleteID != "" && rowMatchesConfirmDelete(row, m.confirmDeleteID)
 	warning := m.warningText != "" && m.warningTarget.matches(row)
 	titleView := ""
 	if warning {
@@ -1914,12 +1915,10 @@ func (m *Model) renderOutlineRowLine(rows []ui.Row, i, idx, hoverIdx, vaultIdx, 
 	}
 	// Action hints render on the fixed bottom status line (see statusBar), never
 	// inline — an inline hint on a long row wrapped and shifted the layout. The
-	// only inline exceptions are the delete confirm prompt and the Vault's
-	// read-only note, which are row-specific state, not generic action tips.
+	// only inline exception is the Vault's read-only note, which is row-specific
+	// state, not a generic action tip.
 	hint := ""
-	if confirming {
-		hint = "  " + ui.StyleImportant.Render(m.confirmDeleteHint(row))
-	} else if !warning && !m.hideHoverTips && row.Kind == ui.RowSection && row.Section == "someday" && vaultIdx >= 0 && hoverIdx >= vaultIdx {
+	if !warning && !m.hideHoverTips && row.Kind == ui.RowSection && row.Section == "someday" && vaultIdx >= 0 && hoverIdx >= vaultIdx {
 		hint = "  " + ui.StyleMuted.Render("(read only)")
 	}
 	rendered, _ := ui.RenderRow(row, m.store, titleView, isCursor, m.isNewQuest(row), width, hint)
@@ -1945,6 +1944,16 @@ func (m *Model) rowTitleView(row ui.Row, isCursor bool) string {
 		return m.lookoutRowTitle(row.QuestID, row.LookoutURL)
 	case ui.RowTrack:
 		return m.trackRowContent(row.QuestID, row.TrackEvent)
+	case ui.RowTrail:
+		return m.trailRowContent(row.Code)
+	case ui.RowTrailQuest, ui.RowRuneQuest, ui.RowLookoutQuest:
+		return m.roomQuestTitle(row, isCursor)
+	case ui.RowBodyLine:
+		// The active notes line renders the shared body editor (muted prose).
+		if isCursor && m.bodyOwnerKind == ownerCampaign {
+			return m.renderEditableStyled(&m.bodyEditor, ui.StyleMuted)
+		}
+		return ""
 	}
 	if isCursor && m.editor != nil {
 		return m.renderEditableStyled(m.editor, m.cursorTitleStyle(row))
@@ -2000,8 +2009,6 @@ func (m *Model) questTitleView(row ui.Row, isCursor bool) string {
 func (m *Model) wildsEmptyHelp(width int) []string {
 	var msg, hint string
 	switch {
-	case m.searchOpen:
-		msg = "No quests match."
 	case m.quickFilter == filterTaken:
 		msg = "The road is quiet — nothing taken up."
 		hint = "Take up a quest with Ctrl+A"
@@ -2111,8 +2118,6 @@ func (m *Model) statusRow() (ui.Row, bool) {
 	}
 	var sets [][]ui.Row
 	switch {
-	case m.modal != nil && m.modal.Kind == ModalCampaignDetail && m.modal.InQuestList:
-		sets = [][]ui.Row{campaignQuestRows(m.store, m.modal.CampaignID)}
 	case m.modal != nil && m.modal.Kind == ModalSectionDetail:
 		sets = [][]ui.Row{m.sectionRows(m.modal.Section)}
 	default:
@@ -2141,7 +2146,7 @@ func (m *Model) statusHint() string {
 	// At Camp, a quest can be peeked (Tab) or ventured into the Wilds (Enter).
 	if m.wilds {
 		if row, ok := m.statusRow(); ok && row.Kind == ui.RowQuest {
-			return renderHintParts([]hintPart{{"tab", "peek"}, {"enter", "venture"}})
+			return renderHintParts([]hintPart{{"tab", "peek"}, {"enter", "venture"}, {"ctrl+e", "schedule"}})
 		}
 	}
 	if m.modal != nil && m.modal.Kind == ModalQuestDetail {
@@ -2167,7 +2172,12 @@ func (m *Model) tavernHint() []hintPart {
 	if m.hallFocus {
 		switch m.hallCursor.kind {
 		case ui.RowBanner, ui.RowProject:
-			return []hintPart{{"enter", "new campaign"}, {"tab", "open"}, {"ctrl+n", "new banner"}}
+			// Errands hold quests, not campaigns — Enter there adds a quest.
+			addVerb := "new campaign"
+			if m.hallCursor.kind == ui.RowBanner && m.hallCursor.bannerID == errandsBanner {
+				addVerb = "new quest"
+			}
+			return []hintPart{{"enter", addVerb}, {"tab", "open"}, {"ctrl+n", "new banner"}}
 		case ui.RowSection:
 			return []hintPart{{"tab", "open"}, {"ctrl+n", "new banner"}}
 		}
@@ -2175,15 +2185,40 @@ func (m *Model) tavernHint() []hintPart {
 	}
 	switch m.cursor.kind {
 	case ui.RowQuest:
-		return []hintPart{{"enter", "add"}, {"tab", "open"}, {"esc", "back"}}
+		return []hintPart{{"enter", "add"}, {"tab", "open"}, {"ctrl+e", "schedule"}, {"esc", "back"}}
 	case ui.RowProject:
+		// On a campaign's own pane header, Ctrl+L links the next saga chapter.
+		if m.hallCursor.kind == ui.RowProject && m.cursor.projectID == m.hallCursor.projectID {
+			return []hintPart{{"enter", "add"}, {"tab", "open"}, {"ctrl+l", "link chapter"}, {"esc", "back"}}
+		}
 		return []hintPart{{"enter", "add"}, {"tab", "open"}, {"esc", "back"}}
+	case ui.RowSagaLink:
+		return []hintPart{{"enter", "open chapter"}, {"esc", "back"}}
 	case ui.RowBanner:
+		// Errands add quests; every other area adds campaigns.
+		if m.cursor.bannerID == errandsBanner {
+			return []hintPart{{"enter", "add quest"}, {"esc", "back"}}
+		}
 		return []hintPart{{"enter", "add campaign"}, {"esc", "back"}}
 	case ui.RowNewQuest, ui.RowNewProject:
 		return []hintPart{{"enter", "add"}, {"esc", "back"}}
 	case ui.RowVaultHeader:
 		return []hintPart{{"enter", "toggle"}, {"esc", "back"}}
+	case ui.RowRune, ui.RowLookout, ui.RowTrail:
+		// A sigil line: Enter opens its own link, Tab jumps to the owning quest.
+		parts := []hintPart{{"enter", "open"}, {"tab", "quest"}, {"c", "copy"}}
+		switch m.cursor.kind {
+		case ui.RowLookout:
+			parts = append(parts, hintPart{"r", "rename"})
+		default: // RowRune / RowTrail — found from trails, so "r" resyncs
+			parts = append(parts, hintPart{"r", "resync"})
+		}
+		return append(parts, hintPart{"esc", "back"})
+	case ui.RowTrack:
+		return []hintPart{{"tab", "quest"}, {"c", "copy"}, {"r", "resync"}, {"esc", "back"}}
+	case ui.RowTrailQuest, ui.RowRuneQuest, ui.RowLookoutQuest:
+		// Room quest headers aren't collapsible — Enter/r resync the quest.
+		return []hintPart{{"enter", "resync"}, {"tab", "quest"}, {"esc", "back"}}
 	}
 	return []hintPart{{"esc", "back"}}
 }

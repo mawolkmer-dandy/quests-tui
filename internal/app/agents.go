@@ -279,6 +279,9 @@ func (m *Model) hasAnimatedIntegration() bool {
 	if !m.integrationsEnabled {
 		return false
 	}
+	if m.findingQuestID != "" {
+		return true // a resync / track-find is scanning trails — keep the spinner going
+	}
 	if m.hasWorkingAgent() {
 		return true
 	}

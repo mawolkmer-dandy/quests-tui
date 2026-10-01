@@ -1,8 +1,10 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -224,39 +226,36 @@ func (m *Model) applyFind(msg findMsg) tea.Cmd {
 }
 
 // graphiteStackRE pulls each PR number from a Graphite "Current stack" comment,
-// whose entries are lines like `* **#48708**`. See stackExpandCmd.
+// whose entries are lines like `* **#48708**`. See graphiteStackCodes.
 var graphiteStackRE = regexp.MustCompile(`(?m)^\*+\s*\*\*#(\d+)\*\*`)
 
-// stackMsg carries the PR numbers found in a pasted PR's Graphite stack.
+// githubStackQuery reads the whole stack a PR belongs to via the GitHub-native
+// Stacked PRs GraphQL field. Every member exposes the same PullRequest.stack, so
+// any one member seeds the full stack; `stack` is null for a PR that isn't in a
+// GitHub stack.
+const githubStackQuery = `query($owner:String!,$name:String!,$num:Int!){repository(owner:$owner,name:$name){pullRequest(number:$num){stack{entries(first:100){nodes{pullRequest{number}}}}}}}`
+
+// stackMsg carries the PR numbers found in a pasted PR's stack (GitHub-native or
+// Graphite).
 type stackMsg struct {
 	questID string
 	repo    string
 	codes   []string
 }
 
-// stackExpandCmd looks up a pasted PR's Graphite stack comment and returns the
-// other PRs in the same stack, so linking one rung links the whole stack.
-// Graphite posts the same "Current stack" comment (marker: a graphite.dev link)
-// on every PR in the stack, listing all members — and it survives merge, unlike
-// branch-walking. No-op (nil) when there's no such comment.
+// stackExpandCmd looks up a pasted PR's stack and returns the other PRs in the
+// same stack, so linking one rung links the whole stack. It checks GitHub-native
+// Stacked PRs first (the `gh stack` tool), then falls back to Graphite — the two
+// stacking tools this repo has used. Both list every member on each PR and
+// survive merge, unlike branch-walking, so any linked member seeds the full
+// stack. No-op (nil) when the PR is in neither kind of stack.
 func stackExpandCmd(questID string, pr model.PRLink) tea.Cmd {
 	num := strings.TrimPrefix(pr.Code, "#")
 	repo := pr.Repo
 	return func() tea.Msg {
-		out, err := runCmdTimeout(findTimeout, "gh", "api",
-			fmt.Sprintf("repos/%s/issues/%s/comments", repo, num),
-			"--jq", `.[] | select(.body | contains("graphite.dev")) | .body`)
-		if err != nil {
-			return nil
-		}
-		var codes []string
-		seen := map[string]bool{}
-		for _, mm := range graphiteStackRE.FindAllStringSubmatch(string(out), -1) {
-			c := "#" + mm[1]
-			if !seen[c] {
-				seen[c] = true
-				codes = append(codes, c)
-			}
+		codes := githubStackExpand(repo, num)
+		if len(codes) == 0 {
+			codes = graphiteStackExpand(repo, num)
 		}
 		if len(codes) == 0 {
 			return nil
@@ -265,12 +264,98 @@ func stackExpandCmd(questID string, pr model.PRLink) tea.Cmd {
 	}
 }
 
-// autoStackExpandCmd re-reads each active quest's Graphite stack on every sync
-// pass, so a PR stacked onto the chain AFTER the quest was first linked gets
-// pulled in too — captureSync only expands the stack as it stood when a rung
-// was pasted. Graphite posts the same "Current stack" comment on every member,
-// so one still-open member's comment lists the whole current stack; we query a
-// single representative per quest (see stackExpandSeed). Vaulted quests and
+// githubStackExpand returns every PR code in the GitHub-native stack that PR
+// `num` belongs to, or nil when it isn't part of one (or the query fails).
+func githubStackExpand(repo, num string) []string {
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return nil
+	}
+	out, err := runCmdTimeout(findTimeout, "gh", "api", "graphql",
+		"-F", "owner="+owner, "-F", "name="+name, "-F", "num="+num,
+		"-f", "query="+githubStackQuery)
+	if err != nil {
+		return nil
+	}
+	return githubStackCodes(out)
+}
+
+// graphiteStackExpand returns every PR code in the Graphite stack that PR `num`
+// belongs to, read from the "Current stack" comment Graphite posts on every
+// member, or nil when there's no such comment (or the query fails).
+func graphiteStackExpand(repo, num string) []string {
+	out, err := runCmdTimeout(findTimeout, "gh", "api",
+		fmt.Sprintf("repos/%s/issues/%s/comments", repo, num),
+		"--jq", `.[] | select(.body | contains("graphite.dev")) | .body`)
+	if err != nil {
+		return nil
+	}
+	return graphiteStackCodes(out)
+}
+
+// githubStackCodes parses the githubStackQuery response into the stack's PR
+// codes (e.g. "#123"), in stack order. Returns nil when the PR has no stack.
+func githubStackCodes(data []byte) []string {
+	var resp struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					Stack *struct {
+						Entries struct {
+							Nodes []struct {
+								PullRequest struct {
+									Number int `json:"number"`
+								} `json:"pullRequest"`
+							} `json:"nodes"`
+						} `json:"entries"`
+					} `json:"stack"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil
+	}
+	st := resp.Data.Repository.PullRequest.Stack
+	if st == nil {
+		return nil
+	}
+	var codes []string
+	seen := map[string]bool{}
+	for _, n := range st.Entries.Nodes {
+		if n.PullRequest.Number == 0 {
+			continue
+		}
+		c := "#" + strconv.Itoa(n.PullRequest.Number)
+		if !seen[c] {
+			seen[c] = true
+			codes = append(codes, c)
+		}
+	}
+	return codes
+}
+
+// graphiteStackCodes pulls the deduped PR codes from a Graphite "Current stack"
+// comment body.
+func graphiteStackCodes(body []byte) []string {
+	var codes []string
+	seen := map[string]bool{}
+	for _, mm := range graphiteStackRE.FindAllStringSubmatch(string(body), -1) {
+		c := "#" + mm[1]
+		if !seen[c] {
+			seen[c] = true
+			codes = append(codes, c)
+		}
+	}
+	return codes
+}
+
+// autoStackExpandCmd re-reads each active quest's stack on every sync pass, so a
+// PR stacked onto the chain AFTER the quest was first linked gets pulled in too
+// — captureSync only expands the stack as it stood when a rung was pasted. Both
+// GitHub-native and Graphite stacks expose every member from any one member, so
+// one still-open member lists the whole current stack; we query a single
+// representative per quest (see stackExpandSeed). Vaulted quests and
 // fully-settled stacks (every linked PR merged/closed) are skipped — a finished
 // stack can't grow, so it costs no `gh` calls. The stackMsg handler dedupes, so
 // an unchanged stack adds nothing and stays silent on a background pass.
@@ -296,12 +381,11 @@ func (m *Model) autoStackExpandCmd() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// stackExpandSeed picks the PR whose Graphite stack comment a quest's current
-// stack should be read from: the first linked PR that isn't known merged/closed
-// (its comment is the one Graphite still updates), or — when none has a cached
-// status yet (e.g. just linked) — the first such unknown PR. Returns ok=false
-// only when every linked PR is confirmed settled, so a finished stack triggers
-// no `gh` call.
+// stackExpandSeed picks the PR a quest's current stack should be read from: the
+// first linked PR that isn't known merged/closed (an open member reflects the
+// freshest stack), or — when none has a cached status yet (e.g. just linked) —
+// the first such unknown PR. Returns ok=false only when every linked PR is
+// confirmed settled, so a finished stack triggers no `gh` call.
 func (m *Model) stackExpandSeed(q *model.Quest) (model.PRLink, bool) {
 	var fallback model.PRLink
 	haveFallback := false

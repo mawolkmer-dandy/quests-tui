@@ -39,18 +39,16 @@ func TestScrollFrameHeightConstant(t *testing.T) {
 	ui.Init(true)
 	const H = 24
 
-	// Campaign detail — the confirmed-varying case (fold hint toggled height by 1).
-	stC := &store.Store{Projects: []model.Project{{ID: "p1", Name: "C"}}}
+	// Quest detail — a long body scrolls the focus view (shares renderFocusView).
+	qC := model.Quest{ID: "q1", Title: "Q"}
 	for i := 0; i < H-11; i++ { // just past the viewport
-		stC.Quests = append(stC.Quests, model.Quest{ID: fmt.Sprintf("q%d", i), Title: fmt.Sprintf("Q %d", i), ProjectID: "p1", Status: model.StatusOpen})
+		qC.Body = append(qC.Body, model.BodyLine{ID: fmt.Sprintf("b%d", i), Text: fmt.Sprintf("line %d", i)})
 	}
+	stC := &store.Store{Quests: []model.Quest{qC}}
 	mC := flickerModel(H)
 	mC.store = stC
-	mC.modal = campaignDetailModal(&stC.Projects[0])
-	if r, ok := nearestSelectableRow(mC.sectionRows("campaigns"), 0); ok {
-		mC.setCursor(r)
-	}
-	assertConstantScreenHeight(t, "campaign", mC, func() {
+	mC.openQuestDetailForTest(&stC.Quests[0])
+	assertConstantScreenHeight(t, "quest", mC, func() {
 		mC.handleFocusWheel(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
 	})
 

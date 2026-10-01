@@ -56,6 +56,12 @@ var (
 	// timeline.
 	GlyphArchived = "\U000f003c" // nf-md-archive
 
+	// GlyphErrands marks the pinned Errands area — a signpost, distinct from the
+	// flag every user area (Banner) carries, so the home for loose quests + rites
+	// reads as a fixture rather than one of your own areas (and stays in the
+	// quest-world vernacular — errands you run around town, not a to-do checklist).
+	GlyphErrands = "\U000f0781" // nf-md-sign_direction
+
 	// Integration status glyphs (see internal/app/sync.go rendering). Jira
 	// status is a filling circle (empty → half → full); a PR uses real
 	// GitHub/Octicon-style glyphs for its CI/merge state; a code whose sync
@@ -68,6 +74,8 @@ var (
 	GlyphPRRunning      = "\U000f0996" // nf-md-progress_clock — PR CI: running (amber, pulsing)
 	GlyphPRMerged       = "\uf419"     // nf-oct-git_merge — PR merged (mauve) — outranks CI state
 	GlyphPRClosed       = "\uf4dc"     // nf-oct-git_pull_request_closed — PR closed unmerged (muted)
+	GlyphPRComment      = "\U000f0182" // nf-md-comment_outline — PR review comments (resolved/total)
+	GlyphPRApproval     = "\U000f0008" // nf-md-account_check — PR approvals (approved/reviewers)
 	GlyphFetching       = "\U000f04e6" // nf-md-sync — code linked but not yet synced — "fetching" (amber, pulsing)
 	GlyphLoading        = "·"          // legacy muted loading dot (kept for compatibility)
 

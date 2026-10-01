@@ -108,8 +108,10 @@ func (m *Model) completeVenture() tea.Cmd {
 	}
 	if q.Status != model.StatusDone {
 		now := time.Now()
-		q.Status = model.StatusDone
-		q.CompletedAt = &now
+		if !recycleRite(q) { // a rite rolls to its next muster instead of finishing
+			q.Status = model.StatusDone
+			q.CompletedAt = &now
+		}
 		q.UpdatedAt = now
 		m.save()
 	}

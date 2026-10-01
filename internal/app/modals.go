@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,12 +21,30 @@ type ModalKind int
 
 const (
 	ModalQuestDetail ModalKind = iota
-	ModalCampaignDetail
 	ModalSectionDetail
 	ModalProjectPicker
 	ModalAgentPicker
 	ModalHelp
 	ModalDetailHelp
+	// ModalConfirmDelete is the shared "are you sure?" dialog for every
+	// destructive action (banner / campaign / quest / rune / lookout / track),
+	// so confirmation looks and behaves identically everywhere. See openDeleteModal.
+	ModalConfirmDelete
+	// ModalSchedulePicker sets a quest's muster (its "when" date) or turns it into
+	// a rite (recurrence) from one grouped menu. See openSchedulePicker.
+	ModalSchedulePicker
+)
+
+// bodyOwnerKind identifies whose Body the shared outline editor is currently
+// editing. The editor state lives on the Model (not on Modal) so the same rich
+// experience — navigation, split/merge, copy-paste — drives both a quest's
+// detail modal and a campaign's inline notes in the Tavern pane.
+type bodyOwnerKind int
+
+const (
+	ownerNone bodyOwnerKind = iota
+	ownerQuest
+	ownerCampaign
 )
 
 type pickerItem struct {
@@ -40,7 +59,7 @@ type pickerItem struct {
 // (quest/campaign/section detail) rather than a small centered dialog — see
 // renderFocusView vs renderModal.
 func isFocusModal(k ModalKind) bool {
-	return k == ModalQuestDetail || k == ModalCampaignDetail || k == ModalSectionDetail
+	return k == ModalQuestDetail || k == ModalSectionDetail
 }
 
 // isPickerModal reports whether kind is one of the small filtered-list dialogs
@@ -72,6 +91,29 @@ func (m *Model) handlePickerClick(msg tea.MouseClickMsg) tea.Cmd {
 	return m.updateModal(tea.KeyPressMsg{Code: tea.KeyEnter})
 }
 
+// handleScheduleClick resolves a left-click on a scheduling-picker option to its
+// index (options are separated by group captions, so it matches by screen Y
+// rather than a contiguous top+idx map) and confirms it like pressing Enter.
+func (m *Model) handleScheduleClick(msg tea.MouseClickMsg) tea.Cmd {
+	if m.modal == nil || len(m.scheduleItemYs) == 0 {
+		return nil
+	}
+	mouse := msg.Mouse()
+	if mouse.Button != tea.MouseLeft {
+		return nil
+	}
+	if mouse.X < m.scheduleItemX0 || mouse.X >= m.scheduleItemX1 {
+		return nil
+	}
+	for i, y := range m.scheduleItemYs {
+		if mouse.Y == y {
+			m.modal.PickerIndex = i
+			return m.updateModal(tea.KeyPressMsg{Code: tea.KeyEnter})
+		}
+	}
+	return nil
+}
+
 // handlePickerWheel moves the picker's highlight up/down with the scroll wheel.
 func (m *Model) handlePickerWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	if m.modal == nil {
@@ -89,53 +131,42 @@ func (m *Model) handlePickerWheel(msg tea.MouseWheelMsg) tea.Cmd {
 type Modal struct {
 	Kind ModalKind
 
-	// ModalQuestDetail / ModalCampaignDetail share the body-outline editor —
-	// QuestID or CampaignID is set depending on Kind (see currentBody).
-	QuestID    string
-	CampaignID string
-	BodyCursor int
-	BodyEditor textinput.Model
-
-	// ModalCampaignDetail only: browsing the quest list below the
-	// description. While true, m.cursor/m.editor target whatever quest (or
-	// the "+ New Quest" row) is highlighted there — reusing the exact same
-	// mechanism, and the exact same actions (handleRowKey), as the main
-	// outline uses for quest rows.
-	InQuestList bool
+	// ModalQuestDetail: the quest whose body outline the shared editor
+	// (m.bodyEditor, see bodyOwnerKind) is editing.
+	QuestID string
 
 	// ModalProjectPicker
 	TargetQuestID string
 	// TargetProjectID: when set, the picker (same ModalProjectPicker machinery)
-	// assigns a Banner to this campaign instead of moving a quest to a campaign.
+	// acts on this campaign — assigning its Banner, or (with SagaLink) its next
+	// saga chapter — instead of moving a quest to a campaign.
 	TargetProjectID string
-	PickerItems     []pickerItem
-	PickerIndex     int
-	PickerFilter    string // fuzzy-search query typed into the picker
-	SourceRowIdx    int    // the moved quest's row index in the source list, to relocate the cursor after the move
+	// SagaLink marks a TargetProjectID picker as choosing the next saga chapter
+	// (sets NextID) rather than a Banner.
+	SagaLink     bool
+	PickerItems  []pickerItem
+	PickerIndex  int
+	PickerFilter string // fuzzy-search query typed into the picker
+	SourceRowIdx int    // the moved quest's row index in the source list, to relocate the cursor after the move
 	// TakeUp marks a triage picker opened with Ctrl+A: filing the quest also
 	// takes it up (Status → active) so it lands in Camp. Ctrl+O leaves it open.
 	TakeUp bool
-	// Jump marks the Ctrl+P fuzzy-jump picker: its items are hall targets
-	// (rooms / banners / campaigns), and selecting one navigates the hall there
+	// Jump marks the Ctrl+F Search picker: its items are navigation targets
+	// (rooms / banners / campaigns / quests), and selecting one navigates there
 	// (see updateModal's enter) rather than moving a quest.
 	Jump bool
 
 	// ModalSectionDetail: which section ("inbox" | "someday") this page shows.
 	Section string
-}
 
-// campaignQuestRows is the row list scoped to one campaign's quest section —
-// its quests, in outline order, plus a trailing "+ New Quest" — used to
-// navigate and delete within a campaign's focused quest list without
-// spilling into the rest of the outline.
-func campaignQuestRows(s *store.Store, campaignID string) []ui.Row {
-	quests := ui.QuestsForCampaign(s, campaignID)
-	rows := make([]ui.Row, 0, len(quests)+1)
-	for _, q := range quests {
-		rows = append(rows, ui.Row{Kind: ui.RowQuest, ProjectID: campaignID, QuestID: q.ID})
-	}
-	rows = append(rows, ui.Row{Kind: ui.RowNewQuest, ProjectID: campaignID})
-	return rows
+	// ModalConfirmDelete: what's being deleted (DeleteTarget), the dialog's
+	// pre-computed copy (Title / Body / the confirm button's verb), and which
+	// button is focused (0 = Cancel, the safe default; 1 = the delete button).
+	DeleteTarget cursorTarget
+	Title        string
+	Body         string
+	DeleteVerb   string
+	DeleteFocus  int
 }
 
 // sectionRows is the navigable row list for a section's focused page: the
@@ -145,6 +176,9 @@ func campaignQuestRows(s *store.Store, campaignID string) []ui.Row {
 // same content the Tavern box shows (see ui.SectionContent), so both views
 // render identically; the focused page just has more vertical room.
 func (m *Model) sectionRows(section string) []ui.Row {
+	if section == "trails" {
+		return m.trailsRows() // built app-side — PR status lives in the app, not the store
+	}
 	return ui.SectionContent(m.store, section, m.collapsedProjects)
 }
 
@@ -207,6 +241,8 @@ func (m *Model) sectionTitle(section string) string {
 		return fmt.Sprintf("Questboard (%d)", ui.CountInbox(m.store))
 	case "runes":
 		return fmt.Sprintf("Runes (%d)", ui.CountRunes(m.store))
+	case "trails":
+		return fmt.Sprintf("Trails (%d)", m.trailsCount())
 	case "campaigns":
 		return "Campaigns"
 	case "someday":
@@ -225,7 +261,7 @@ func bodyLineEditor(text string) textinput.Model {
 }
 
 // newBodyEditor is bodyLineEditor plus clearing any active selection —
-// used wherever mod.BodyEditor is replaced mid-session (moving between
+// used wherever m.bodyEditor is replaced mid-session (moving between
 // body lines, inserting/removing one), so a selection from the line just
 // left behind can't appear to apply to the new one.
 func (m *Model) newBodyEditor(text string) textinput.Model {
@@ -233,36 +269,27 @@ func (m *Model) newBodyEditor(text string) textinput.Model {
 	return bodyLineEditor(text)
 }
 
-func questDetailModal(q *model.Quest) *Modal {
-	if len(q.Body) == 0 {
-		q.Body = []model.BodyLine{{ID: store.NewID(), Text: ""}}
-	}
-	return &Modal{
-		Kind:       ModalQuestDetail,
-		QuestID:    q.ID,
-		BodyCursor: 0,
-		BodyEditor: bodyLineEditor(q.Body[0].Text),
-	}
+// openQuestDetail pushes the quest focus modal and points the shared body
+// editor at that quest. Body state lives on the Model now, so the seeding
+// happens here (at push) rather than in the modal constructor.
+func (m *Model) openQuestDetail(q *model.Quest) {
+	m.pushModal(&Modal{Kind: ModalQuestDetail, QuestID: q.ID})
+	m.seedBody(ownerQuest, q.ID)
 }
 
-func campaignDetailModal(p *model.Project) *Modal {
-	if len(p.Body) == 0 {
-		p.Body = []model.BodyLine{{ID: store.NewID(), Text: ""}}
-	}
-	return &Modal{
-		Kind:       ModalCampaignDetail,
-		CampaignID: p.ID,
-		BodyCursor: 0,
-		BodyEditor: bodyLineEditor(p.Body[0].Text),
-	}
-}
+// bannerMoveTarget prefixes a picker item's ID when the target is an area
+// (Banner), not a campaign — selecting it makes the quest a loose quest under
+// that area. The \x00 keeps it from colliding with any real campaign/banner ID.
+const bannerMoveTarget = "\x00move-banner:"
 
-// projectPickerModal is the triage / move-to-campaign picker. Campaigns are
-// ordered recents-first (most recently touched at the top — where you're most
-// likely to file next), each annotated with its active-quest count. takeUp
-// marks the Ctrl+A "take it up now" variant (files as active); Ctrl+O files as
-// open. Archived campaigns (in the Vault) aren't filing targets.
-func projectPickerModal(s *store.Store, questID, currentProjectID string, takeUp bool) *Modal {
+// projectPickerModal is the triage / move picker. Campaigns come first, ordered
+// recents-first (most recently touched at the top — where you're most likely to
+// file next) each annotated with its active-quest count; then the areas (Errands
+// + banners), where the quest lands as loose area work. currentID (a campaign ID,
+// a bannerMoveTarget sentinel, or "") is pre-selected. takeUp marks the Ctrl+A
+// "take it up now" variant (files as active); Ctrl+O files as open. Archived
+// campaigns (in the Vault) aren't filing targets.
+func projectPickerModal(s *store.Store, questID, currentID string, takeUp bool) *Modal {
 	live := make([]model.Project, 0, len(s.Projects))
 	for _, p := range s.Projects {
 		if !p.Archived {
@@ -282,11 +309,40 @@ func projectPickerModal(s *store.Store, questID, currentProjectID string, takeUp
 			it.Hint = fmt.Sprintf("%d active", n)
 		}
 		items = append(items, it)
-		if p.ID == currentProjectID {
+		if p.ID == currentID {
 			idx = len(items) - 1
 		}
 	}
+	// Areas — move the quest under a banner (or Errands) as loose area work.
+	addArea := func(bannerID, name string) {
+		it := pickerItem{ID: bannerMoveTarget + bannerID, Label: name, Hint: "area"}
+		items = append(items, it)
+		if it.ID == currentID {
+			idx = len(items) - 1
+		}
+	}
+	addArea(errandsBanner, errandsLabel)
+	for _, b := range s.Banners {
+		addArea(b.ID, b.Name)
+	}
 	return &Modal{Kind: ModalProjectPicker, TargetQuestID: questID, PickerItems: items, PickerIndex: idx, TakeUp: takeUp}
+}
+
+// moveTargetName is the display name of a move-picker selection, for the toast:
+// a campaign name (or "the Questboard" for ""), or an area name for a
+// bannerMoveTarget sentinel.
+func (m *Model) moveTargetName(sel string) string {
+	if strings.HasPrefix(sel, bannerMoveTarget) {
+		bannerID := strings.TrimPrefix(sel, bannerMoveTarget)
+		if bannerID == errandsBanner {
+			return errandsLabel
+		}
+		if b := m.findBanner(bannerID); b != nil {
+			return b.Name
+		}
+		return "the area"
+	}
+	return m.projectName(sel)
 }
 
 // projectRecencyAndActive returns, per campaign ID, the most recent quest
@@ -325,6 +381,27 @@ func bannerPickerModal(s *store.Store, projectID, currentBannerID string) *Modal
 	return &Modal{Kind: ModalProjectPicker, TargetProjectID: projectID, PickerItems: items, PickerIndex: idx}
 }
 
+// sagaPickerModal reuses the ModalProjectPicker machinery to pick the next saga
+// chapter for a campaign (SagaLink). The candidates are the live campaigns
+// except the campaign itself and any whose own chain already leads back to it
+// (which would form a cycle), plus "— no next chapter —" to clear the link.
+func (m *Model) sagaPickerModal(projectID string) *Modal {
+	items := []pickerItem{{ID: "", Label: "— no next chapter —"}}
+	idx := 0
+	p := m.findProject(projectID)
+	for i := range m.store.Projects {
+		c := &m.store.Projects[i]
+		if c.ID == projectID || c.Archived || m.chapterReaches(c.ID, projectID) {
+			continue
+		}
+		items = append(items, pickerItem{ID: c.ID, Label: c.Name})
+		if p != nil && c.ID == p.NextID {
+			idx = len(items) - 1
+		}
+	}
+	return &Modal{Kind: ModalProjectPicker, TargetProjectID: projectID, SagaLink: true, PickerItems: items, PickerIndex: idx}
+}
+
 // projectName is a campaign's display name, or a stand-in for the empty
 // "no campaign" target (the Questboard).
 func (m *Model) projectName(id string) string {
@@ -348,11 +425,11 @@ func fileToastText(takeUp bool, name string) string {
 	return "filed to " + name
 }
 
-// jumpModal is the Ctrl+P fuzzy jump: every hall destination (the rooms, each
-// banner, each live campaign) as one flat searchable list. Each item's ID
-// encodes its kind ("section:inbox" / "banner:<id>" / "project:<id>") so the
-// enter-apply can navigate the hall to it.
-func jumpModal(s *store.Store) *Modal {
+// searchModal is the unified fuzzy finder (Ctrl+F): rooms, banners, campaigns,
+// AND individual quests, all in one list. Selecting a room/banner/campaign
+// navigates the hall there; selecting a quest lands on it in its pane. It
+// replaces both the old jump modal and the inline search bar.
+func searchModal(s *store.Store) *Modal {
 	items := []pickerItem{
 		{ID: "section:inbox", Label: "Questboard"},
 		{ID: "section:someday", Label: "Vault"},
@@ -377,7 +454,39 @@ func jumpModal(s *store.Store) *Modal {
 	if ui.CountLookouts(s) > 0 {
 		items = append(items, pickerItem{ID: "section:lookouts", Label: "Lookouts"})
 	}
+	// Individual quests — un-vaulted, hinted with their campaign/area for context.
+	for i := range s.Quests {
+		q := &s.Quests[i]
+		if q.Vaulted {
+			continue
+		}
+		it := pickerItem{ID: "quest:" + q.ID, Label: q.Title}
+		if p := findProjectIn(s, q.ProjectID); p != nil {
+			it.Hint = p.Name
+		} else if q.BannerID == errandsBanner {
+			it.Hint = errandsLabel
+		} else if b := findBannerIn(s, q.BannerID); b != nil {
+			it.Hint = b.Name
+		} else {
+			it.Hint = "Questboard"
+		}
+		items = append(items, it)
+	}
 	return &Modal{Kind: ModalProjectPicker, Jump: true, PickerItems: items}
+}
+
+// findProjectIn is a store-scoped campaign lookup for searchModal (no Model
+// receiver). Returns nil for an empty id or a missing/archived campaign.
+func findProjectIn(s *store.Store, id string) *model.Project {
+	if id == "" {
+		return nil
+	}
+	for i := range s.Projects {
+		if s.Projects[i].ID == id {
+			return &s.Projects[i]
+		}
+	}
+	return nil
 }
 
 // findBannerIn is a store-scoped banner lookup for jumpModal (which has no
@@ -414,21 +523,17 @@ func detailHelpModal() *Modal {
 }
 
 // currentBody returns a pointer into the store's own slice for whichever
-// entity (quest or campaign) owns the open modal's body outline, so edits
-// through it always persist. Shared by ModalQuestDetail and
-// ModalCampaignDetail so the outline-editing logic below only exists once.
+// entity (quest or campaign) currently owns the shared body editor, so edits
+// through it always persist. Owner is set by seedBody — a quest in its detail
+// modal, or a campaign inline in the Tavern pane.
 func (m *Model) currentBody() *[]model.BodyLine {
-	mod := m.modal
-	if mod == nil {
-		return nil
-	}
-	switch mod.Kind {
-	case ModalQuestDetail:
-		if q := m.findQuest(mod.QuestID); q != nil {
+	switch m.bodyOwnerKind {
+	case ownerQuest:
+		if q := m.findQuest(m.bodyOwnerID); q != nil {
 			return &q.Body
 		}
-	case ModalCampaignDetail:
-		if p := m.findProject(mod.CampaignID); p != nil {
+	case ownerCampaign:
+		if p := m.findProject(m.bodyOwnerID); p != nil {
 			return &p.Body
 		}
 	}
@@ -436,25 +541,42 @@ func (m *Model) currentBody() *[]model.BodyLine {
 }
 
 func (m *Model) touchBodyOwner() {
-	mod := m.modal
-	if mod == nil {
-		return
-	}
-	if mod.Kind == ModalQuestDetail {
-		if q := m.findQuest(mod.QuestID); q != nil {
+	if m.bodyOwnerKind == ownerQuest {
+		if q := m.findQuest(m.bodyOwnerID); q != nil {
 			q.UpdatedAt = time.Now()
 		}
 	}
 	m.save()
 }
 
-func (m *Model) commitBodyLine() {
-	mod := m.modal
-	body := m.currentBody()
-	if body == nil || mod.BodyCursor < 0 || mod.BodyCursor >= len(*body) {
+// seedBody points the shared body editor at owner (a quest or campaign),
+// cursor on its first line — creating an empty first line if the body is empty,
+// so there's always a line to edit. ownerNone clears it (no body focused).
+func (m *Model) seedBody(kind bodyOwnerKind, id string) {
+	m.bodyOwnerKind = kind
+	m.bodyOwnerID = id
+	m.bodyCursor = 0
+	if kind == ownerNone {
+		m.bodyEditor = m.newBodyEditor("")
 		return
 	}
-	(*body)[mod.BodyCursor].Text = mod.BodyEditor.Value()
+	body := m.currentBody()
+	if body != nil && len(*body) == 0 {
+		*body = []model.BodyLine{{ID: store.NewID(), Text: ""}}
+	}
+	first := ""
+	if body != nil && len(*body) > 0 {
+		first = (*body)[0].Text
+	}
+	m.bodyEditor = m.newBodyEditor(first)
+}
+
+func (m *Model) commitBodyLine() {
+	body := m.currentBody()
+	if body == nil || m.bodyCursor < 0 || m.bodyCursor >= len(*body) {
+		return
+	}
+	(*body)[m.bodyCursor].Text = m.bodyEditor.Value()
 	m.touchBodyOwner()
 }
 
@@ -495,11 +617,10 @@ func (m *Model) bodyVisualRows() []bodyVisualRow {
 // currentVisualRow finds the cursor's row in rows; a position sitting on a
 // wrap boundary resolves to the later row (where typing would continue).
 func (m *Model) currentVisualRow(rows []bodyVisualRow) int {
-	mod := m.modal
-	cur := mod.BodyEditor.Position()
+	cur := m.bodyEditor.Position()
 	found := -1
 	for k, vr := range rows {
-		if vr.line == mod.BodyCursor && cur >= vr.start && cur <= vr.end {
+		if vr.line == m.bodyCursor && cur >= vr.start && cur <= vr.end {
 			found = k
 		}
 	}
@@ -518,7 +639,6 @@ func (m *Model) moveBodyCursor(delta int) bool {
 	}
 	m.commitBodyLine()
 	m.clearSelection() // a plain vertical move drops any selection
-	mod := m.modal
 
 	rows := m.bodyVisualRows()
 	cur := m.currentVisualRow(rows)
@@ -530,7 +650,7 @@ func (m *Model) moveBodyCursor(delta int) bool {
 		return false
 	}
 
-	vcol := mod.BodyEditor.Position() - rows[cur].start
+	vcol := m.bodyEditor.Position() - rows[cur].start
 	tr := rows[target]
 	maxPos := tr.end
 	if target+1 < len(rows) && rows[target+1].line == tr.line {
@@ -538,8 +658,8 @@ func (m *Model) moveBodyCursor(delta int) bool {
 	}
 	pos := clampInt(tr.start+vcol, tr.start, maxPos)
 
-	if tr.line == mod.BodyCursor {
-		mod.BodyEditor.SetCursor(pos)
+	if tr.line == m.bodyCursor {
+		m.bodyEditor.SetCursor(pos)
 	} else {
 		m.seedBodyEditor(tr.line, pos)
 	}
@@ -550,19 +670,18 @@ func (m *Model) moveBodyCursor(delta int) bool {
 // below (delta>0), keeping the cursor on the moved line — the editor's
 // Alt+↑/↓ "move line" shortcut. A no-op at the top/bottom edge.
 func (m *Model) moveBodyLine(delta int) {
-	mod := m.modal
 	body := m.currentBody()
 	if body == nil {
 		return
 	}
 	m.commitBodyLine() // fold the in-progress edit into the line before swapping
-	i := mod.BodyCursor
+	i := m.bodyCursor
 	j := i + delta
 	if i < 0 || i >= len(*body) || j < 0 || j >= len(*body) {
 		return
 	}
 	(*body)[i], (*body)[j] = (*body)[j], (*body)[i]
-	mod.BodyCursor = j
+	m.bodyCursor = j
 	m.touchBodyOwner()
 	m.seedBodyEditor(j, len([]rune((*body)[j].Text)))
 }
@@ -570,32 +689,29 @@ func (m *Model) moveBodyLine(delta int) {
 // seedBodyEditor points the editor at body line idx with the cursor at col,
 // clearing any selection.
 func (m *Model) seedBodyEditor(idx, col int) {
-	mod := m.modal
 	body := m.currentBody()
-	mod.BodyCursor = idx
+	m.bodyCursor = idx
 	ed := m.newBodyEditor((*body)[idx].Text)
 	ed.SetCursor(col)
-	mod.BodyEditor = ed
+	m.bodyEditor = ed
 }
 
 // bodyCaretAtStart reports whether the body editor's caret is at the start of
 // its line — the condition for ← to cross into the Sigils pane.
 func (m *Model) bodyCaretAtStart() bool {
-	mod := m.modal
-	if mod == nil {
+	if m.bodyOwnerKind == ownerNone {
 		return false
 	}
-	return mod.BodyEditor.Position() == 0
+	return m.bodyEditor.Position() == 0
 }
 
-// handleBodyOutlineKey handles the body-outline editing keys shared by
-// ModalQuestDetail and ModalCampaignDetail — the line split/merge/exit
-// behaviors of a normal multiline editor (modeled on Obsidian/Notion list
-// editing), plus Ctrl+D objective toggling and multiline paste.
-// handled=false means the caller should forward msg to the line editor as
-// ordinary text input.
+// handleBodyOutlineKey handles the body-outline editing keys shared by a
+// quest's detail modal and a campaign's inline pane notes — the line
+// split/merge/exit behaviors of a normal multiline editor (modeled on
+// Obsidian/Notion list editing), plus Ctrl+D objective toggling and multiline
+// paste. handled=false means the caller should forward msg to the line editor
+// as ordinary text input.
 func (m *Model) handleBodyOutlineKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
-	mod := m.modal
 	body := m.currentBody()
 	if body == nil {
 		return nil, false
@@ -610,17 +726,17 @@ func (m *Model) handleBodyOutlineKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		return nil, true
 
 	case msg.Code == tea.KeyEnter:
-		raw := []rune(mod.BodyEditor.Value())
-		pos := mod.BodyEditor.Position()
+		raw := []rune(m.bodyEditor.Value())
+		pos := m.bodyEditor.Position()
 		kind, display := model.ClassifyBodyLine(string(raw))
 
 		// Enter on an empty "- "/"# " line exits the list/heading — the
 		// marker clears instead of yet another marked line appearing.
 		if kind != model.BodyText && strings.TrimSpace(display) == "" {
-			(*body)[mod.BodyCursor].Text = ""
-			(*body)[mod.BodyCursor].Done = false
+			(*body)[m.bodyCursor].Text = ""
+			(*body)[m.bodyCursor].Done = false
 			m.touchBodyOwner()
-			m.seedBodyEditor(mod.BodyCursor, 0)
+			m.seedBodyEditor(m.bodyCursor, 0)
 			return nil, true
 		}
 
@@ -634,9 +750,9 @@ func (m *Model) handleBodyOutlineKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 			right = "- " + strings.TrimLeft(right, " ")
 			newCol = 2
 		}
-		indent := (*body)[mod.BodyCursor].Indent // the new line keeps the same nesting
-		(*body)[mod.BodyCursor].Text = left
-		insertAt := mod.BodyCursor + 1
+		indent := (*body)[m.bodyCursor].Indent // the new line keeps the same nesting
+		(*body)[m.bodyCursor].Text = left
+		insertAt := m.bodyCursor + 1
 		*body = append(*body, model.BodyLine{})
 		copy((*body)[insertAt+1:], (*body)[insertAt:])
 		(*body)[insertAt] = model.BodyLine{ID: store.NewID(), Text: right, Indent: indent}
@@ -645,44 +761,44 @@ func (m *Model) handleBodyOutlineKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		return nil, true
 
 	case msg.Code == tea.KeyBackspace:
-		if mod.BodyEditor.Position() != 0 {
+		if m.bodyEditor.Position() != 0 {
 			return nil, false // normal in-line character delete
 		}
-		raw := mod.BodyEditor.Value()
+		raw := m.bodyEditor.Value()
 		kind, display := model.ClassifyBodyLine(raw)
 		if kind != model.BodyText {
 			// First Backspace at the start of a marked line just strips the
 			// marker (the line becomes plain text); the next one merges.
-			(*body)[mod.BodyCursor].Text = display
-			(*body)[mod.BodyCursor].Done = false
+			(*body)[m.bodyCursor].Text = display
+			(*body)[m.bodyCursor].Done = false
 			m.touchBodyOwner()
-			m.seedBodyEditor(mod.BodyCursor, 0)
+			m.seedBodyEditor(m.bodyCursor, 0)
 			return nil, true
 		}
-		if mod.BodyCursor == 0 {
+		if m.bodyCursor == 0 {
 			return nil, true // nothing above to merge into
 		}
-		prevIdx := mod.BodyCursor - 1
+		prevIdx := m.bodyCursor - 1
 		junction := len([]rune((*body)[prevIdx].Text))
 		(*body)[prevIdx].Text += raw
-		*body = append((*body)[:mod.BodyCursor], (*body)[mod.BodyCursor+1:]...)
+		*body = append((*body)[:m.bodyCursor], (*body)[m.bodyCursor+1:]...)
 		m.touchBodyOwner()
 		m.seedBodyEditor(prevIdx, junction)
 		return nil, true
 
 	case msg.Code == tea.KeyDelete:
-		raw := []rune(mod.BodyEditor.Value())
-		if mod.BodyEditor.Position() < len(raw) || mod.BodyCursor >= len(*body)-1 {
+		raw := []rune(m.bodyEditor.Value())
+		if m.bodyEditor.Position() < len(raw) || m.bodyCursor >= len(*body)-1 {
 			return nil, false // normal forward delete / nothing below
 		}
 		// Forward-merge: pull the next line up, dropping its marker (its
 		// bullet/heading prefix would otherwise land mid-line as literal
 		// "- " text).
-		_, nextDisplay := model.ClassifyBodyLine((*body)[mod.BodyCursor+1].Text)
-		(*body)[mod.BodyCursor].Text = string(raw) + nextDisplay
-		*body = append((*body)[:mod.BodyCursor+1], (*body)[mod.BodyCursor+2:]...)
+		_, nextDisplay := model.ClassifyBodyLine((*body)[m.bodyCursor+1].Text)
+		(*body)[m.bodyCursor].Text = string(raw) + nextDisplay
+		*body = append((*body)[:m.bodyCursor+1], (*body)[m.bodyCursor+2:]...)
 		m.touchBodyOwner()
-		m.seedBodyEditor(mod.BodyCursor, len(raw))
+		m.seedBodyEditor(m.bodyCursor, len(raw))
 		return nil, true
 
 	case msg.Code == tea.KeyTab && msg.Mod&tea.ModShift != 0:
@@ -696,9 +812,9 @@ func (m *Model) handleBodyOutlineKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	case msg.String() == "ctrl+d":
 		m.commitBodyLine()
 		body = m.currentBody()
-		burstX := m.cursorScreenX + bodyObjCol + 2*(*body)[mod.BodyCursor].Indent
-		cmd := m.toggleBodyObjective(mod.BodyCursor, burstX, m.cursorScreenY)
-		mod.BodyEditor = m.newBodyEditor((*body)[mod.BodyCursor].Text)
+		burstX := m.cursorScreenX + bodyObjCol + 2*(*body)[m.bodyCursor].Indent
+		cmd := m.toggleBodyObjective(m.bodyCursor, burstX, m.cursorScreenY)
+		m.bodyEditor = m.newBodyEditor((*body)[m.bodyCursor].Text)
 		return cmd, true
 	}
 
@@ -733,13 +849,12 @@ func (m *Model) toggleBodyObjective(idx, burstX, burstY int) tea.Cmd {
 // create an orphan gap); outdenting floors at 0. The line's text and the
 // caret column are untouched.
 func (m *Model) indentBodyLine(delta int) {
-	mod := m.modal
 	m.commitBodyLine()
 	body := m.currentBody()
 	if body == nil {
 		return
 	}
-	i := mod.BodyCursor
+	i := m.bodyCursor
 	next := (*body)[i].Indent + delta
 	if next < 0 {
 		next = 0
@@ -767,21 +882,20 @@ func (m *Model) indentBodyLine(delta int) {
 // range of body-line indices the paste touched, so link capture can scan only
 // those lines (never pre-existing inline references elsewhere in the body).
 func (m *Model) pasteBodyLines(text string) (start, end int) {
-	mod := m.modal
 	body := m.currentBody()
 
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
 	chunks := strings.Split(text, "\n")
 
-	raw := []rune(mod.BodyEditor.Value())
-	pos := mod.BodyEditor.Position()
+	raw := []rune(m.bodyEditor.Value())
+	pos := m.bodyEditor.Position()
 	left, right := string(raw[:pos]), string(raw[pos:])
 
-	start = mod.BodyCursor
-	indent := (*body)[mod.BodyCursor].Indent // pasted lines keep the current nesting
-	(*body)[mod.BodyCursor].Text = left + chunks[0]
-	insertAt := mod.BodyCursor + 1
+	start = m.bodyCursor
+	indent := (*body)[m.bodyCursor].Indent // pasted lines keep the current nesting
+	(*body)[m.bodyCursor].Text = left + chunks[0]
+	insertAt := m.bodyCursor + 1
 	for i := 1; i < len(chunks); i++ {
 		line := model.BodyLine{ID: store.NewID(), Text: chunks[i], Indent: indent}
 		*body = append(*body, model.BodyLine{})
@@ -820,17 +934,6 @@ func (m *Model) pasteIntoModal(msg tea.PasteMsg) tea.Cmd {
 		if q := m.findQuest(mod.QuestID); q != nil {
 			return tea.Batch(m.captureBodyLinesRange(q, start, end), m.maybeStartSpinner())
 		}
-		return nil
-	case ModalCampaignDetail:
-		if mod.InQuestList {
-			if m.editor == nil {
-				return nil
-			}
-			var cmd tea.Cmd
-			*m.editor, cmd = m.editor.Update(msg)
-			return cmd
-		}
-		m.pasteBodyLines(msg.Content)
 		return nil
 	case ModalSectionDetail:
 		if m.editor == nil {
@@ -879,12 +982,6 @@ func (m *Model) beginTitleEdit() {
 			return
 		}
 		cur = q.Title
-	case ModalCampaignDetail:
-		p := m.findProject(mod.CampaignID)
-		if p == nil {
-			return
-		}
-		cur = p.Name
 	default:
 		return
 	}
@@ -910,15 +1007,10 @@ func (m *Model) commitTitleEdit() {
 	}
 	value := strings.TrimSpace(m.titleEditor.Value())
 	if mod := m.modal; mod != nil && value != "" {
-		switch mod.Kind {
-		case ModalQuestDetail:
+		if mod.Kind == ModalQuestDetail {
 			if q := m.findQuest(mod.QuestID); q != nil {
 				q.Title = value
 				q.UpdatedAt = time.Now()
-			}
-		case ModalCampaignDetail:
-			if p := m.findProject(mod.CampaignID); p != nil {
-				p.Name = value
 			}
 		}
 		m.save()
@@ -943,9 +1035,6 @@ func (m *Model) returnFromTitleEdit() {
 		return
 	}
 	m.clearFocusLink()
-	if mod := m.modal; mod != nil {
-		mod.InQuestList = false
-	}
 	if body := m.currentBody(); body != nil && len(*body) > 0 {
 		m.seedBodyEditor(0, 0)
 	}
@@ -996,6 +1085,31 @@ func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 		m.closeModal()
 		return nil
 
+	case ModalConfirmDelete:
+		return m.updateConfirmDelete(msg)
+
+	case ModalSchedulePicker:
+		switch msg.String() {
+		case "up":
+			if mod.PickerIndex > 0 {
+				mod.PickerIndex--
+			}
+		case "down":
+			if mod.PickerIndex < len(mod.PickerItems)-1 {
+				mod.PickerIndex++
+			}
+		case "enter":
+			var toast tea.Cmd
+			if mod.PickerIndex >= 0 && mod.PickerIndex < len(mod.PickerItems) {
+				toast = m.applySchedule(mod.TargetQuestID, mod.PickerItems[mod.PickerIndex].ID)
+			}
+			m.closeModal()
+			return toast
+		case "esc":
+			m.closeModal()
+		}
+		return nil
+
 	case ModalProjectPicker:
 		items := mod.filteredPickerItems()
 		switch msg.String() {
@@ -1010,7 +1124,10 @@ func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 		case "enter":
 			if mod.Jump {
 				if len(items) > 0 {
-					if t, ok := hallTargetFromJumpID(items[mod.PickerIndex].ID); ok {
+					id := items[mod.PickerIndex].ID
+					if questID, ok := strings.CutPrefix(id, "quest:"); ok {
+						m.navigateToQuest(questID)
+					} else if t, ok := hallTargetFromJumpID(id); ok {
 						m.selectHallTarget(t)
 					}
 				}
@@ -1022,18 +1139,28 @@ func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 				sel := items[mod.PickerIndex].ID
 				if mod.TargetProjectID != "" {
 					if p := m.findProject(mod.TargetProjectID); p != nil {
-						p.BannerID = sel // fly this campaign under the chosen banner
-						m.save()
+						if mod.SagaLink {
+							m.setNextChapter(p, sel) // chain to the chosen next chapter
+						} else {
+							p.BannerID = sel // fly this campaign under the chosen banner
+							m.save()
+						}
 					}
 				} else if target := m.findQuest(mod.TargetQuestID); target != nil {
-					target.ProjectID = sel
-					// Filing inherits the campaign's Banner (its Area), so the quest
-					// still belongs to that sphere if it later leaves the campaign;
-					// dropping back to the Questboard clears it.
-					if p := m.findProject(sel); p != nil {
-						target.BannerID = p.BannerID
+					if bannerID, ok := strings.CutPrefix(sel, bannerMoveTarget); ok {
+						// An area target — the quest becomes loose work under the banner.
+						target.ProjectID = ""
+						target.BannerID = bannerID
 					} else {
-						target.BannerID = ""
+						target.ProjectID = sel
+						// Filing inherits the campaign's Banner (its Area), so the quest
+						// still belongs to that sphere if it later leaves the campaign;
+						// dropping back to the Questboard clears it.
+						if p := m.findProject(sel); p != nil {
+							target.BannerID = p.BannerID
+						} else {
+							target.BannerID = ""
+						}
 					}
 					// Ctrl+A takes it up now (→ Camp); Ctrl+O leaves the status as-is.
 					if mod.TakeUp {
@@ -1041,7 +1168,7 @@ func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 					}
 					target.UpdatedAt = time.Now()
 					m.save()
-					toast = m.showClipboardToastText(fileToastText(mod.TakeUp, m.projectName(sel)))
+					toast = m.showClipboardToastText(fileToastText(mod.TakeUp, m.moveTargetName(sel)))
 				}
 			}
 			// Relocate the cursor to the source list's next item (or previous
@@ -1150,6 +1277,39 @@ func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 				return nil
 			}
 		}
+		// List quest-actions work from the detail too — see & change status,
+		// priority, type, campaign, vault and schedule for this page's quest.
+		// Ctrl+A / Ctrl+E / Ctrl+V collide with the body editor: many terminals send
+		// Cmd+←/→ as Ctrl+A/Ctrl+E (line start/end) and Ctrl+V pastes. So those three
+		// act on the quest only when a sigil is focused; while typing the body they
+		// stay editor keys. The rest have no editor meaning and work in either pane.
+		if m.onFocusLink() {
+			switch {
+			case key.Matches(msg, Keys.Schedule):
+				m.openScheduleFor(q) // stacks on the detail; returns here when dismissed
+				return nil
+			case key.Matches(msg, Keys.ToggleActive):
+				return m.onQuestInDetail(q, m.toggleActive)
+			case key.Matches(msg, Keys.ToggleVault):
+				return m.onQuestInDetail(q, func() tea.Cmd { m.toggleVault(); return nil })
+			}
+		}
+		switch {
+		case key.Matches(msg, Keys.ToggleImportant):
+			m.commitBodyLine()
+			return m.onQuestInDetail(q, m.cyclePriority)
+		case key.Matches(msg, Keys.ToggleType):
+			m.commitBodyLine()
+			return m.onQuestInDetail(q, func() tea.Cmd { m.toggleType(); return nil })
+		case key.Matches(msg, Keys.MoveProject):
+			m.commitBodyLine()
+			return m.onQuestInDetail(q, func() tea.Cmd { m.openProjectPicker(); return nil })
+		case key.Matches(msg, Keys.ToggleDone) && (m.onFocusLink() || !m.bodyCursorOnObjective()):
+			// On an objective body line Ctrl+D checks the objective off (handled by
+			// the outline handler below); anywhere else it toggles the quest done.
+			m.commitBodyLine()
+			return m.onQuestInDetail(q, m.toggleDone)
+		}
 		m.cursorMoved = true // a keypress re-centers the active pane on its caret
 		// Ctrl+1 / Ctrl+2 jump between the two panes (Sigils / body).
 		if m.integrationsEnabled && m.focusLinkCount(q) > 0 {
@@ -1161,7 +1321,7 @@ func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 			case "ctrl+2":
 				if m.onFocusLink() {
 					m.clearFocusLink()
-					m.seedBodyEditor(mod.BodyCursor, 0)
+					m.seedBodyEditor(m.bodyCursor, 0)
 				}
 				return nil
 			}
@@ -1208,85 +1368,13 @@ func (m *Model) updateModal(msg tea.KeyPressMsg) tea.Cmd {
 			return tea.Batch(cmd, m.maybeStartSpinner())
 		}
 		var cmd tea.Cmd
-		mod.BodyEditor, cmd = mod.BodyEditor.Update(msg)
+		m.bodyEditor, cmd = m.bodyEditor.Update(msg)
 		// After an ordinary edit, if the current line now holds a complete
 		// Jira/PR URL, capture it, shorten it inline, and fire an immediate sync
 		// for just the new code(s) — animating the "fetching" state meanwhile.
 		if syncCmd := m.captureCurrentBodyLink(q); syncCmd != nil {
 			return tea.Batch(cmd, syncCmd, m.maybeStartSpinner())
 		}
-		return cmd
-
-	case ModalCampaignDetail:
-		p := m.findProject(mod.CampaignID)
-		if p == nil {
-			m.closeModal()
-			return nil
-		}
-		if msg.Code == tea.KeyEsc {
-			m.commitBodyLine()
-			m.commitEdit()
-			// Always return to the campaign itself in the outline below,
-			// regardless of whether the description or the quest list was
-			// focused when closing.
-			m.setCursor(ui.Row{Kind: ui.RowProject, ProjectID: p.ID})
-			m.closeModal()
-			return nil
-		}
-
-		if mod.InQuestList {
-			rows := campaignQuestRows(m.store, p.ID)
-			switch msg.String() {
-			case "up":
-				idx := findRowIndex(rows, m.cursor)
-				if idx <= 0 {
-					mod.InQuestList = false
-					m.editor = nil
-					body := m.currentBody()
-					mod.BodyCursor = len(*body) - 1
-					mod.BodyEditor = m.newBodyEditor((*body)[mod.BodyCursor].Text)
-					return nil
-				}
-				m.commitEdit()
-				m.setCursor(rows[idx-1])
-				return nil
-			case "down":
-				idx := findRowIndex(rows, m.cursor)
-				if idx >= 0 && idx < len(rows)-1 {
-					m.commitEdit()
-					m.setCursor(rows[idx+1])
-				}
-				return nil
-			}
-			return m.handleRowKey(msg)
-		}
-
-		if handled, cmd := m.applyBodySelectionKey(msg); handled {
-			return cmd
-		}
-
-		if msg.String() == "down" {
-			// Only drop into the quest list off the last VISUAL row of the
-			// body — a wrapped last line steps through its rows first.
-			if !m.moveBodyCursor(1) {
-				mod.InQuestList = true
-				rows := campaignQuestRows(m.store, p.ID)
-				m.setCursor(rows[0])
-			}
-			return nil
-		}
-		if msg.String() == "up" {
-			// At the top visual row, Up jumps to the title for renaming.
-			if !m.moveBodyCursor(-1) {
-				m.beginTitleEdit()
-			}
-			return nil
-		}
-		if cmd, handled := m.handleBodyOutlineKey(msg); handled {
-			return cmd
-		}
-		var cmd tea.Cmd
-		mod.BodyEditor, cmd = mod.BodyEditor.Update(msg)
 		return cmd
 
 	case ModalSectionDetail:
@@ -1325,6 +1413,12 @@ func (m *Model) renderModal() string {
 	// screen coordinates once the box is placed (see the tail of this function).
 	m.modalItemTop, m.modalItemCount = -1, 0
 	pickerFirstLine, pickerItemCount := -1, 0
+	// Schedule-picker option lines, converted to screen Ys at the tail.
+	m.scheduleItemYs = nil
+	var scheduleOptLines []int
+	// Confirm-delete button geometry, same idea (see the tail).
+	m.confirmBtnRow = -1
+	confirmBtnLine, confirmCancelW, confirmDeleteW, confirmContentW := -1, 0, 0, 0
 
 	switch mod.Kind {
 	case ModalHelp:
@@ -1403,15 +1497,19 @@ func (m *Model) renderModal() string {
 
 	case ModalProjectPicker:
 		var b strings.Builder
-		title, noMatch := "Move to campaign", "  (no matching campaigns)"
+		title, noMatch := "Move to campaign or area", "  (nothing matches)"
 		if mod.TakeUp {
-			title = "Take up in which campaign?"
+			title = "Take up where?"
 		}
 		if mod.Jump {
-			title, noMatch = "Jump to…", "  (nothing matches)"
+			title, noMatch = "Search", "  (nothing matches)"
 		}
 		if mod.TargetProjectID != "" {
-			title, noMatch = "Fly under which banner?", "  (no matching banners)"
+			if mod.SagaLink {
+				title, noMatch = "Continues in which chapter?", "  (no eligible campaigns)"
+			} else {
+				title, noMatch = "Fly under which banner?", "  (no matching banners)"
+			}
 		}
 		b.WriteString(ui.StyleTitle.Render(title))
 		b.WriteString("\n")
@@ -1441,6 +1539,47 @@ func (m *Model) renderModal() string {
 			verb = "enter take up"
 		}
 		b.WriteString("\n" + ui.StyleMuted.Render("type to filter · ↑↓ choose · "+verb+" · esc cancel"))
+		content = b.String()
+
+	case ModalSchedulePicker:
+		var b strings.Builder
+		b.WriteString(ui.StyleTitle.Render("Schedule " + strconv.Quote(clipLabel(mod.Title, 40))))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("current: "+mod.Body) + "\n\n")
+		opts := scheduleOptions(time.Now())
+		lastGroup := ""
+		for i, o := range opts {
+			if o.group != "" && o.group != lastGroup {
+				b.WriteString(ui.StyleSectionHeader.Render(o.group) + "\n")
+				lastGroup = o.group
+			}
+			if o.id == "clear" {
+				b.WriteString("\n") // a breath before Clear
+			}
+			scheduleOptLines = append(scheduleOptLines, strings.Count(b.String(), "\n"))
+			label := clipLabel(o.label, 52)
+			if i == mod.PickerIndex {
+				b.WriteString(ui.StyleSelectedRow.Render("  > "+label) + "\n")
+			} else {
+				b.WriteString("    " + label + "\n")
+			}
+		}
+		b.WriteString("\n" + ui.StyleMuted.Render("↑↓ choose · enter set · esc cancel"))
+		content = b.String()
+
+	case ModalConfirmDelete:
+		var b strings.Builder
+		b.WriteString(ui.StyleTitle.Render(mod.Title))
+		if mod.Body != "" {
+			b.WriteString("\n\n" + ui.StyleMuted.Render(mod.Body))
+		}
+		b.WriteString("\n\n")
+		confirmBtnLine = strings.Count(b.String(), "\n")
+		core, cw, dw := confirmButtons(mod.DeleteVerb, mod.DeleteFocus)
+		confirmCancelW, confirmDeleteW = cw, dw
+		// The buttons sit bottom-right — pad the row to the box's content width.
+		confirmContentW = minInt(64, m.width-4) - 6 // box outer 64 − border(2) − padding(4)
+		b.WriteString(lipgloss.PlaceHorizontal(confirmContentW, lipgloss.Right, core))
 		content = b.String()
 
 	case ModalAgentPicker:
@@ -1490,6 +1629,19 @@ func (m *Model) renderModal() string {
 		fmt.Fprintf(&b, "%-12s%s\n", `# `, ui.StyleMuted.Render("start a line with this for a heading"))
 		fmt.Fprintf(&b, "%-12s%s\n", `- `, ui.StyleMuted.Render("start an objective; Ctrl+D checks it off"))
 		b.WriteString("\n")
+
+		b.WriteString(ui.StyleSectionHeader.Render("This quest"))
+		b.WriteString("\n")
+		fmt.Fprintf(&b, "%-12s%s\n", "Ctrl+D", ui.StyleMuted.Render("toggle done (checks an objective when on a - line)"))
+		fmt.Fprintf(&b, "%-12s%s\n", "Ctrl+P", ui.StyleMuted.Render("cycle priority (med / high / low / none)"))
+		fmt.Fprintf(&b, "%-12s%s\n", "Ctrl+T", ui.StyleMuted.Render("main / side quest"))
+		fmt.Fprintf(&b, "%-12s%s\n", "Ctrl+O", ui.StyleMuted.Render("move to another campaign / area"))
+		b.WriteString(ui.StyleMuted.Render("From the Sigils pane (a sigil focused): Ctrl+A active, Ctrl+E"))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("schedule, Ctrl+V vault — in the body those stay line-start /"))
+		b.WriteString("\n")
+		b.WriteString(ui.StyleMuted.Render("line-end (Cmd+←/→) / paste."))
+		b.WriteString("\n\n")
 
 		b.WriteString(ui.StyleSectionHeader.Render("Integrations"))
 		b.WriteString("\n")
@@ -1559,6 +1711,50 @@ func (m *Model) renderModal() string {
 		m.modalItemX1 = boxLeft + lipgloss.Width(boxLines[0])
 	}
 
+	// Map each schedule-picker option to its screen Y (options are broken up by
+	// group captions, so each carries its own line index — see scheduleOptLines).
+	if mod.Kind == ModalSchedulePicker && len(scheduleOptLines) > 0 {
+		boxLines := strings.Split(box, "\n")
+		boxTop := (m.height - len(boxLines)) / 2
+		if boxTop < 0 {
+			boxTop = 0
+		}
+		boxLeft := (m.width - lipgloss.Width(boxLines[0])) / 2
+		if boxLeft < 0 {
+			boxLeft = 0
+		}
+		m.scheduleItemYs = make([]int, len(scheduleOptLines))
+		for i, ln := range scheduleOptLines {
+			m.scheduleItemYs[i] = boxTop + 2 + ln
+		}
+		m.scheduleItemX0 = boxLeft
+		m.scheduleItemX1 = boxLeft + lipgloss.Width(boxLines[0])
+	}
+
+	// Map the confirm dialog's two buttons to screen coordinates for clicks —
+	// content sits at boxLeft+border(1)+hpad(2), boxTop+border(1)+vpad(1); the
+	// button line is indented 2, with confirmBtnGap between the two pills.
+	if mod.Kind == ModalConfirmDelete && confirmBtnLine >= 0 {
+		boxLines := strings.Split(box, "\n")
+		boxTop := (m.height - len(boxLines)) / 2
+		if boxTop < 0 {
+			boxTop = 0
+		}
+		boxLeft := (m.width - lipgloss.Width(boxLines[0])) / 2
+		if boxLeft < 0 {
+			boxLeft = 0
+		}
+		m.confirmBtnRow = boxTop + 2 + confirmBtnLine
+		// Buttons are right-aligned within the content width (contentLeft = border
+		// 1 + hpad 2 from the box's left edge).
+		contentLeft := boxLeft + 3
+		btnStart := contentLeft + confirmContentW - (confirmCancelW + confirmBtnGap + confirmDeleteW)
+		m.confirmCancelX0 = btnStart
+		m.confirmCancelX1 = btnStart + confirmCancelW
+		m.confirmDeleteX0 = m.confirmCancelX1 + confirmBtnGap
+		m.confirmDeleteX1 = m.confirmDeleteX0 + confirmDeleteW
+	}
+
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
@@ -1589,8 +1785,8 @@ func (m *Model) viewQuestDetail() string {
 	// Header (back / help), clickable.
 	back := ui.StyleMuted.Render("← back (esc)")
 	right := ui.StyleMuted.Render("F1 help")
-	if m.clipboardToastActive {
-		right = renderClipboardToast(m.clipboardToastText)
+	if m.toastActive() {
+		right = m.renderToast()
 	}
 	hpad := contentWidth - lipgloss.Width(back) - lipgloss.Width(right)
 	if hpad < 1 {
@@ -1601,7 +1797,7 @@ func (m *Model) viewQuestDetail() string {
 	m.focusBackWidth = lipgloss.Width(back)
 	m.focusHelpX = leftMargin + m.focusBackWidth + hpad
 	m.focusHelpWidth = lipgloss.Width(right)
-	if m.clipboardToastActive {
+	if m.toastActive() {
 		m.focusHelpWidth = 0
 	}
 
@@ -1738,7 +1934,7 @@ func (m *Model) viewQuestDetail() string {
 	var bodyLines []string
 	bodyCaretRow := 0
 	for i, l := range q.Body {
-		rows, caret := m.renderBodyLineWrapped(i, l, m.bodyCaretActive() && i == mod.BodyCursor, bodyWrapW, len(bodyLines))
+		rows, caret := m.renderBodyLineWrapped(i, l, m.bodyCaretActive() && i == m.bodyCursor, bodyWrapW, len(bodyLines))
 		for ri, row := range rows {
 			if m.bodyCaretActive() && ri == caret {
 				bodyCaretRow = len(bodyLines)
@@ -1851,8 +2047,8 @@ func (m *Model) renderFocusView() string {
 
 	back := ui.StyleMuted.Render("← back (esc)")
 	right := ui.StyleMuted.Render("F1 help")
-	if m.clipboardToastActive {
-		right = renderClipboardToast(m.clipboardToastText)
+	if m.toastActive() {
+		right = m.renderToast()
 	}
 	pad := contentWidth - lipgloss.Width(back) - lipgloss.Width(right)
 	if pad < 1 {
@@ -1943,7 +2139,7 @@ func (m *Model) renderFocusView() string {
 	m.focusBackWidth = lipgloss.Width(back)
 	m.focusHelpX = leftMargin + m.focusBackWidth + pad
 	m.focusHelpWidth = lipgloss.Width(right)
-	if m.clipboardToastActive {
+	if m.toastActive() {
 		m.focusHelpWidth = 0 // the toast isn't a button
 	}
 
@@ -2130,16 +2326,22 @@ func (m *Model) handleFocusPointer(mouse tea.Mouse, press bool) tea.Cmd {
 					}
 					return nil
 				}
-				if sp.url == findSentinel {
-					if q := m.findQuest(mod.QuestID); q != nil {
-						return m.findTracksInTrails(q.ID)
-					}
-					return nil
-				}
 				if sp.url == restoreSentinel {
 					if q := m.findQuest(mod.QuestID); q != nil {
 						return m.restoreDismissedTracks(q.ID)
 					}
+					return nil
+				}
+				if sp.url == resyncSentinel {
+					if q := m.findQuest(mod.QuestID); q != nil {
+						return m.resyncTrails(q)
+					}
+					return nil
+				}
+				if sp.url == toggleSigilsSentinel {
+					// The mouse twin of F3 — reveal / hide the empty sections.
+					m.showHiddenSigils = !m.showHiddenSigils
+					m.invalidateRender()
 					return nil
 				}
 				if key, ok := strings.CutPrefix(sp.url, copySectionSentinel); ok {
@@ -2157,22 +2359,6 @@ func (m *Model) handleFocusPointer(mouse tea.Mouse, press bool) tea.Cmd {
 		}
 	}
 
-	// Campaign detail's "Quests" list: route a click on a quest row through the
-	// SAME shared row-click handler the outline uses — so select, double-click
-	// to open, and checkbox-to-toggle-done all work identically here. A click
-	// above the list drops back to editing the campaign description.
-	if mod.Kind == ModalCampaignDetail {
-		qrows := campaignQuestRows(m.store, mod.CampaignID)
-		qi := (mouse.Y - m.focusContentTop) - m.focusQuestListStart
-		if qi >= 0 && qi < len(qrows) {
-			if !press {
-				return nil
-			}
-			mod.InQuestList = true
-			return m.clickRowAt(qrows, qi, mouse, m.focusLeftMargin)
-		}
-		mod.InQuestList = false // clicked the description area
-	}
 	// The body column starts at focusBodyX (== the content margin for
 	// single-column pages). A click to its left is in the details column, not
 	// the body — the details spans above already had their chance.
@@ -2210,8 +2396,8 @@ func (m *Model) handleFocusPointer(mouse tea.Mouse, press bool) tea.Cmd {
 				m.clearFocusLink()
 				m.commitBodyLine()
 				cmd := m.toggleBodyObjective(bodyIdx, checkboxStart, mouse.Y)
-				mod.BodyCursor = bodyIdx
-				mod.BodyEditor = m.newBodyEditor((*body)[bodyIdx].Text)
+				m.bodyCursor = bodyIdx
+				m.bodyEditor = m.newBodyEditor((*body)[bodyIdx].Text)
 				return cmd
 			}
 		}
@@ -2222,11 +2408,11 @@ func (m *Model) handleFocusPointer(mouse tea.Mouse, press bool) tea.Cmd {
 		}
 		m.clearFocusLink() // clicking into the body takes the caret out of the links
 		m.commitBodyLine()
-		if bodyIdx != mod.BodyCursor {
-			mod.BodyCursor = bodyIdx
-			mod.BodyEditor = bodyLineEditor(string(raw))
+		if bodyIdx != m.bodyCursor {
+			m.bodyCursor = bodyIdx
+			m.bodyEditor = bodyLineEditor(string(raw))
 		}
-		mod.BodyEditor.SetCursor(pos)
+		m.bodyEditor.SetCursor(pos)
 		m.selAnchor = pos
 		m.selAnchorLine = bodyIdx
 		return nil
@@ -2239,13 +2425,13 @@ func (m *Model) handleFocusPointer(mouse tea.Mouse, press bool) tea.Cmd {
 	if !m.leftDown || m.selAnchor == noSelection {
 		return nil
 	}
-	if bodyIdx != mod.BodyCursor {
+	if bodyIdx != m.bodyCursor {
 		m.commitBodyLine()
-		mod.BodyCursor = bodyIdx
-		mod.BodyEditor = bodyLineEditor((*body)[bodyIdx].Text) // not newBodyEditor — the anchor must survive
+		m.bodyCursor = bodyIdx
+		m.bodyEditor = bodyLineEditor((*body)[bodyIdx].Text) // not newBodyEditor — the anchor must survive
 	}
-	runes := []rune(mod.BodyEditor.Value())
-	mod.BodyEditor.SetCursor(clampInt(m.focusRowOffset[bodyRow]+mouse.X-textCol, 0, len(runes)))
+	runes := []rune(m.bodyEditor.Value())
+	m.bodyEditor.SetCursor(clampInt(m.focusRowOffset[bodyRow]+mouse.X-textCol, 0, len(runes)))
 	return m.copyBodySelection()
 }
 
@@ -2268,51 +2454,6 @@ func (m *Model) renderFocusContent() string {
 	}
 
 	switch mod.Kind {
-	case ModalCampaignDetail:
-		p := m.findProject(mod.CampaignID)
-		if p == nil {
-			return ""
-		}
-		name := p.Name
-		if name == "" {
-			name = "Untitled campaign"
-		}
-		done, total := ui.ProjectProgress(m.store, p.ID)
-		progress := ui.StyleMuted.Render(fmt.Sprintf(" %s %d/%d", model.ProgressBucket(done, total), done, total))
-
-		mark := "  "
-		if m.titleEditor != nil {
-			mark = ui.StyleCursor.Render(ui.GlyphCursor)
-		}
-		m.focusTitleX = m.focusLeftMargin + lipgloss.Width(mark)
-		m.focusTitleWidth = lipgloss.Width(ui.StyleTitle.Render(name))
-		// Constant width whether renaming or not, so the progress never shifts.
-		emit(mark + m.constantWidthTitle(name, m.titleEditor, ui.StyleTitle, ui.StyleTitle) + progress)
-		emit("")
-		m.focusBodyLineStart = ln
-		for i, l := range p.Body {
-			editing := m.bodyCaretActive() && i == mod.BodyCursor
-			rows, caret := m.renderBodyLineWrapped(i, l, editing, m.focusTextWidth, ln)
-			for ri, row := range rows {
-				if ri == caret {
-					m.focusCaretLine = ln
-				}
-				emit(row)
-			}
-		}
-
-		emit("")
-		emit(ui.StyleSectionHeader.Render("Quests"))
-		m.focusQuestListStart = ln // content line of the first quest row (click map)
-		for _, row := range campaignQuestRows(m.store, p.ID) {
-			isCursor := mod.InQuestList && m.cursor.matches(row)
-			if isCursor {
-				m.focusCaretLine = ln
-			}
-			emit(m.renderFocusListRow(row, isCursor))
-		}
-		return strings.TrimRight(b.String(), "\n")
-
 	case ModalSectionDetail:
 		emit(ui.StyleTitle.Render(m.sectionTitle(mod.Section)))
 		emit("")
@@ -2345,11 +2486,7 @@ func (m *Model) renderFocusListRow(row ui.Row, isCursor bool) string {
 	} else {
 		titleView = m.rowTitleView(row, isCursor)
 	}
-	hint := ""
-	if isCursor && m.confirmDeleteID != "" && rowMatchesConfirmDelete(row, m.confirmDeleteID) {
-		hint = "  " + ui.StyleImportant.Render(m.confirmDeleteHint(row))
-	}
-	line, _ := ui.RenderRow(row, m.store, titleView, isCursor, m.isNewQuest(row), 80, hint)
+	line, _ := ui.RenderRow(row, m.store, titleView, isCursor, m.isNewQuest(row), 80, "")
 	if warning {
 		return line
 	}

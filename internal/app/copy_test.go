@@ -240,16 +240,22 @@ func TestCopyTrackIndividually(t *testing.T) {
 	ev := "Practice - Chairside - Scanner Overlay Shown"
 	st := &store.Store{Quests: []model.Quest{{ID: "q1", Tracks: []model.Track{{Event: ev, Marks: []string{"scannerType"}}}}}}
 	m := &Model{store: st}
+	// Each copy fires its status-line toast; reset the toast between the checks
+	// so each starts from idle and returns a fresh tick cmd (a running toast
+	// would just enqueue the next and return nil — still copied, no cmd).
+	resetToast := func() { m.toastPhase, m.toastQueue = toastIdle, nil }
 	// copyTrack builds the event + marks snippet (the "individual" copy).
 	if cmd := m.copyTrack("q1", ev); cmd == nil {
 		t.Fatal("copyTrack returned nil for a real track")
 	}
 	// The Tavern click path copies too (RowTrack is no longer a dead info row).
+	resetToast()
 	cmd, ok := m.commonRowClick(ui.Row{Kind: ui.RowTrack, QuestID: "q1", TrackEvent: ev})
 	if !ok || cmd == nil {
 		t.Fatalf("RowTrack click should copy: ok=%v cmd=%v", ok, cmd)
 	}
 	// The "c" key on a selected track copies (Tavern/section path).
+	resetToast()
 	m.cursor = cursorTarget{kind: ui.RowTrack, questID: "q1", trackEvent: ev}
 	if cmd := m.handleRowKey(tea.KeyPressMsg{Code: 'c', Text: "c"}); cmd == nil {
 		t.Fatal("'c' on a selected track should copy")

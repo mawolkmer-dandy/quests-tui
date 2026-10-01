@@ -43,14 +43,10 @@ func (m *Model) onFocusLink() bool {
 
 // bodyCaretActive reports whether the editable body owns the caret in a focus
 // view — i.e. no other pane is focused (not the title editor, not a Sigils
-// link, not a campaign's quest list). The body's active-line cursor mark and
-// the recorded screen caret must render only when this is true; otherwise two
-// panes would each draw a caret.
+// link). The body's active-line cursor mark and the recorded screen caret must
+// render only when this is true; otherwise two panes would each draw a caret.
 func (m *Model) bodyCaretActive() bool {
 	if m.titleEditor != nil || m.onFocusLink() {
-		return false
-	}
-	if mod := m.modal; mod != nil && mod.InQuestList {
 		return false
 	}
 	return true
@@ -72,7 +68,8 @@ func (m *Model) focusLinkAtLine(line int) int {
 // long rows wrap and shifted the layout). Empty when nothing is focused.
 func (m *Model) sigilStatusLine(q *model.Quest) string {
 	if !m.onFocusLink() || m.focusLinkIdx < 0 || m.focusLinkIdx >= len(m.focusLinks) {
-		return ""
+		// Not on a sigil (editing the body): show the body-safe quest actions.
+		return m.questActionHint()
 	}
 	if m.focusLinkConfirmID != "" {
 		return ui.StyleImportant.Render("remove this link? y/n")
@@ -82,6 +79,10 @@ func (m *Model) sigilStatusLine(q *model.Quest) string {
 	case linkAddAgent:
 		return keyHint("enter", "add")
 	case linkCopySection:
+		// Found-from-trails section headers also offer a resync (click it, or "r").
+		if isTrailResyncSection(m.focusLinks[m.focusLinkIdx].code) {
+			return joinHints(keyHint("c", "copy all"), keyHint("r", "resync"))
+		}
 		return keyHint("c", "copy all")
 	case linkTrack:
 		return joinHints(keyHint("enter", "write plans"), keyHint("c", "copy"), keyHint(del, "dismiss"))
@@ -92,11 +93,6 @@ func (m *Model) sigilStatusLine(q *model.Quest) string {
 			return ui.StyleMuted.Render("writing…")
 		}
 		return keyHint("enter", "write plans")
-	case linkFind:
-		if m.findingQuestID == q.ID {
-			return ui.StyleMuted.Render("finding…")
-		}
-		return keyHint("enter", "find")
 	case linkRestore:
 		return keyHint("enter", "restore")
 	case linkAgent: // status-only — no link to copy
@@ -104,6 +100,19 @@ func (m *Model) sigilStatusLine(q *model.Quest) string {
 	default: // linkJira/linkPR/linkRune
 		return joinHints(keyHint("enter", "open"), keyHint("c", "copy"), keyHint(del, "remove"))
 	}
+}
+
+// questActionHint is the detail footer shown while editing the body: the quest-
+// level actions that are safe here. Active / schedule / vault are omitted — they
+// share keys the body editor needs (Ctrl+A/E = line start/end via Cmd+←/→,
+// Ctrl+V = paste), so they act on the quest only from the Sigils pane.
+func (m *Model) questActionHint() string {
+	return joinHints(
+		keyHint("ctrl+d", "done"),
+		keyHint("ctrl+p", "priority"),
+		keyHint("ctrl+t", "type"),
+		keyHint("ctrl+o", "move"),
+	)
 }
 
 // clearFocusLink drops the link cursor (and any armed removal), returning the
@@ -144,7 +153,7 @@ func (m *Model) handleFocusLinkKey(msg tea.KeyPressMsg, q *model.Quest) (tea.Cmd
 	case msg.Code == tea.KeyRight:
 		// → leaves the Sigils pane (left) and returns to the body (right).
 		m.clearFocusLink()
-		m.seedBodyEditor(m.modal.BodyCursor, 0)
+		m.seedBodyEditor(m.bodyCursor, 0)
 		return nil, true
 	case msg.Code == tea.KeyLeft:
 		return nil, true // Sigils is the leftmost pane
@@ -171,6 +180,9 @@ func (m *Model) handleFocusLinkKey(msg tea.KeyPressMsg, q *model.Quest) (tea.Cmd
 		// Rename the dashboard inline (its name can't be scraped from the URL).
 		m.beginLookoutRename(q.ID, link.code)
 		return nil, true
+	case link.kind == linkCopySection && isTrailResyncSection(link.code) && msg.String() == "r":
+		// Resync from any found-from-trails header: refetch PR status + re-scan.
+		return m.resyncTrails(q), true
 	case msg.String() == "c":
 		// Copy: a section header → the whole section as a list; any other item
 		// → just its link.
@@ -179,8 +191,6 @@ func (m *Model) handleFocusLinkKey(msg tea.KeyPressMsg, q *model.Quest) (tea.Cmd
 		switch link.kind {
 		case linkAddAgent:
 			return m.openAgentPicker(), true
-		case linkFind:
-			return m.findTracksInTrails(q.ID), true
 		case linkRestore:
 			return m.restoreDismissedTracks(q.ID), true
 		case linkCopySection:
@@ -197,7 +207,7 @@ func (m *Model) handleFocusLinkKey(msg tea.KeyPressMsg, q *model.Quest) (tea.Cmd
 			return m.openConnection(connection{kind: link.kind, code: link.code, url: link.url}), true
 		}
 	case key.Matches(msg, Keys.Delete):
-		if link.kind == linkAddAgent || link.kind == linkForge || link.kind == linkFind || link.kind == linkRestore || link.kind == linkCopySection {
+		if link.kind == linkAddAgent || link.kind == linkForge || link.kind == linkRestore || link.kind == linkCopySection {
 			return nil, true // nothing to remove on an affordance / header line
 		}
 		m.focusLinkConfirmID = link.code
@@ -292,11 +302,11 @@ func (m *Model) captureCurrentBodyLink(q *model.Quest) tea.Cmd {
 		return nil
 	}
 	body := m.currentBody()
-	if body == nil || mod.BodyCursor < 0 || mod.BodyCursor >= len(*body) {
+	if body == nil || m.bodyCursor < 0 || m.bodyCursor >= len(*body) {
 		return nil
 	}
 
-	value := mod.BodyEditor.Value()
+	value := m.bodyEditor.Value()
 	stripped, codes, runes, lookouts, prs, changed := m.captureAndStrip(q, value)
 	if !changed {
 		return nil // no link captured or shortened — leave the line (and its spaces) alone
@@ -304,10 +314,10 @@ func (m *Model) captureCurrentBodyLink(q *model.Quest) tea.Cmd {
 
 	// Reseed the line + editor with captured URLs removed / long links shortened,
 	// keeping the caret at the end of what remains.
-	(*body)[mod.BodyCursor].Text = stripped
+	(*body)[m.bodyCursor].Text = stripped
 	ed := m.newBodyEditor(stripped)
 	ed.CursorEnd()
-	mod.BodyEditor = ed
+	m.bodyEditor = ed
 	m.touchBodyOwner()
 	return m.captureSync(q.ID, codes, runes, lookouts, prs)
 }
@@ -369,8 +379,8 @@ func (m *Model) captureBodyLinesRange(q *model.Quest, start, end int) tea.Cmd {
 	changed := false
 	for i := start; i <= end; i++ {
 		text := (*body)[i].Text
-		if i == mod.BodyCursor {
-			text = mod.BodyEditor.Value()
+		if i == m.bodyCursor {
+			text = m.bodyEditor.Value()
 		}
 		stripped, codes, runes, lookouts, prs, lineChanged := m.captureAndStrip(q, text)
 		if !lineChanged {
@@ -378,10 +388,10 @@ func (m *Model) captureBodyLinesRange(q *model.Quest, start, end int) tea.Cmd {
 		}
 		changed = true
 		(*body)[i].Text = stripped
-		if i == mod.BodyCursor {
+		if i == m.bodyCursor {
 			ed := m.newBodyEditor(stripped)
 			ed.CursorEnd()
-			mod.BodyEditor = ed
+			m.bodyEditor = ed
 		}
 		allCodes = append(allCodes, codes...)
 		allRunes = append(allRunes, runes...)

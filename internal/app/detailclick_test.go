@@ -16,8 +16,9 @@ func TestDetailCheckboxClickTogglesDone(t *testing.T) {
 	ui.Init(true)
 	q := model.Quest{ID: "q1", Title: "Q", Body: []model.BodyLine{{ID: "o1", Text: "- task"}}}
 	st := &store.Store{Quests: []model.Quest{q}}
-	m := &Model{store: st, modal: questDetailModal(&st.Quests[0])}
-	m.modal.BodyEditor = m.newBodyEditor("- task")
+	m := &Model{store: st, modal: &Modal{Kind: ModalQuestDetail, QuestID: st.Quests[0].ID}}
+	m.bodyOwnerKind, m.bodyOwnerID = ownerQuest, st.Quests[0].ID
+	m.bodyEditor = m.newBodyEditor("- task")
 	// Geometry the click handler reads.
 	m.focusBodyX = 10
 	m.focusBodyBaseRow = 5

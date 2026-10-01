@@ -104,6 +104,53 @@ func TestGraphiteStackRE(t *testing.T) {
 	}
 }
 
+func TestGithubStackCodes(t *testing.T) {
+	// Shape of a real PullRequest.stack GraphQL response (6-PR gh stack).
+	body := []byte(`{"data":{"repository":{"pullRequest":{"stack":{"entries":{"nodes":[` +
+		`{"pullRequest":{"number":54126}},` +
+		`{"pullRequest":{"number":54128}},` +
+		`{"pullRequest":{"number":54128}},` + // duplicate — must dedupe
+		`{"pullRequest":{"number":54180}}` +
+		`]}}}}}}`)
+	got := githubStackCodes(body)
+	want := []string{"#54126", "#54128", "#54180"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("github stack codes = %v, want %v", got, want)
+	}
+
+	// A PR with no GitHub stack reports `stack: null` — no codes, no panic.
+	none := []byte(`{"data":{"repository":{"pullRequest":{"stack":null}}}}`)
+	if got := githubStackCodes(none); got != nil {
+		t.Fatalf("a null stack must yield no codes, got %v", got)
+	}
+
+	// Garbage in never panics or invents codes.
+	if got := githubStackCodes([]byte("not json")); got != nil {
+		t.Fatalf("unparseable response must yield no codes, got %v", got)
+	}
+}
+
+func TestSplitRepo(t *testing.T) {
+	cases := []struct {
+		in          string
+		owner, name string
+		ok          bool
+	}{
+		{"orthly/orthlyweb", "orthly", "orthlyweb", true},
+		{"owner/name/extra", "owner", "name/extra", true}, // first slash only
+		{"noslash", "", "", false},
+		{"/name", "", "", false},
+		{"owner/", "", "", false},
+		{"", "", "", false},
+	}
+	for _, c := range cases {
+		owner, name, ok := splitRepo(c.in)
+		if owner != c.owner || name != c.name || ok != c.ok {
+			t.Fatalf("splitRepo(%q) = %q,%q,%v; want %q,%q,%v", c.in, owner, name, ok, c.owner, c.name, c.ok)
+		}
+	}
+}
+
 func TestLooksLikeEventName(t *testing.T) {
 	cases := map[string]bool{
 		"Practice - Checkout - Navigation Changed": true,

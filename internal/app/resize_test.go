@@ -32,7 +32,7 @@ func TestDetailResizeKeysWhenSigilFocused(t *testing.T) {
 	m, q := sigilModel()
 	m.width, m.height = 120, 40
 	m.detailWidthRatio = 0.42
-	m.modal.BodyEditor = m.newBodyEditor("")
+	m.bodyEditor = m.newBodyEditor("")
 	q.Body = []model.BodyLine{{Text: "a"}}
 	m.focusLinkIdx = 0 // focused in Sigils
 
@@ -61,8 +61,8 @@ func TestDetailAltUpDownMovesLineInBody(t *testing.T) {
 	m.width, m.height = 120, 40
 	m.detailWidthRatio = 0.42
 	q.Body = []model.BodyLine{{Text: "one"}, {Text: "two"}}
-	m.modal.BodyCursor = 0
-	m.modal.BodyEditor = m.newBodyEditor("one")
+	m.bodyCursor = 0
+	m.bodyEditor = m.newBodyEditor("one")
 	m.focusLinkIdx = noSelection // in the body, NOT Sigils
 
 	// Alt+Down in the body must NOT resize (it's move-line there).

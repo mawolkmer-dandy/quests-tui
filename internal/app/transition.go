@@ -182,6 +182,17 @@ func (m *Model) listFraction() float64   { return frac(m.transFrame, m.listFrame
 func (m *Model) headerFraction() float64 { return frac(m.transFrame, m.headerFrames()) }
 func (m *Model) subFraction() float64    { return frac(m.transFrame, m.subFrames()) }
 
+// revealProgress is how far the row reveal has run (0→1), after the header/
+// subtitle lead. Shared by the sliding reveal and the Tavern open frame.
+func (m *Model) revealProgress() float64 {
+	return frac(max0(m.transFrame-m.listLead()), m.listFrames())
+}
+
+// lerpInt linearly interpolates between two integer positions, rounding.
+func lerpInt(a, b int, t float64) int {
+	return int(float64(a) + (float64(b)-float64(a))*t + 0.5)
+}
+
 func (m *Model) totalOldChars() int {
 	n := 0
 	for _, l := range m.transOld {
@@ -253,7 +264,7 @@ func (m *Model) revealLines() []string {
 	if len(all) == 0 {
 		return nil
 	}
-	prog := frac(max0(m.transFrame-m.listLead()), m.listFrames())
+	prog := m.revealProgress()
 	const (
 		slideCols   = 4
 		slideWindow = 0.45 // fraction of the reveal each row spends sliding in
@@ -434,8 +445,8 @@ func (m *Model) renderModeLine(width int, litTav, litWild []bool) string {
 	// Right-aligned "F1 help" (clickable) on the header row, for consistency with
 	// the detail views — the copy toast borrows the same slot while it's active.
 	help := ui.StyleMuted.Render("F1 help")
-	if m.clipboardToastActive {
-		help = renderClipboardToast(m.clipboardToastText)
+	if m.toastActive() {
+		help = m.renderToast()
 	}
 	slack := width - lipgloss.Width(b.String()) - lipgloss.Width(help)
 	if slack < 1 {
@@ -443,7 +454,7 @@ func (m *Model) renderModeLine(width int, litTav, litWild []bool) string {
 	}
 	m.tavernHelpX = m.leftMargin + lipgloss.Width(b.String()) + slack
 	m.tavernHelpWidth = lipgloss.Width(ui.StyleMuted.Render("F1 help"))
-	if m.clipboardToastActive {
+	if m.toastActive() {
 		m.tavernHelpWidth = 0 // the toast isn't a button
 	}
 	b.WriteString(strings.Repeat(" ", slack))
@@ -467,6 +478,19 @@ func styledWord(word string, lit []bool) string {
 // row count so the block collapses to the header and grows back out with no
 // end jump. The filter line (Wilds chips / open search bar) stays put.
 func (m *Model) renderTransitionView() string {
+	// Camp⇄Tavern: the Tavern rests at a fixed, top-anchored height (footer at the
+	// bottom), not the centered content-sized block the reveal/dissolve otherwise
+	// draws. So render the Tavern-side phase in that resting shape, opened by how
+	// far the phase has run — the reveal lands exactly on the resting Tavern (and
+	// the dissolve starts from it), with no end-of-transition height jump.
+	if m.transAbsolute && m.transKind == kindMode {
+		if m.transPhase == transReveal && m.inTavern() {
+			return m.renderTavernOpenFrame(m.revealProgress())
+		}
+		if m.transPhase == transDissolve && !m.inTavern() {
+			return m.renderTavernOpenFrame(1 - m.listFraction())
+		}
+	}
 	width := m.contentWidth()
 	m.leftMargin = (m.width - width) / 2
 	if m.leftMargin < 0 {
@@ -554,5 +578,99 @@ func (m *Model) renderTransitionView() string {
 	if overflow {
 		b.WriteString(foldHint(margin, width) + "\n")
 	}
+	return b.String()
+}
+
+// renderTavernOpenFrame draws one Camp⇄Tavern frame with the Tavern in its resting
+// fixed-height shape, opened by `openness`: 0 is the collapsed, centered header the
+// pause leaves behind; 1 is the full resting Tavern — header pinned near the top,
+// body filling colBodyH, footer at the bottom (identical to renderTavernView). The
+// reveal runs it 0→1 and the dissolve 1→0, so the block irises open into / shut out
+// of the resting layout instead of snapping to the taller height at the end.
+func (m *Model) renderTavernOpenFrame(openness float64) string {
+	if openness < 0 {
+		openness = 0
+	}
+	if openness > 1 {
+		openness = 1
+	}
+
+	contentW := clampInt(m.width-4, 40, 130)
+	outer := max0((m.width - contentW) / 2)
+	m.leftMargin = outer
+	margin := strings.Repeat(" ", outer)
+
+	litTav, litWild := m.animatedModeLetters()
+	header := []string{
+		m.renderModeLine(contentW, litTav, litWild),
+		ui.CenterText(ui.StyleMuted.Render(m.transitionSubtitle()), contentW),
+	}
+	footer := indentLines(m.statusBar(contentW), margin)
+
+	const bodyGap, footerGap = 3, 2
+	comfy := clampInt(m.height/8, 2, 4)
+	chrome := len(header) + bodyGap + footerGap + lipgloss.Height(footer)
+	colBodyH := m.height - chrome - 2*comfy
+	if colBodyH < 1 {
+		colBodyH = 1
+	}
+
+	// The collapsed header sits where the centered pause leaves it; the open header
+	// pins at comfy (the resting Tavern's top pad). Glide between the two so the
+	// header rises/falls smoothly rather than snapping.
+	availableHeight := m.height - 1
+	if availableHeight < 1 {
+		availableHeight = 1
+	}
+	vpad := viewVPad
+	if maxPad := availableHeight / 4; vpad > maxPad {
+		vpad = maxPad
+	}
+	if vpad < 0 {
+		vpad = 0
+	}
+	innerHeight := availableHeight - 2*vpad
+	if innerHeight < 1 {
+		innerHeight = 1
+	}
+	collapsedTop := vpad + (innerHeight-(len(header)+3))/2
+	if collapsedTop < 0 {
+		collapsedTop = 0
+	}
+	topPad := lerpInt(collapsedTop, comfy, openness)
+
+	// The body region grows from nothing to the full colBodyH, carrying the footer
+	// down with it — but never shorter than the rows already on screen.
+	rowLines := m.transitionRows()
+	if len(rowLines) > colBodyH {
+		rowLines = rowLines[:colBodyH]
+	}
+	regionH := lerpInt(0, colBodyH, openness)
+	if regionH < len(rowLines) {
+		regionH = len(rowLines)
+	}
+	if regionH > colBodyH {
+		regionH = colBodyH
+	}
+
+	clip := lipgloss.NewStyle().MaxWidth(m.width)
+	var b strings.Builder
+	for i := 0; i < topPad; i++ {
+		b.WriteString("\n")
+	}
+	for _, line := range header {
+		b.WriteString(clip.Render(margin+line) + "\n")
+	}
+	b.WriteString(strings.Repeat("\n", bodyGap))
+	m.modeToggleRow = topPad
+	for i := 0; i < regionH; i++ {
+		line := ""
+		if i < len(rowLines) {
+			line = rowLines[i] // Camp⇄Tavern rows carry their own margin (transAbsolute)
+		}
+		b.WriteString(clip.Render(line) + "\n")
+	}
+	b.WriteString(strings.Repeat("\n", footerGap))
+	b.WriteString(footer)
 	return b.String()
 }

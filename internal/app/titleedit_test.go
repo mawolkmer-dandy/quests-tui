@@ -5,6 +5,7 @@ import (
 
 	"github.com/mawolkmer-dandy/quests-tui/internal/model"
 	"github.com/mawolkmer-dandy/quests-tui/internal/store"
+	"github.com/mawolkmer-dandy/quests-tui/internal/ui"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -65,10 +66,10 @@ func TestTitleEditBlankIgnored(t *testing.T) {
 func TestUpAtBodyTopEntersTitleEdit(t *testing.T) {
 	st := &store.Store{Quests: []model.Quest{{ID: "q1", Title: "T", Body: []model.BodyLine{{Text: "only line"}}}}}
 	m := &Model{store: st, modal: &Modal{Kind: ModalQuestDetail, QuestID: "q1"}}
-	mod := m.modal
-	mod.BodyCursor = 0
-	mod.BodyEditor = m.newBodyEditor("only line")
-	mod.BodyEditor.SetCursor(0)
+	m.bodyOwnerKind, m.bodyOwnerID = ownerQuest, "q1"
+	m.bodyCursor = 0
+	m.bodyEditor = m.newBodyEditor("only line")
+	m.bodyEditor.SetCursor(0)
 
 	m.updateModal(tea.KeyPressMsg{Code: tea.KeyUp})
 	if m.titleEditor == nil {
@@ -79,10 +80,10 @@ func TestUpAtBodyTopEntersTitleEdit(t *testing.T) {
 func TestDownFromTitleReturnsToBody(t *testing.T) {
 	st := &store.Store{Quests: []model.Quest{{ID: "q1", Title: "T", Body: []model.BodyLine{{Text: "line a"}, {Text: "line b"}}}}}
 	m := &Model{store: st, modal: &Modal{Kind: ModalQuestDetail, QuestID: "q1"}}
-	mod := m.modal
-	mod.BodyCursor = 0
-	mod.BodyEditor = m.newBodyEditor("line a")
-	mod.BodyEditor.SetCursor(0)
+	m.bodyOwnerKind, m.bodyOwnerID = ownerQuest, "q1"
+	m.bodyCursor = 0
+	m.bodyEditor = m.newBodyEditor("line a")
+	m.bodyEditor.SetCursor(0)
 
 	m.updateModal(tea.KeyPressMsg{Code: tea.KeyUp}) // into title
 	if m.titleEditor == nil {
@@ -92,8 +93,8 @@ func TestDownFromTitleReturnsToBody(t *testing.T) {
 	if m.titleEditor != nil {
 		t.Fatal("Down did not leave title edit")
 	}
-	if mod.BodyCursor != 0 {
-		t.Fatalf("body cursor = %d, want 0 (top)", mod.BodyCursor)
+	if m.bodyCursor != 0 {
+		t.Fatalf("body cursor = %d, want 0 (top)", m.bodyCursor)
 	}
 	if m.onFocusLink() {
 		t.Fatal("returned to Sigils, want body")
@@ -110,7 +111,7 @@ func TestDownFromTitleReturnsToSigils(t *testing.T) {
 
 func TestBodyCaretActivePredicate(t *testing.T) {
 	base := func() *Model {
-		return &Model{integrationsEnabled: true, focusLinkIdx: noSelection, modal: &Modal{Kind: ModalQuestDetail}}
+		return &Model{integrationsEnabled: true, focusLinkIdx: noSelection, modal: &Modal{Kind: ModalQuestDetail}, bodyOwnerKind: ownerQuest}
 	}
 	if !base().bodyCaretActive() {
 		t.Fatal("plain body should own the caret")
@@ -125,19 +126,20 @@ func TestBodyCaretActivePredicate(t *testing.T) {
 	if m.bodyCaretActive() {
 		t.Fatal("Sigils focused: body must NOT draw a caret")
 	}
-	m = base()
-	m.modal.InQuestList = true
-	if m.bodyCaretActive() {
-		t.Fatal("quest list focused: body must NOT draw a caret")
-	}
 }
 
 func TestTitleEditCampaign(t *testing.T) {
 	st := &store.Store{Projects: []model.Project{{ID: "p1", Name: "Old camp"}}}
-	m := &Model{store: st, modal: &Modal{Kind: ModalCampaignDetail, CampaignID: "p1"}}
-	m.beginTitleEdit()
-	typeText(m, "X")
-	m.commitTitleEdit()
+	m := &Model{store: st, collapsedProjects: map[string]bool{}}
+	// Campaign titles are renamed inline in the Tavern pane now (the header row),
+	// not via a detail modal: selecting the row opens its name editor and
+	// commitEdit writes it back.
+	m.setCursor(ui.Row{Kind: ui.RowProject, ProjectID: "p1"})
+	if m.editor == nil {
+		t.Fatal("selecting a campaign row did not open its name editor")
+	}
+	m.editor.SetValue("Old campX")
+	m.commitEdit()
 	if got := m.findProject("p1").Name; got != "Old campX" {
 		t.Fatalf("campaign name = %q", got)
 	}

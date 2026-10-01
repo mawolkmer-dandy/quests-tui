@@ -160,10 +160,6 @@ func clampFloat(v, lo, hi float64) float64 {
 // renderEditableText renders ti's value with the active selection
 // highlighted and a block cursor, replacing ti.View() — bubbles/textinput
 // has no concept of a selection range to draw.
-func (m *Model) renderEditableText(ti *textinput.Model) string {
-	return m.renderEditableStyled(ti, lipgloss.NewStyle())
-}
-
 // renderEditableFixedWidth is renderEditableStyled that ALWAYS reserves the
 // trailing end-of-text caret cell: renderEditableStyled draws the caret as an
 // extra block cell only when it's at the end of the text (width N+1) but on an
@@ -225,16 +221,6 @@ func (m *Model) cursorTitleStyle(row ui.Row) lipgloss.Style {
 	return ui.StyleTitle
 }
 
-// renderClipboardToast is the "● copied to clipboard" indicator shown
-// briefly (see showClipboardToast) in place of the footer/header pointer.
-func renderClipboardToast(text string) string {
-	if text == "" {
-		text = "copied to clipboard"
-	}
-	bullet := lipgloss.NewStyle().Bold(true).Foreground(ui.ColorHeading).Render("●")
-	return bullet + " " + ui.StyleMuted.Render(text)
-}
-
 // --- multiline selection (focus-view bodies only) -----------------------
 //
 // A selection that spans body lines is anchored at (selAnchorLine,
@@ -244,21 +230,21 @@ func renderClipboardToast(text string) string {
 // (a URL, a paragraph), not multi-line editing, and line merge/split
 // semantics aren't worth the edge cases.
 
-// multilineSelActive reports whether the current selection spans more than
-// one body line of an open focus view.
+// multilineSelActive reports whether the current selection spans more than one
+// body line — of an open focus view, or of a campaign's inline pane notes.
 func (m *Model) multilineSelActive() bool {
-	mod := m.modal
-	return mod != nil && isFocusModal(mod.Kind) &&
+	inBody := (m.modal != nil && isFocusModal(m.modal.Kind)) ||
+		(m.bodyOwnerKind == ownerCampaign && m.cursor.kind == ui.RowBodyLine)
+	return inBody &&
 		m.selAnchor != noSelection && m.selAnchorLine != noSelection &&
-		m.selAnchorLine != mod.BodyCursor
+		m.selAnchorLine != m.bodyCursor
 }
 
 // applyBodySelectionKey is applySelectionKey for a focus view's body
 // outline — same Shift+Left/Right/Home/End handling, plus Shift+Up/Down to
 // grow the selection across lines.
 func (m *Model) applyBodySelectionKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
-	mod := m.modal
-	runes := []rune(mod.BodyEditor.Value())
+	runes := []rune(m.bodyEditor.Value())
 
 	switch msg.String() {
 	case "shift+up":
@@ -266,9 +252,9 @@ func (m *Model) applyBodySelectionKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	case "shift+down":
 		return true, m.extendBodySelectionLine(1)
 	case "shift+left":
-		return true, m.extendBodySelectionCol(clampInt(mod.BodyEditor.Position()-1, 0, len(runes)))
+		return true, m.extendBodySelectionCol(clampInt(m.bodyEditor.Position()-1, 0, len(runes)))
 	case "shift+right":
-		return true, m.extendBodySelectionCol(clampInt(mod.BodyEditor.Position()+1, 0, len(runes)))
+		return true, m.extendBodySelectionCol(clampInt(m.bodyEditor.Position()+1, 0, len(runes)))
 	case "shift+home":
 		return true, m.extendBodySelectionCol(0)
 	case "shift+end":
@@ -291,16 +277,15 @@ func (m *Model) applyBodySelectionKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 			return false, nil
 		}
 	}
-	return m.applySelectionKey(&mod.BodyEditor, msg)
+	return m.applySelectionKey(&m.bodyEditor, msg)
 }
 
 func (m *Model) extendBodySelectionCol(newPos int) tea.Cmd {
-	mod := m.modal
 	if m.selAnchor == noSelection {
-		m.selAnchor = mod.BodyEditor.Position()
-		m.selAnchorLine = mod.BodyCursor
+		m.selAnchor = m.bodyEditor.Position()
+		m.selAnchorLine = m.bodyCursor
 	}
-	mod.BodyEditor.SetCursor(newPos)
+	m.bodyEditor.SetCursor(newPos)
 	return m.copyBodySelection()
 }
 
@@ -309,41 +294,39 @@ func (m *Model) extendBodySelectionCol(newPos int) tea.Cmd {
 // started. At the first/last line it extends to the line's start/end
 // instead, so repeated presses still make progress.
 func (m *Model) extendBodySelectionLine(delta int) tea.Cmd {
-	mod := m.modal
 	body := m.currentBody()
 	if body == nil {
 		return nil
 	}
 	if m.selAnchor == noSelection {
-		m.selAnchor = mod.BodyEditor.Position()
-		m.selAnchorLine = mod.BodyCursor
+		m.selAnchor = m.bodyEditor.Position()
+		m.selAnchorLine = m.bodyCursor
 	}
 	m.commitBodyLine()
 
-	newIdx := clampInt(mod.BodyCursor+delta, 0, len(*body)-1)
-	if newIdx == mod.BodyCursor {
+	newIdx := clampInt(m.bodyCursor+delta, 0, len(*body)-1)
+	if newIdx == m.bodyCursor {
 		if delta < 0 {
-			mod.BodyEditor.SetCursor(0)
+			m.bodyEditor.SetCursor(0)
 		} else {
-			mod.BodyEditor.SetCursor(len([]rune(mod.BodyEditor.Value())))
+			m.bodyEditor.SetCursor(len([]rune(m.bodyEditor.Value())))
 		}
 		return m.copyBodySelection()
 	}
 
-	col := mod.BodyEditor.Position()
-	mod.BodyCursor = newIdx
+	col := m.bodyEditor.Position()
+	m.bodyCursor = newIdx
 	ed := bodyLineEditor((*body)[newIdx].Text) // not newBodyEditor — the anchor must survive
 	ed.SetCursor(col)
-	mod.BodyEditor = ed
+	m.bodyEditor = ed
 	return m.copyBodySelection()
 }
 
 // bodySelEndpoints returns the ordered (startLine, startCol, endLine,
 // endCol) of the active cross-line selection.
 func (m *Model) bodySelEndpoints() (sL, sC, eL, eC int) {
-	mod := m.modal
 	sL, sC = m.selAnchorLine, m.selAnchor
-	eL, eC = mod.BodyCursor, mod.BodyEditor.Position()
+	eL, eC = m.bodyCursor, m.bodyEditor.Position()
 	if sL > eL || (sL == eL && sC > eC) {
 		sL, sC, eL, eC = eL, eC, sL, sC
 	}
@@ -375,7 +358,6 @@ func (m *Model) bodyLineSelRange(i, lineLen int) (lo, hi int, ok bool) {
 // its text up to sC, line eL's text from eC is appended onto it, the lines
 // between collapse away, and the caret lands at the join on line sL.
 func (m *Model) deleteBodySelection() {
-	mod := m.modal
 	body := m.currentBody()
 	if body == nil || !m.multilineSelActive() {
 		return
@@ -385,11 +367,11 @@ func (m *Model) deleteBodySelection() {
 	eL = clampInt(eL, 0, len(*body)-1)
 
 	startText, endText := (*body)[sL].Text, (*body)[eL].Text
-	if sL == mod.BodyCursor {
-		startText = mod.BodyEditor.Value()
+	if sL == m.bodyCursor {
+		startText = m.bodyEditor.Value()
 	}
-	if eL == mod.BodyCursor {
-		endText = mod.BodyEditor.Value()
+	if eL == m.bodyCursor {
+		endText = m.bodyEditor.Value()
 	}
 	sr, er := []rune(startText), []rune(endText)
 	sC = clampInt(sC, 0, len(sr))
@@ -405,13 +387,12 @@ func (m *Model) deleteBodySelection() {
 // selections go through the shared copySelection; cross-line ones join the
 // covered lines' raw text with newlines.
 func (m *Model) copyBodySelection() tea.Cmd {
-	mod := m.modal
 	body := m.currentBody()
 	if body == nil || m.selAnchor == noSelection {
 		return nil
 	}
 	if !m.multilineSelActive() {
-		return m.copySelection(&mod.BodyEditor)
+		return m.copySelection(&m.bodyEditor)
 	}
 
 	sL, sC, eL, eC := m.bodySelEndpoints()
@@ -421,8 +402,8 @@ func (m *Model) copyBodySelection() tea.Cmd {
 			continue
 		}
 		text := (*body)[i].Text
-		if i == mod.BodyCursor {
-			text = mod.BodyEditor.Value() // live, possibly uncommitted edits
+		if i == m.bodyCursor {
+			text = m.bodyEditor.Value() // live, possibly uncommitted edits
 		}
 		r := []rune(text)
 		lo, hi := 0, len(r)
@@ -486,7 +467,6 @@ func wrapSegments(runes []rune, width int) [][2]int {
 // (-1 otherwise) — the caller uses that to keep the caret in view when the
 // focus content scrolls.
 func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, width, startLine int) (rows []string, caretRow int) {
-	mod := m.modal
 	caretRow = -1
 
 	kind, display := model.ClassifyBodyLine(l.Text)
@@ -529,8 +509,8 @@ func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, wid
 	}
 
 	if editing {
-		raw := []rune(mod.BodyEditor.Value())
-		cursor := mod.BodyEditor.Position()
+		raw := []rune(m.bodyEditor.Value())
+		cursor := m.bodyEditor.Position()
 		// Derive the glyph AND the text style from the LIVE editor value, so
 		// the line keeps its heading/done look while being edited (and a "- "
 		// typed onto a plain line grows its checkbox immediately).
@@ -550,7 +530,7 @@ func (m *Model) renderBodyLineWrapped(i int, l model.BodyLine, editing bool, wid
 		if m.multilineSelActive() {
 			selLo, selHi, hasSel = m.bodyLineSelRange(i, len(raw))
 		} else {
-			selLo, selHi, hasSel = m.selectionBounds(&mod.BodyEditor)
+			selLo, selHi, hasSel = m.selectionBounds(&m.bodyEditor)
 		}
 		if len(raw) == 0 {
 			addRow(0)

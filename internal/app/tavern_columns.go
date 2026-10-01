@@ -192,6 +192,8 @@ func sectionColor(section string) color.Color {
 		return ui.ColorRune
 	case "lookouts":
 		return ui.ColorLookout
+	case "trails":
+		return ui.ColorSide // PRs link to GitHub — the blue side-quest accent
 	case "someday":
 		return ui.ColorRust
 	case "campaigns":
@@ -210,6 +212,8 @@ func sectionMotif(section string) string {
 		return "\U000f0b2f" // nf-md-crystal_ball
 	case "lookouts":
 		return "\U000f0a00" // nf-md-lighthouse_on
+	case "trails":
+		return "\U000f0d20" // nf-md-map_marker_path — a trail/route (gamier than the git glyph)
 	case "someday":
 		return "\U000f0726" // nf-md-treasure_chest
 	case "campaigns":

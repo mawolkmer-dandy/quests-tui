@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -24,9 +25,29 @@ type hallSpan struct {
 	target cursorTarget
 }
 
+// paneLinkSpan is a shortened-link click target in a campaign note: vis is its
+// pane visual-line index; [x0,x1) are absolute screen columns; url is the full
+// address. Checked before the row click so a link click copies/opens it.
+type paneLinkSpan struct {
+	vis    int
+	x0, x1 int
+	url    string
+}
+
 // unassignedBanner is the sentinel BannerID for the "Unassigned" area that
 // gathers campaigns not filed under any real banner.
 const unassignedBanner = ""
+
+// errandsBanner is the reserved BannerID of the pinned "Errands" area — the
+// permanent home for campaign-less quests (one-off errands + recurring rites).
+// Always rendered first among the areas. It isn't stored in Store.Banners, so
+// findBanner returns nil for it and, like the synthetic "Unassigned", it can't
+// be renamed, reordered, or deleted. Shares ui.ErrandsBannerID so rendering can
+// give it its distinct treatment.
+const errandsBanner = ui.ErrandsBannerID
+
+// errandsLabel is the display name of the pinned Errands area.
+const errandsLabel = "Errands"
 
 // hallRows is the left directory: the rooms group on top (Questboard · Vault ·
 // Runes · Lookouts, the latter two only when non-empty), then the areas —
@@ -37,6 +58,9 @@ func (m *Model) hallRows() []ui.Row {
 	s := m.store
 	blank := ui.Row{Kind: ui.RowSpacer}
 	rows := []ui.Row{{Kind: ui.RowSection, Section: "inbox"}}
+	if m.hasAnyTrails() {
+		rows = append(rows, ui.Row{Kind: ui.RowSection, Section: "trails"})
+	}
 	if ui.CountRunes(s) > 0 {
 		rows = append(rows, ui.Row{Kind: ui.RowSection, Section: "runes"})
 	}
@@ -55,6 +79,9 @@ func (m *Model) hallRows() []ui.Row {
 			}
 		}
 	}
+	// Errands: the pinned home area for campaign-less quests — always first among
+	// the areas (above real banners, below the rooms).
+	appendArea(errandsBanner, errandsLabel)
 	for _, b := range s.Banners {
 		appendArea(b.ID, b.Name)
 	}
@@ -92,12 +119,29 @@ func (m *Model) campaignPaneRows(projectID string) []ui.Row {
 	s := m.store
 	rows := []ui.Row{{Kind: ui.RowProject, ProjectID: projectID, Bare: true, Header: true}, {Kind: ui.RowSpacer}}
 
-	var activeQ, laterQ, vaultedQ []string
-	for _, q := range ui.QuestsForCampaign(s, projectID) { // sorted, excludes vaulted
-		if q.Status == model.StatusActive {
-			activeQ = append(activeQ, q.ID)
+	// Inline notes (Project.Body) sit directly under the title — plain prose,
+	// edited with the shared body outline editor. An empty campaign shows a
+	// single "add notes…" placeholder (RowBodyLine with no BodyLineID).
+	if p := m.findProject(projectID); p != nil {
+		if len(p.Body) == 0 {
+			rows = append(rows, ui.Row{Kind: ui.RowBodyLine, ProjectID: projectID})
 		} else {
-			laterQ = append(laterQ, q.ID) // open backlog + done-not-yet-vaulted
+			for _, l := range p.Body {
+				rows = append(rows, ui.Row{Kind: ui.RowBodyLine, ProjectID: projectID, BodyLineID: l.ID})
+			}
+		}
+		rows = append(rows, ui.Row{Kind: ui.RowSpacer})
+	}
+
+	var activeQ, laterQ, doneQ, vaultedQ []string
+	for _, q := range ui.QuestsForCampaign(s, projectID) { // sorted, excludes vaulted
+		switch {
+		case q.Status == model.StatusActive:
+			activeQ = append(activeQ, q.ID)
+		case q.Status == model.StatusDone:
+			doneQ = append(doneQ, q.ID)
+		default:
+			laterQ = append(laterQ, q.ID) // open backlog
 		}
 	}
 	for i := range s.Quests {
@@ -109,10 +153,19 @@ func (m *Model) campaignPaneRows(projectID string) []ui.Row {
 	quest := func(id string, dim bool) ui.Row {
 		return ui.Row{Kind: ui.RowQuest, ProjectID: projectID, QuestID: id, Bare: true, Dim: dim}
 	}
+	group := func(label string, ids []string) {
+		if len(ids) == 0 {
+			return
+		}
+		rows = append(rows, ui.Row{Kind: ui.RowSpacer}, ui.Row{Kind: ui.RowDayHeader, Label: label}, ui.Row{Kind: ui.RowSpacer})
+		for _, id := range ids {
+			rows = append(rows, quest(id, true))
+		}
+	}
 
 	switch {
 	case len(activeQ) == 0 && len(laterQ) == 0:
-		// Empty campaign → offer the first quest.
+		// No active or backlog work → offer a new quest (done ones show below).
 		rows = append(rows, ui.Row{Kind: ui.RowNewQuest, ProjectID: projectID, Label: "+ add quest"})
 	case len(activeQ) == 0:
 		// Everything inactive → one flat list, no "Later" split, not dimmed.
@@ -124,13 +177,10 @@ func (m *Model) campaignPaneRows(projectID string) []ui.Row {
 		for _, id := range activeQ {
 			rows = append(rows, quest(id, false))
 		}
-		if len(laterQ) > 0 {
-			rows = append(rows, ui.Row{Kind: ui.RowSpacer}, ui.Row{Kind: ui.RowDayHeader, Label: "Later"}, ui.Row{Kind: ui.RowSpacer})
-			for _, id := range laterQ {
-				rows = append(rows, quest(id, true))
-			}
-		}
+		group("Later", laterQ)
 	}
+	// Done — completed quests, resting until vaulted, in their own group.
+	group("Done", doneQ)
 	if len(vaultedQ) > 0 {
 		section := "camp:" + projectID
 		expanded := m.collapsedProjects[ui.VaultOpenKey(section)]
@@ -144,6 +194,23 @@ func (m *Model) campaignPaneRows(projectID string) []ui.Row {
 			}
 		}
 	}
+
+	// Saga chapter links, pinned at the bottom: the previous chapter (derived)
+	// and the next (Project.NextID), each drilling into that campaign.
+	var saga []ui.Row
+	if prev := m.prevChapter(projectID); prev != nil {
+		saga = append(saga, ui.Row{Kind: ui.RowSagaLink, ProjectID: prev.ID, Label: "← Continued from: "})
+	}
+	if p := m.findProject(projectID); p != nil && p.NextID != "" {
+		if next := m.findProject(p.NextID); next != nil {
+			saga = append(saga, ui.Row{Kind: ui.RowSagaLink, ProjectID: next.ID, Label: "→ Continues in: "})
+		}
+	}
+	if len(saga) > 0 {
+		rows = append(rows, ui.Row{Kind: ui.RowSpacer})
+		rows = append(rows, saga...)
+	}
+
 	return rows
 }
 
@@ -153,21 +220,23 @@ type campState int
 const (
 	campActive campState = iota
 	campLater
+	campDone
 	campVaulted
 )
 
-// campaignState derives a campaign's status: vaulted when archived, active when
-// it has at least one taken-up (active) quest, else later. A completed campaign
-// counts as later — it's done with, resting in the hall until you vault it.
+// campaignState derives a campaign's status: vaulted when archived, done when
+// completed (resting in the hall until you vault it), active when it has at
+// least one taken-up (active) quest, else later (open backlog).
 func (m *Model) campaignState(p *model.Project) campState {
 	if p.Archived {
 		return campVaulted
 	}
-	if !p.IsCompleted() {
-		for i := range m.store.Quests {
-			if q := &m.store.Quests[i]; q.ProjectID == p.ID && q.Status == model.StatusActive && !q.Vaulted {
-				return campActive
-			}
+	if p.IsCompleted() {
+		return campDone
+	}
+	for i := range m.store.Quests {
+		if q := &m.store.Quests[i]; q.ProjectID == p.ID && q.Status == model.StatusActive && !q.Vaulted {
+			return campActive
 		}
 	}
 	return campLater
@@ -183,28 +252,40 @@ func (m *Model) bannerPaneRows(bannerID string) []ui.Row {
 	real := bannerID != unassignedBanner // the synthetic "Unassigned" holds only campaigns
 
 	header := ui.Row{Kind: ui.RowBanner, BannerID: bannerID, Bare: true}
-	if !real {
+	switch bannerID {
+	case unassignedBanner:
 		header.Label = "Unassigned"
+	case errandsBanner:
+		header.Label = errandsLabel // synthetic — findBanner can't supply the name
 	}
 	rows := []ui.Row{header, {Kind: ui.RowSpacer}} // banner title + breathing room below it
 
-	var activeQ, laterQ, vaultedQ []string
+	var activeQ, laterQ, doneQ, vaultedQ []string
 	if real {
+		// Collect the loose quests and order them by priority (like a campaign's
+		// pane does) — else low-priority quests would sit in raw store order,
+		// above no-priority ones.
+		var loose []model.Quest
 		for _, q := range s.Quests {
-			if q.ProjectID != "" || q.BannerID != bannerID {
-				continue
+			if q.ProjectID == "" && q.BannerID == bannerID {
+				loose = append(loose, q)
 			}
+		}
+		sort.SliceStable(loose, func(i, j int) bool { return ui.SortBucket(loose[i]) < ui.SortBucket(loose[j]) })
+		for _, q := range loose {
 			switch {
 			case q.Vaulted:
 				vaultedQ = append(vaultedQ, q.ID)
 			case q.Status == model.StatusActive:
 				activeQ = append(activeQ, q.ID)
+			case q.Status == model.StatusDone:
+				doneQ = append(doneQ, q.ID)
 			default:
 				laterQ = append(laterQ, q.ID)
 			}
 		}
 	}
-	var activeC, laterC, vaultedC []string
+	var activeC, laterC, doneC, vaultedC []string
 	for i := range s.Projects {
 		p := &s.Projects[i]
 		if p.BannerID != bannerID {
@@ -215,6 +296,8 @@ func (m *Model) bannerPaneRows(bannerID string) []ui.Row {
 			vaultedC = append(vaultedC, p.ID)
 		case campActive:
 			activeC = append(activeC, p.ID)
+		case campDone:
+			doneC = append(doneC, p.ID)
 		default:
 			laterC = append(laterC, p.ID)
 		}
@@ -226,6 +309,9 @@ func (m *Model) bannerPaneRows(bannerID string) []ui.Row {
 	camp := func(id string, dim bool) ui.Row {
 		return ui.Row{Kind: ui.RowProject, ProjectID: id, Bare: true, Dim: dim}
 	}
+	// The pinned Errands area holds only loose quests — it never lists or offers
+	// to add campaigns.
+	errands := bannerID == errandsBanner
 	noLooseQuests := real && len(activeQ)+len(laterQ) == 0
 	noCampaigns := len(activeC)+len(laterC) == 0
 
@@ -238,6 +324,9 @@ func (m *Model) bannerPaneRows(bannerID string) []ui.Row {
 		if noLooseQuests {
 			rows = append(rows, ui.Row{Kind: ui.RowNewQuest, BannerID: bannerID, Label: "+ add quest"})
 		}
+		if errands {
+			return // no campaigns under Errands
+		}
 		if real {
 			rows = append(rows, ui.Row{Kind: ui.RowSpacer})
 		}
@@ -249,25 +338,34 @@ func (m *Model) bannerPaneRows(bannerID string) []ui.Row {
 		}
 	}
 
+	// group renders a labeled, dimmed block (Later / Done) under its own divider —
+	// quests first, then campaigns, a blank line between when both are present.
+	group := func(label string, qs, cs []string) {
+		if len(qs)+len(cs) == 0 {
+			return
+		}
+		rows = append(rows, ui.Row{Kind: ui.RowSpacer}, ui.Row{Kind: ui.RowDayHeader, Label: label}, ui.Row{Kind: ui.RowSpacer})
+		for _, id := range qs {
+			rows = append(rows, quest(id, true))
+		}
+		if len(qs) > 0 && len(cs) > 0 {
+			rows = append(rows, ui.Row{Kind: ui.RowSpacer})
+		}
+		for _, id := range cs {
+			rows = append(rows, camp(id, true))
+		}
+	}
+
 	if len(activeQ) > 0 || len(activeC) > 0 {
 		emit(activeQ, activeC, false)
-		// Later: a dimmed backlog under its own divider.
-		if len(laterQ)+len(laterC) > 0 {
-			rows = append(rows, ui.Row{Kind: ui.RowSpacer}, ui.Row{Kind: ui.RowDayHeader, Label: "Later"}, ui.Row{Kind: ui.RowSpacer})
-			for _, id := range laterQ {
-				rows = append(rows, quest(id, true))
-			}
-			if len(laterQ) > 0 && len(laterC) > 0 {
-				rows = append(rows, ui.Row{Kind: ui.RowSpacer})
-			}
-			for _, id := range laterC {
-				rows = append(rows, camp(id, true))
-			}
-		}
+		group("Later", laterQ, laterC)
 	} else {
-		// Everything inactive → one flat list, no "Later" split, not dimmed.
+		// Nothing taken up → show the backlog flat (no "Later" header), or just the
+		// "+ add" affordances when it's empty.
 		emit(laterQ, laterC, false)
 	}
+	// Done — completed campaigns/quests, resting until vaulted, in their own group.
+	group("Done", doneQ, doneC)
 
 	// Vaulted — collapsed by default.
 	if n := len(vaultedQ) + len(vaultedC); n > 0 {
@@ -296,6 +394,53 @@ func (m *Model) drillIntoCampaign(projectID string) {
 	m.diveIntoPane()
 }
 
+// navigateToQuest jumps the hall to a quest's container (campaign / area /
+// Questboard), dives into the pane, and lands the cursor on the quest itself —
+// the "go to this quest" the search modal fires when a quest is chosen.
+func (m *Model) navigateToQuest(questID string) {
+	q := m.findQuest(questID)
+	if q == nil {
+		return
+	}
+	var container cursorTarget
+	switch {
+	case q.ProjectID != "":
+		container = cursorTarget{kind: ui.RowProject, projectID: q.ProjectID}
+	case q.BannerID != "":
+		container = cursorTarget{kind: ui.RowBanner, bannerID: q.BannerID}
+	default:
+		container = cursorTarget{kind: ui.RowSection, section: "inbox"}
+	}
+	m.selectHallTarget(container)
+	for _, r := range m.paneRows() {
+		if r.Kind == ui.RowQuest && r.QuestID == questID {
+			m.hallFocus = false
+			m.scrollOffset = 0
+			m.setCursor(r)
+			return
+		}
+	}
+	m.diveIntoPane() // fallback: the quest row wasn't found — land on the first row
+}
+
+// escFromPane handles Esc while focused in the Tavern pane. Inside a campaign it
+// steps UP to that campaign's banner view first, so Esc walks the hierarchy
+// campaign → banner → sidebar; a second Esc from the banner then hands focus to
+// the hall. Anywhere else (a banner, a room) Esc goes straight to the hall.
+func (m *Model) escFromPane() {
+	if m.hallCursor.kind == ui.RowProject {
+		if p := m.findProject(m.hallCursor.projectID); p != nil {
+			target := cursorTarget{kind: ui.RowBanner, bannerID: p.BannerID}
+			if findRowIndex(m.hallRows(), target) >= 0 {
+				m.selectHallTarget(target)
+				m.diveIntoPane()
+				return
+			}
+		}
+	}
+	m.returnToHall()
+}
+
 // hallRoomLabel is the display name for a room section.
 func hallRoomLabel(section string) string {
 	switch section {
@@ -307,6 +452,8 @@ func hallRoomLabel(section string) string {
 		return "Runes"
 	case "lookouts":
 		return "Lookouts"
+	case "trails":
+		return "Trails"
 	}
 	return section
 }
@@ -398,10 +545,16 @@ func (m *Model) diveIntoPane() {
 // then dropping an unnamed draft quest/campaign so leaving the pane doesn't
 // strand an empty row).
 func (m *Model) returnToHall() {
+	fromNote := ""
+	if m.cursor.kind == ui.RowBodyLine {
+		fromNote = m.cursor.projectID
+	}
 	m.commitEdit()
 	m.discardEmptyPaneDraft()
+	if fromNote != "" {
+		m.pruneTrailingEmptyNotes(fromNote)
+	}
 	m.editor = nil
-	m.confirmDeleteID = ""
 	m.hallFocus = true
 	m.cursorMoved = true
 }
@@ -460,7 +613,7 @@ func (m *Model) renderHallRow(row ui.Row, selected, focused bool, width int) str
 		if b != nil && b.Icon != "" {
 			glyph = b.Icon
 		}
-		count := ui.StyleMuted.Render(fmt.Sprintf(" (%d)", ui.BannerCampaignCount(m.store, row.BannerID)))
+		count := ui.StyleMuted.Render(fmt.Sprintf(" (%d)", ui.BannerItemCount(m.store, row.BannerID)))
 		// The synthetic "Unassigned" area reads softer than a real banner.
 		if row.BannerID == unassignedBanner {
 			nameStyle := ui.StyleMuted
@@ -468,6 +621,15 @@ func (m *Model) renderHallRow(row ui.Row, selected, focused bool, width int) str
 				nameStyle = lipgloss.NewStyle().Bold(true).Foreground(ui.ColorHeading)
 			}
 			return mark + ui.StyleMuted.Render("○") + " " + nameStyle.Render(strings.ToUpper(nm)) + count
+		}
+		// The pinned Errands area gets the tavern's warm accent and a checklist
+		// emblem, so it reads as a fixture rather than one of your own areas.
+		if row.BannerID == errandsBanner {
+			nameStyle := lipgloss.NewStyle().Foreground(ui.ColorAccent)
+			if selected {
+				nameStyle = nameStyle.Bold(true)
+			}
+			return mark + lipgloss.NewStyle().Bold(true).Foreground(ui.ColorAccent).Render(ui.GlyphErrands) + " " + nameStyle.Render(strings.ToUpper(nm)) + count
 		}
 		style := lipgloss.NewStyle().Foreground(ui.ColorHeading)
 		if selected {
@@ -492,7 +654,7 @@ func (m *Model) renderHallRow(row ui.Row, selected, focused bool, width int) str
 		if row.Nested {
 			indent = "    "
 		}
-		return mark + indent + ring + " " + nameStyle.Render(p.Name)
+		return mark + indent + ui.PriorityIndicator(p.Priority) + ring + " " + nameStyle.Render(p.Name)
 	case ui.RowNewBanner:
 		return mark + ui.StyleMuted.Render("+ New Banner")
 	case ui.RowNewProject:
@@ -536,12 +698,14 @@ func (m *Model) hallRoomCount(section string) int {
 		return ui.CountRunes(m.store)
 	case "lookouts":
 		return ui.CountLookouts(m.store)
+	case "trails":
+		return m.trailsCount()
 	}
 	return 0
 }
 
 // hallColWidth is the fixed width of the left directory column.
-func hallColWidth(contentW int) int { return clampInt(contentW/3, 18, 30) }
+func hallColWidth(contentW int) int { return clampInt(contentW/3, 18, 36) }
 
 // hallGap is the breathing room between the left hall and the content pane.
 const hallGap = 6
@@ -552,7 +716,7 @@ const hallGap = 6
 func (m *Model) renderTavernView() string {
 	m.ensureHallCursor()
 
-	contentW := clampInt(m.width-4, 40, 100)
+	contentW := clampInt(m.width-4, 40, 130)
 	outer := (m.width - contentW) / 2
 	if outer < 0 {
 		outer = 0
@@ -575,20 +739,38 @@ func (m *Model) renderTavernView() string {
 	footer := indentLines(m.statusBar(contentW), margin)
 	hallRows := m.hallRows()
 	paneRows := m.paneRows()
-	contentRows := len(hallRows)
-	if len(paneRows) > contentRows {
-		contentRows = len(paneRows)
+
+	hallIdx := findRowIndex(hallRows, m.hallCursor)
+	paneIdx := -1
+	if !m.hallFocus {
+		paneIdx = findRowIndex(paneRows, m.cursor)
 	}
-	// Vertical layout: a comfortable, roughly equal margin top and bottom; the
-	// body is a capped-height scrolling viewport, and the footer sits just below
-	// it (right after the items) rather than pinned to the screen edge.
+	hoverIdx := -1
+	if m.hover != nil && !m.hallFocus {
+		hoverIdx = findRowIndex(paneRows, *m.hover)
+	}
+
+	// Reset the per-render click maps before rendering rows records into them.
+	m.hallSpans = m.hallSpans[:0]
+	m.hintSpans = map[int][]hintSpan{}
+	m.codeSpans = map[int][]codeSpan{}
+	m.paneLinkSpans = m.paneLinkSpans[:0]
+
+	// Pane rows expand to screen lines (a campaign note soft-wraps its prose);
+	// the hall stays one row per line. The two columns scroll independently.
+	paneLines, paneLineRow, paneRowFirst := m.expandedPaneLines(paneRows, paneW, paneIdx, hoverIdx)
+	m.paneLineRow = paneLineRow
+
+	// Vertical layout: a comfortable, roughly equal margin top and bottom. The
+	// body fills the available height so the hall doesn't scroll before it must
+	// and the tall Vault has room — but it's still a FIXED height (depends only on
+	// the window, not the selected page), so the Tavern keeps one size instead of
+	// snapping between a short page (an errand) and a tall one (the Vault). Short
+	// pages pad with blank space; taller content scrolls within it.
 	const bodyGap, footerGap = 3, 2
-	comfy := clampInt(m.height/8, 2, 5)
+	comfy := clampInt(m.height/8, 2, 4)
 	chrome := len(header) + bodyGap + footerGap + lipgloss.Height(footer)
-	colBodyH := contentRows
-	if maxBody := m.height - chrome - 2*comfy; colBodyH > maxBody {
-		colBodyH = maxBody
-	}
+	colBodyH := m.height - chrome - 2*comfy
 	if colBodyH < 1 {
 		colBodyH = 1
 	}
@@ -601,33 +783,24 @@ func (m *Model) renderTavernView() string {
 	}
 	colTop := topPad + len(header) + bodyGap
 
-	hallIdx := findRowIndex(hallRows, m.hallCursor)
-	paneIdx := -1
-	if !m.hallFocus {
-		paneIdx = findRowIndex(paneRows, m.cursor)
+	// The cursor's first screen line (a wrapped note occupies several).
+	paneVisIdx := -1
+	if paneIdx >= 0 {
+		paneVisIdx = paneRowFirst[paneIdx]
 	}
-
 	m.hallScroll = followScroll(len(hallRows), hallIdx, m.hallScroll, colBodyH, m.hallFocus && m.cursorMoved)
-	m.scrollOffset = followScroll(len(paneRows), paneIdx, m.scrollOffset, colBodyH, !m.hallFocus && m.cursorMoved)
+	m.scrollOffset = followScroll(len(paneLines), paneVisIdx, m.scrollOffset, colBodyH, !m.hallFocus && m.cursorMoved)
 	// Cache each column's max scroll so the wheel can move a column even when it
 	// doesn't hold the cursor (e.g. peeking a long pane while focus is in the hall).
 	m.hallScrollMax = maxInt(0, len(hallRows)-colBodyH)
-	m.scrollMax = maxInt(0, len(paneRows)-colBodyH)
+	m.scrollMax = maxInt(0, len(paneLines)-colBodyH)
 
 	m.rowsScreenTop = colTop
-	m.hallSpans = m.hallSpans[:0]
-	m.hintSpans = map[int][]hintSpan{}
-	m.codeSpans = map[int][]codeSpan{}
-
-	hoverIdx := -1
-	if m.hover != nil && !m.hallFocus {
-		hoverIdx = findRowIndex(paneRows, *m.hover)
-	}
 
 	// Record the cursor's screen cell for overlay bursts (pane side only).
 	m.cursorScreenY = -1
-	if !m.hallFocus && paneIdx >= m.scrollOffset && paneIdx < m.scrollOffset+colBodyH {
-		m.cursorScreenY = colTop + (paneIdx - m.scrollOffset)
+	if !m.hallFocus && paneVisIdx >= m.scrollOffset && paneVisIdx < m.scrollOffset+colBodyH {
+		m.cursorScreenY = colTop + (paneVisIdx - m.scrollOffset)
 		m.cursorScreenX = m.paneColX
 	}
 
@@ -645,7 +818,7 @@ func (m *Model) renderTavernView() string {
 
 	for i := 0; i < colBodyH; i++ {
 		hallLine := m.hallLineAt(hallRows, m.hallScroll, i, colBodyH, hallW, hallIdx, colTop)
-		paneLine := m.paneLineAt(paneRows, i, colBodyH, paneW, paneIdx, hoverIdx)
+		paneLine := m.paneVisLineAt(paneLines, i, colBodyH)
 		b.WriteString(clip.Render(margin+fitWidth(hallLine, hallW)+strings.Repeat(" ", hallGap)+paneLine) + "\n")
 	}
 	// The footer sits just below the body (padToScreen fills the balanced bottom
@@ -680,7 +853,7 @@ func (m *Model) currentBodyAbsolute() []string {
 // tavernBodyAbsolute renders the hall+pane body to absolute (margin-baked) lines
 // for the dissolve capture.
 func (m *Model) tavernBodyAbsolute() []string {
-	contentW := clampInt(m.width-4, 40, 100)
+	contentW := clampInt(m.width-4, 40, 130)
 	margin := strings.Repeat(" ", max0((m.width-contentW)/2))
 	hallW := hallColWidth(contentW)
 	paneW := contentW - hallW - hallGap
@@ -728,33 +901,75 @@ func (m *Model) hallLineAt(rows []ui.Row, scroll, i, viewH, width, cursorIdx, co
 	return m.renderHallRow(row, src == cursorIdx, m.hallFocus, width)
 }
 
-// paneLineAt renders the pane column's line i (with fold markers).
-func (m *Model) paneLineAt(rows []ui.Row, i, viewH, width, cursorIdx, hoverIdx int) string {
+// expandedPaneLines renders paneRows to a flat list of screen lines — every row
+// is exactly one line except a RowBodyLine (a campaign note), whose prose
+// soft-wraps across as many lines as it needs. lineRow[i] is the paneRows index
+// screen line i belongs to (-1 for a spacer's blank line); rowFirst[j] is the
+// first screen line of row j, so scroll/cursor/click can translate between rows
+// and screen lines. Recording of clickable spans (via renderOutlineRowLine)
+// stays keyed by row index, so it's unaffected by the wrapping.
+func (m *Model) expandedPaneLines(rows []ui.Row, width, cursorIdx, hoverIdx int) (lines []string, lineRow, rowFirst []int) {
+	rowFirst = make([]int, len(rows))
+	for j, r := range rows {
+		rowFirst[j] = len(lines)
+		switch r.Kind {
+		case ui.RowSpacer:
+			lines = append(lines, "")
+			lineRow = append(lineRow, -1)
+		case ui.RowBodyLine:
+			base := len(lines)
+			segLines, runs := m.renderNoteScreenLines(r, width)
+			for _, seg := range segLines {
+				lines = append(lines, seg)
+				lineRow = append(lineRow, j)
+			}
+			for _, run := range runs {
+				m.paneLinkSpans = append(m.paneLinkSpans, paneLinkSpan{
+					vis: base + run.seg, x0: m.paneColX + run.x0, x1: m.paneColX + run.x1, url: run.url,
+				})
+			}
+		default:
+			lines = append(lines, m.renderOutlineRowLine(rows, j, cursorIdx, hoverIdx, -1, width, m.paneColX))
+			lineRow = append(lineRow, j)
+		}
+	}
+	return lines, lineRow, rowFirst
+}
+
+// paneVisLineAt returns pane screen line i (post soft-wrap), with a scroll
+// ellipsis at the first/last visible line when there's more content off-screen.
+func (m *Model) paneVisLineAt(lines []string, i, viewH int) string {
 	if i == 0 && m.scrollOffset > 0 {
 		return ui.StyleMuted.Render(ellipsis)
 	}
-	if i == viewH-1 && m.scrollOffset+viewH < len(rows) {
+	if i == viewH-1 && m.scrollOffset+viewH < len(lines) {
 		return ui.StyleMuted.Render(ellipsis)
 	}
-	src := m.scrollOffset + i
-	if src < 0 || src >= len(rows) {
+	idx := m.scrollOffset + i
+	if idx < 0 || idx >= len(lines) {
 		return ""
 	}
-	if rows[src].Kind == ui.RowSpacer {
-		return ""
-	}
-	return m.renderOutlineRowLine(rows, src, cursorIdx, hoverIdx, -1, width, m.paneColX)
+	return lines[idx]
 }
 
 // followScroll clamps a column's scroll so cursorIdx stays visible (when
 // following) and never runs past the content's end.
 func followScroll(total, cursorIdx, scroll, viewH int, follow bool) int {
 	if follow && cursorIdx >= 0 {
-		if cursorIdx < scroll {
-			scroll = cursorIdx
+		// Keep a one-line margin at each edge: when scrolled, the first/last
+		// visible line is replaced by a "…" more-indicator, so parking the cursor
+		// on that line would hide the very row you're on (this stranded the top
+		// row of a scrolled Vault behind the "…"). The end-clamps below release the
+		// margin at the true top/bottom, where no ellipsis is drawn.
+		margin := 1
+		if viewH <= 2 {
+			margin = 0
 		}
-		if cursorIdx >= scroll+viewH {
-			scroll = cursorIdx - viewH + 1
+		if cursorIdx < scroll+margin {
+			scroll = cursorIdx - margin
+		}
+		if cursorIdx > scroll+viewH-1-margin {
+			scroll = cursorIdx - viewH + 1 + margin
 		}
 	}
 	if max := total - viewH; scroll > max {
@@ -773,7 +988,6 @@ func (m *Model) handleTavernClick(msg tea.MouseClickMsg) tea.Cmd {
 	if mouse.Button != tea.MouseLeft {
 		return nil
 	}
-	m.confirmDeleteID = ""
 	// The header row: mode toggle (TAVERN/CAMP) + right-aligned F1 help.
 	if mouse.Y == m.modeToggleRow {
 		if m.tavernHelpWidth > 0 && mouse.X >= m.tavernHelpX && mouse.X < m.tavernHelpX+m.tavernHelpWidth {
@@ -800,19 +1014,32 @@ func (m *Model) handleTavernClick(msg tea.MouseClickMsg) tea.Cmd {
 		}
 		return nil
 	}
-	// Pane column: focus the pane and act on the clicked row.
+	// Pane column: focus the pane and act on the clicked row. The click lands on
+	// a screen line, which maps back to its row via paneLineRow (a wrapped note
+	// spans several lines; a spacer's blank line maps to -1).
 	if mouse.X >= m.paneColX {
-		rows := m.paneRows()
 		relY := mouse.Y - m.rowsScreenTop
 		if relY < 0 {
 			return nil
 		}
-		idx := m.scrollOffset + relY
-		if idx < 0 || idx >= len(rows) {
+		visIdx := m.scrollOffset + relY
+		if visIdx < 0 || visIdx >= len(m.paneLineRow) {
+			return nil
+		}
+		// A click on a shortened link in a note copies it (a fast second opens),
+		// the same gesture as a quest body link — checked before the row click.
+		for _, sp := range m.paneLinkSpans {
+			if sp.vis == visIdx && mouse.X >= sp.x0 && mouse.X < sp.x1 {
+				m.hallFocus = false
+				return m.clickLink(sp.url)
+			}
+		}
+		idx := m.paneLineRow[visIdx]
+		if idx < 0 {
 			return nil
 		}
 		m.hallFocus = false
-		return m.clickRowAt(rows, idx, mouse, m.paneColX)
+		return m.clickRowAt(m.paneRows(), idx, mouse, m.paneColX)
 	}
 	return nil
 }
@@ -820,7 +1047,6 @@ func (m *Model) handleTavernClick(msg tea.MouseClickMsg) tea.Cmd {
 // handleTavernWheel scrolls whichever column the pointer is over.
 func (m *Model) handleTavernWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	mouse := msg.Mouse()
-	m.confirmDeleteID = ""
 	delta := 1
 	if mouse.Button == tea.MouseWheelUp {
 		delta = -1

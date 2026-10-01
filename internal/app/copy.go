@@ -259,16 +259,24 @@ func trimURLTail(u string) string {
 // was shortened (so a caller can avoid a needless reseed — and not eat a
 // just-typed trailing space — when nothing changed).
 func (m *Model) shortenBodyLinks(q *model.Quest, text string) (string, bool) {
+	return shortenLinksInto(&q.BodyLinks, text)
+}
+
+// shortenLinksInto replaces every bare URL in text with a compact display,
+// recording display→full in *links (allocating the map on first use) so the
+// full address stays recoverable. Returns the rewritten text and whether any
+// URL changed. Shared by quest bodies and campaign notes.
+func shortenLinksInto(links *map[string]string, text string) (string, bool) {
 	changed := false
 	out := freeURLRE.ReplaceAllStringFunc(text, func(match string) string {
 		changed = true
 		url := trimURLTail(match)
 		tail := match[len(url):] // punctuation to preserve after the link
 		short := shortenURL(url)
-		if q.BodyLinks == nil {
-			q.BodyLinks = map[string]string{}
+		if *links == nil {
+			*links = map[string]string{}
 		}
-		q.BodyLinks[short] = url
+		(*links)[short] = url
 		return short + tail
 	})
 	return out, changed

@@ -105,7 +105,7 @@ func TestViewQuestDetailRenderSmoke(t *testing.T) {
 	m, q := sigilModel()
 	m.width, m.height = 120, 40
 	m.detailWidthRatio = 0.42
-	m.modal.BodyEditor = m.newBodyEditor("")
+	m.bodyEditor = m.newBodyEditor("")
 	q.Body = []model.BodyLine{{Text: "a line"}}
 
 	for _, name := range []string{"body", "sigil-focused", "renaming"} {
@@ -130,7 +130,7 @@ func TestWheelSigilsViewportOnly(t *testing.T) {
 	m, q := sigilModel()
 	m.width, m.height = 120, 60
 	m.detailWidthRatio = 0.42
-	m.modal.BodyEditor = m.newBodyEditor("")
+	m.bodyEditor = m.newBodyEditor("")
 	q.Body = []model.BodyLine{{Text: "a"}}
 	m.focusBodyX = 60                // sigils pane is x < 60
 	m.sectionMaxScroll["sigils"] = 5 // pretend the pane overflows
