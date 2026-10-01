@@ -1,6 +1,6 @@
 ---
 name: cut-release
-description: Cut and publish a new version of Quests — bump, tag, push, re-hash the release tarball, and update the Homebrew formula in both the code repo and the tap. Use when the user asks to release, ship, publish, or bump the version.
+description: Cut and publish a new version of Quests — confirm the semver bump (major/minor/patch) with the user, then commit, tag, push, re-hash the release tarball, cut the GitHub Release, and update the Homebrew formula in both the code repo and the tap. Use when the user asks to release, ship, publish, or bump the version.
 ---
 
 # Cut a Quests release
@@ -29,7 +29,30 @@ Install line users get: `brew install mawolkmer-dandy/tap/quests`
    cd ~/Repos/questlog && gofmt -l . && go vet ./... && go build ./...
    ```
 2. Confirm `gh auth status` is the **mawolkmer-dandy** account (owns both repos).
-3. Pick the new version `vX.Y.Z` (semver). Ask the user if unsure.
+3. Choose the new version — **always confirm the bump with the user** (see
+   *Choose the version* below). Never pick it yourself.
+
+## Choose the version (always confirm major / minor / patch)
+
+Do not guess the bump — it's the user's call, and it's required before anything
+else. Read the latest tag, compute the three candidates, and ask the user which
+one with `AskUserQuestion` (recommend none). Do **not** proceed until they answer.
+
+```sh
+LATEST=$(git -C ~/Repos/questlog describe --tags --abbrev=0)   # e.g. v2.4.0
+```
+
+From `vMAJOR.MINOR.PATCH`:
+
+| Bump | Next | When |
+|------|------|------|
+| **major** | `v(MAJOR+1).0.0` | breaking changes or a big reshape of the app |
+| **minor** | `vMAJOR.(MINOR+1).0` | new features, backward-compatible |
+| **patch** | `vMAJOR.MINOR.(PATCH+1)` | fixes / polish only, no new features |
+
+Present the three concretely so the choice is unambiguous — e.g. latest
+`v2.4.0` → **major** `v3.0.0` · **minor** `v2.5.0` · **patch** `v2.4.1`. Use the
+chosen `vX.Y.Z` everywhere below.
 
 ## Steps
 
